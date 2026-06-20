@@ -1,0 +1,13 @@
+{
+  "iconDefinitions": {
+    "muten":      { "iconPath": "./muten.svg" },
+    "_file":      { "iconPath": "./file.svg" },
+    "_folder":    { "iconPath": "./folder.svg" },
+    "_folderOpen":{ "iconPath": "./folder-open.svg" }
+  },
+  "file": "_file",
+  "folder": "_folder",
+  "folderExpanded": "_folderOpen",
+  "fileExtensions": { "muten": "muten" },
+  "fileNames": { "app.muten": "muten" }
+}

@@ -1,0 +1,50 @@
+{
+  "name": "muten-lang",
+  "displayName": "Muten (AI-First framework)",
+  "description": "Highlighting, live-linting, autocomplete and file icons for .muten files",
+  "version": "0.0.15",
+  "publisher": "muten",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/muten/muten" },
+  "engines": { "vscode": "^1.60.0" },
+  "categories": ["Programming Languages", "Linters"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:muten"],
+  "contributes": {
+    "configurationDefaults": {
+      "[muten]": {
+        "editor.quickSuggestions": { "other": true, "comments": false, "strings": true },
+        "editor.suggestOnTriggerCharacters": true,
+        "editor.wordBasedSuggestions": "off"
+      }
+    },
+    "languages": [
+      {
+        "id": "muten",
+        "aliases": ["Muten", "muten"],
+        "extensions": [".muten"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "muten",
+        "scopeName": "source.muten",
+        "path": "./syntaxes/muten.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "muten.lint",
+        "title": "Muten: Lint active file"
+      }
+    ],
+    "iconThemes": [
+      {
+        "id": "muten",
+        "label": "Muten",
+        "path": "./icons/muten-icon-theme.json"
+      }
+    ]
+  }
+}

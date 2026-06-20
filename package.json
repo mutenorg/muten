@@ -1,0 +1,42 @@
+{
+  "name": "muten",
+  "version": "0.0.1",
+  "description": "AI-first frontend framework — compiles .screen files to vanilla JS + signals.",
+  "type": "module",
+  "bin": {
+    "muten": "bin/muten.js"
+  },
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "bin",
+    "engine",
+    "build.js",
+    "lint.js",
+    "index.js",
+    "spec",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "ai",
+    "frontend",
+    "framework",
+    "dsl",
+    "signals",
+    "compiler"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/parse.mjs && node test/expr.mjs && node test/diagnostics.mjs && node test/parts.mjs && node test/smoke.mjs",
+    "grammar": "node tools/gen-grammar.mjs",
+    "sync-engine": "node tools/sync-engine.mjs"
+  },
+  "optionalDependencies": {
+    "sass": "^1.101.0"
+  }
+}

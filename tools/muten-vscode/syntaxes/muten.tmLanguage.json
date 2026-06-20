@@ -1,0 +1,115 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Muten",
+  "scopeName": "source.muten",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#decl"
+    },
+    {
+      "include": "#component"
+    },
+    {
+      "include": "#keyword"
+    },
+    {
+      "include": "#modifier"
+    },
+    {
+      "include": "#method"
+    },
+    {
+      "include": "#primitive"
+    },
+    {
+      "include": "#token"
+    },
+    {
+      "include": "#type"
+    },
+    {
+      "include": "#param"
+    },
+    {
+      "include": "#ref"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#operator"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "match": "#.*$",
+      "name": "comment.line.number-sign.muten"
+    },
+    "string": {
+      "name": "string.quoted.double.muten",
+      "begin": "\"",
+      "end": "\""
+    },
+    "decl": {
+      "match": "\\b(screen|entity|part|action)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": {
+          "name": "keyword.control.muten"
+        },
+        "2": {
+          "name": "entity.name.type.muten"
+        }
+      }
+    },
+    "component": {
+      "match": "\\b[A-Z][A-Za-z0-9_]*(?=\\s*\\()",
+      "name": "entity.name.function.muten"
+    },
+    "keyword": {
+      "match": "\\b(screen|entity|state|action|mutates|mock|sources|routes|part|query|when|each|as|and|or|not|contains)\\b",
+      "name": "keyword.control.muten"
+    },
+    "modifier": {
+      "match": "\\b(bind|submit|where|columns|style|inputs|on)\\b",
+      "name": "keyword.other.muten"
+    },
+    "method": {
+      "match": "\\.(push|remove|reset|set)\\b",
+      "name": "support.function.muten"
+    },
+    "primitive": {
+      "match": "\\b(Page|Stack|Text|Image|SearchField|DataTable|RowAction|Button|Form|When|Each|Custom)\\b",
+      "name": "support.class.muten"
+    },
+    "token": {
+      "match": "\\b(surface|muted|bold|padding\\.sm|padding\\.md|padding\\.lg|gap\\.sm|gap\\.md|gap\\.lg|grid|rounded\\.sm|rounded\\.md|rounded\\.lg|shadow\\.sm|shadow\\.md|text\\.sm|text\\.md|text\\.lg)\\b",
+      "name": "support.constant.muten"
+    },
+    "type": {
+      "match": "\\b(text|email|string|number|bool|uuid|list)\\b",
+      "name": "support.type.muten"
+    },
+    "param": {
+      "match": "\\$[A-Za-z_][A-Za-z0-9_]*",
+      "name": "variable.parameter.muten"
+    },
+    "ref": {
+      "match": "@[A-Za-z_][A-Za-z0-9_]*",
+      "name": "variable.other.muten"
+    },
+    "number": {
+      "match": "\\b-?[0-9]+(\\.[0-9]+)?\\b",
+      "name": "constant.numeric.muten"
+    },
+    "operator": {
+      "match": "->|<-|=>|==|\\|",
+      "name": "keyword.operator.muten"
+    }
+  }
+}
