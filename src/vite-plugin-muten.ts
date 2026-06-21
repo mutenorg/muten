@@ -8,7 +8,7 @@
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, basename } from 'node:path';
-import type { Plugin, ResolvedConfig, HmrContext } from 'vite';
+import type { Plugin, ResolvedConfig, HmrContext, ViteDevServer } from 'vite';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { load, loadAllParts } from '#engine/project/load.js';
@@ -22,7 +22,6 @@ import type { IR, Theme, MutenOptions, StoreSlice, PartDef } from '#engine/share
 const RID = 'virtual:muten/runtime';
 const STORE_PREFIX = 'virtual:muten/store/';
 const SHELL = 'virtual:muten/shell';
-const APP = 'virtual:muten/app';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const RUNTIME = readFileSync(join(here, 'runtime.js'), 'utf8'); // the browser runtime, served verbatim
@@ -47,6 +46,37 @@ export default function muten(options: MutenOptions = {}): Plugin {
   let slices: { [domain: string]: IR } = {};
   const storesMeta: { [domain: string]: StoreSlice } = {}; // which members each store exposes (for ref resolution)
   let appIr: IR | undefined;                      // parsed app.muten (shell + routes)
+  let stylesHref: string | null = null;           // the project stylesheet (/src/styles.css|scss), imported by the boot
+
+  // The self-booting entry. index.html imports `/src/app.muten`, and the transform hook below turns
+  // that root into this module: it pulls in the shell, the route→module map (+ guards) and the
+  // project stylesheet, then mounts onto #app. The app needs no hand-written main.js.
+  const buildBoot = (): string => {
+    const guardDomains = new Set<string>();
+    const routes = (appIr?.routes || []).map((r) => {
+      const path = JSON.stringify('/' + r.url.replace(/^\//, ''));
+      const imp = `() => import(${JSON.stringify('/src/pages/' + r.page + '/' + r.page + '.muten')})`;
+      if (r.guard) {
+        const [domain, field] = r.guard.split('.');
+        guardDomains.add(domain);
+        return `  ${path}: { load: ${imp}, guard: () => ${r.guardNeg ? '!' : ''}__store_${domain}.${field}.get(), redirect: ${JSON.stringify(r.redirect)} },`;
+      }
+      return `  ${path}: { load: ${imp} },`;
+    }).join('\n');
+    const guardImports = [...guardDomains].map((domain) => `import * as __store_${domain} from '${STORE_PREFIX}${domain}';`).join('\n');
+    return `import * as __shell from '${SHELL}';
+import { route, injectCss } from '${RID}';
+${stylesHref ? `import ${JSON.stringify(stylesHref)};\n` : ''}${guardImports}
+const routes = {
+${routes}
+};
+const root = document.getElementById('app');
+if (root) {
+  injectCss(__shell.css);
+  const outlet = __shell.mount(root);
+  route(outlet, routes);
+}`;
+  };
 
   return {
     name: 'vite-plugin-muten',
@@ -66,9 +96,13 @@ export default function muten(options: MutenOptions = {}): Plugin {
       if (existsSync(rootFile)) appIr = parse(readFileSync(rootFile, 'utf8'));
       const themeFile = join(appRoot, 'theme.muten');
       if (existsSync(themeFile)) theme = mergeTheme(parse(readFileSync(themeFile, 'utf8')).theme || {});
+      // the project's look: imported by the boot module so the app needs no hand-written entry.
+      for (const name of ['styles.css', 'styles.scss']) {
+        if (existsSync(join(appRoot, 'src', name))) { stylesHref = '/src/' + name; break; }
+      }
     },
 
-    resolveId(id: string) { if (id === RID || id === SHELL || id === APP || id.startsWith(STORE_PREFIX)) return '\0' + id; },
+    resolveId(id: string) { if (id === RID || id === SHELL || id.startsWith(STORE_PREFIX)) return '\0' + id; },
 
     load(id: string) {
       if (id === '\0' + RID) return RUNTIME; // the runtime, served as-is
@@ -86,35 +120,11 @@ export default function muten(options: MutenOptions = {}): Plugin {
         return compileModule(doc, {}, '', {}, {}, { stores: storesMeta, theme });
       }
 
-      if (id === '\0' + APP) { // the router entry: shell + a route→module map (+ guards) + boot
-        const guardDomains = new Set<string>();
-        const routes = (appIr?.routes || []).map((r) => {
-          const path = JSON.stringify('/' + r.url.replace(/^\//, ''));
-          const imp = `() => import(${JSON.stringify('/src/pages/' + r.page + '/' + r.page + '.muten')})`;
-          if (r.guard) {
-            const [domain, field] = r.guard.split('.');
-            guardDomains.add(domain);
-            return `  ${path}: { load: ${imp}, guard: () => ${r.guardNeg ? '!' : ''}__store_${domain}.${field}.get(), redirect: ${JSON.stringify(r.redirect)} },`;
-          }
-          return `  ${path}: { load: ${imp} },`;
-        }).join('\n');
-        const guardImports = [...guardDomains].map((domain) => `import * as __store_${domain} from '${STORE_PREFIX}${domain}';`).join('\n');
-        return `import * as __shell from '${SHELL}';
-import { route, injectCss } from '${RID}';
-${guardImports}
-const routes = {
-${routes}
-};
-export function start(root) {
-  injectCss(__shell.css);
-  const outlet = __shell.mount(root);
-  route(outlet, routes);
-}`;
-      }
     },
 
     async transform(code: string, id: string) {
       if (!id.endsWith('.muten')) return null;
+      if (id.replace(/\\/g, '/').endsWith('/src/app.muten')) return { code: buildBoot(), map: null }; // the root IS the entry
       const loaded = await load(id, parts); // engine load() (parts gathered up front), not the hook above
       const { ok, diagnostics } = validate(loaded.doc, { parts: loaded.partNames, stores: Object.keys(storesMeta), theme });
       if (!ok) throw new Error('muten: ' + diagnostics.map((d) => d.message).join(' · '));
@@ -132,6 +142,21 @@ export function start(root) {
 
     handleHotUpdate(ctx: HmrContext) {
       if (ctx.file.endsWith('.muten') || ctx.file.endsWith('.store')) ctx.server.ws.send({ type: 'full-reload' });
+    },
+
+    // Dev only: Vite won't route a non-JS html entry (/src/app.muten) through `transform` on a direct
+    // browser fetch, so serve the compiled boot for it explicitly. (The production build resolves the
+    // same entry via `transform` + Rollup.) transformRequest runs the full pipeline, so the boot's
+    // imports come back already rewritten to dev URLs.
+    configureServer(server: ViteDevServer) {
+      server.middlewares.use((req, res, next) => {
+        if ((req.url || '').split('?')[0] !== '/src/app.muten') { next(); return; }
+        server.transformRequest('/src/app.muten').then((result) => {
+          if (!result) { next(); return; }
+          res.setHeader('Content-Type', 'text/javascript');
+          res.end(result.code);
+        }, next);
+      });
     },
   };
 }
