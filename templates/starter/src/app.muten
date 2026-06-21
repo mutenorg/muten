@@ -1,6 +1,0 @@
-# The app ROOT — the single source of truth the AI reads first.
-# `routes` maps a URL to a page (the folder under src/pages/). Add a persistent navbar/footer by
-# wrapping a `shell { … slot … }` around it; a `slot`-only shell (the default) just mounts the page.
-routes {
-  / -> home
-}

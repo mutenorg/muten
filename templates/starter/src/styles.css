@@ -1,9 +1,0 @@
-/* Your look. Muten ships STRUCTURE (semantic tags) + LAYOUT (style tokens); the LOOK lives here,
-   referenced from .muten via class("…"). This base reset is all a fresh app needs to start. */
-* { box-sizing: border-box; }
-body { margin: 0; font: 15px/1.55 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; color: #111; }
-h1, h2, h3, h4, h5, h6, p { margin: 0; }
-h1 { font-size: 32px; font-weight: 700; letter-spacing: -.02em; }
-.stack { display: flex; flex-direction: column; } /* the class Stack and column layouts emit */
-img { max-width: 100%; display: block; }
-a { color: inherit; text-decoration: none; }

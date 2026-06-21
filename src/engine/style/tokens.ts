@@ -1,7 +1,7 @@
-// Muten styling = LAYOUT + TYPOGRAPHY VOCABULARY only. The engine owns the *vocabulary* (which
-// token families/atoms exist and which CSS property each maps to) — this is the LANGUAGE and the
-// single source of truth of what Muten accepts. It owns NO style VALUES: the scale (md=16px…),
-// breakpoint pixels and the reset BASE all come from the PROJECT's theme (theme.muten).
+// Muten styling = LAYOUT + TYPOGRAPHY VOCABULARY only. This domain owns the *vocabulary* (which
+// token families/atoms exist and the CSS each maps to) — the engine's single source of truth for
+// what styling it accepts. It owns NO values: the scale (md=16px…) and breakpoint pixels come from
+// the project's theme.muten, and the reset/base lives in the project's stylesheet.
 // So: vocabulary = engine; values + look = project.
 
 import type { Theme, ThemeScale, FamilyFn } from '#engine/shared/types.js';

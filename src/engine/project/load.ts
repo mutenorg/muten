@@ -1,4 +1,4 @@
-// Loader: from a .muten page to everything needed to compile.
+// load — a .muten page → everything needed to compile it (the project-aware loader).
 //   - parse the .muten -> IR
 //   - gather parts: SHARED (src/parts/) + LOCAL (pages/<route>/parts/) + inline
 //   - COMPOSE (inline the part instances) -> tree of primitives

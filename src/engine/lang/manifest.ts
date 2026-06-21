@@ -1,9 +1,9 @@
-// Language manifest — the SINGLE source of the vocabulary AND its documentation.
+// manifest — the SINGLE source of the language's vocabulary AND its documentation.
 //
-// Consulted by: parse (string-props + modifiers), validate (valid types/ops),
-// the linter (lint.js) and the editor autocomplete + hovers (tools/screen-vscode).
-// Each primitive carries a one-line `doc` + a completion `snippet`. Adding/changing the
-// language = edit here (and its render in compile.js), then regenerate the highlight.
+// Consulted by: parse (positional string-props + which primitives interpolate), validate (required
+// props, known types/ops), and the VS Code extension's autocomplete + hovers. Each primitive carries
+// a one-line `doc` + a completion `snippet`, so the surface and its help never drift apart. Adding or
+// changing the language starts HERE (and its codegen in compile/), then re-run the highlight generator.
 
 import { SUGGESTED, resolveToken } from '#engine/style/tokens.js';
 import type { Primitive } from '#engine/shared/types.js';

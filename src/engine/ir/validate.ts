@@ -1,8 +1,9 @@
-// Flat-IR (doc) validator — emits STRUCTURED DIAGNOSTICS.
+// validate — structured diagnostics over the flat Doc (the validation stage of the pipeline).
 //
-// Since it knows the whole vocabulary (types, tokens, state, ops, parts) AND the
-// scope of `each` items, every error is specific and proposes the closest candidate
-// ("did you mean ...?"). Editor/AI consumable. Runs on the same doc that gets compiled.
+// Because it knows the WHOLE vocabulary (types, tokens, state, ops, parts) and the scope of each
+// `each` item, every error is specific and proposes the closest candidate ("did you mean …?"). The
+// same Doc that compiles is the one validated, so the editor and the build never disagree. Consumed
+// by the live linter, the CLI's `muten lint`, and the Vite plugin.
 
 import { resolveToken, SUGGESTED, defaultTheme, isKnownTokenShape } from '#engine/style/tokens.js';
 import { diag, closest } from '#engine/shared/diagnostics.js';
@@ -33,7 +34,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   const constNames = new Set(Object.keys(doc.consts || {})); // compile-time constants
   const nodes = doc.nodes || {};
 
-  // state types: a `list` must declare its element type (north star: know what's inside)
+  // ── state types: a `list` must declare its element (the north star — always know what's inside) ──
   const entityNames = Object.keys(doc.entities || {});
   for (const [name, def] of Object.entries(doc.state || {})) {
     const t = def.type;
@@ -67,6 +68,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     }
   };
 
+  // ── the node tree: known type · required props · valid style tokens · resolvable expression refs ──
   const seen = new Set<string>();
   const walk = (id: string, scope: Set<string>): void => {
     const n = nodes[id];
@@ -125,7 +127,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   if (doc.rootId) walk(doc.rootId, new Set());
   else if (ctx.kind !== 'store') D.push(diag('no-root', 'the doc is missing a rootId'));
 
-  // .store slice: validate each `get` expression's refs against the slice's own state
+  // ── .store gets: each `get` expression resolves against the slice's own state ──
   if (ctx.kind === 'store') {
     for (const [name, expr] of Object.entries(doc.gets || {})) {
       for (const ref of collectRefs(expr)) {
@@ -135,7 +137,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     }
   }
 
-  // Actions: the body may only mutate what's declared in `mutates`, with known ops.
+  // ── actions: a body may only mutate what `mutates` declares, with known ops ──
   for (const [name, a] of Object.entries(doc.actions || {})) {
     const declared = new Set(a.mutates || []);
     const checkStmt = (st: Stmt): void => {

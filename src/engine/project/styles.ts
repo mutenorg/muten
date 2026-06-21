@@ -1,11 +1,10 @@
-// The PROJECT's stylesheet for a screen — the escape hatch / bring-your-own-theme.
+// The PROJECT's stylesheet for a page — the bring-your-own-look escape hatch.
 //
-// Convention: COLOCATED next to the page.screen, same name, different extension.
-//   .../users/users.screen  →  .../users/users.scss  (or .css)
+// Convention: COLOCATED next to the page, same name, different extension:
+//   .../home/home.muten  →  .../home/home.css  (or home.scss)
 //
-// The engine imposes no theme: this is injected AFTER the engine CSS and wins via cascade.
-//   .css  → zero-dependency (read and injected as-is)
-//   .scss → needs the `sass` package (OPTIONAL dependency: only if you use .scss)
+// muten imposes no theme. This CSS is injected AFTER the engine's token CSS, so it wins via the
+// cascade. `.css` is zero-dependency; `.scss` needs the OPTIONAL `sass` package (only if you use it).
 
 import { readFileSync, existsSync } from 'node:fs';
 import { basename } from 'node:path';

@@ -1,7 +1,7 @@
 {
   "name": "muten",
   "version": "0.0.1",
-  "description": "AI-first frontend framework — compiles .screen files to vanilla JS + signals.",
+  "description": "AI-first frontend framework — compiles .muten files to vanilla JS + signals.",
   "type": "module",
   "bin": {
     "muten": "./dist/bin/muten.js"
@@ -17,7 +17,8 @@
   "files": [
     "dist",
     "spec",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

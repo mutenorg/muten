@@ -1,9 +1,0 @@
-# A page = one .muten file; its folder name (home) is the route target from app.muten.
-# `Page` is the <main> landmark; lay it out with style() tokens, skin it with class("…").
-screen home
-
-Page style(padding.xl, gap.md) {
-  Title "Hello, Muten"
-  Text "Edit src/pages/home/home.muten to build your first page."
-  Text "Add routes in src/app.muten; define your token scale in theme.muten."
-}

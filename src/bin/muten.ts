@@ -7,12 +7,11 @@ import { buildApp } from '../build.js';
 import { lintApp } from '../lint.js';
 
 const [cmd, dir] = process.argv.slice(2);
-const appRoot = resolve(dir || process.cwd());
 
 try {
-  if (cmd === 'build') await buildApp(appRoot);
-  else if (cmd === 'lint') process.exit((await lintApp(appRoot)) ? 1 : 0);
-  else { console.error('usage: muten <build|lint> [app-dir]   (default: current directory)'); process.exit(1); }
+  if (cmd === 'build') await buildApp(resolve(dir || process.cwd()));               // compile → dist/
+  else if (cmd === 'lint') process.exit((await lintApp(resolve(dir || process.cwd()))) ? 1 : 0);
+  else { console.error('usage: muten <build|lint> [dir]   (default: the current directory)\nto create an app:  npm create muten@latest <dir>'); process.exit(1); }
 } catch (e) {
   console.error('✖ ' + (e instanceof Error ? e.message : String(e)));
   process.exit(1);
