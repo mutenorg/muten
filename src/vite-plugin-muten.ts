@@ -5,13 +5,13 @@
 //   muten()                → stores on if any `.store` exists; shell + router from app.muten
 //   muten({ store: false}) → stores off
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, basename } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { Plugin, ResolvedConfig, HmrContext, ViteDevServer } from 'vite';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
-import { load, loadAllParts } from '#engine/project/load.js';
+import { load, loadAllParts, findStores } from '#engine/project/load.js';
 import { validate } from '#engine/ir/validate.js';
 import { compileModule, compileStore } from '#engine/compile/compile.js';
 import { mergeTheme } from '#engine/style/tokens.js';
@@ -25,18 +25,6 @@ const SHELL = 'virtual:muten/shell';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const RUNTIME = readFileSync(join(here, 'runtime.js'), 'utf8'); // the browser runtime, served verbatim
-
-// every *.store file under a directory → its parsed IR, keyed by domain name.
-function findStores(dir: string, out: { [domain: string]: IR } = {}): { [domain: string]: IR } {
-  let entries;
-  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
-  for (const entry of entries) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) findStores(full, out);
-    else if (entry.name.endsWith('.store')) out[basename(entry.name, '.store')] = parse(readFileSync(full, 'utf8'));
-  }
-  return out;
-}
 
 export default function muten(options: MutenOptions = {}): Plugin {
   const storeEnabled = options.store !== false;

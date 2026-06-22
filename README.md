@@ -50,9 +50,15 @@ routes {
 ## CLI
 
 ```sh
-muten build [dir]   # compile → ./dist/<route>/index.html (+ dist/app.map.json, the app graph)
-muten lint  [dir]   # parse + validate every page, no compile
+muten build [dir]            # compile → ./dist/<route>/index.html (+ app.map.json)
+muten check [dir] [--json]   # parse + validate every page, no compile — the deterministic ORACLE
+                             #   --json → structured diagnostics (code + loc + "did you mean…?") in ms, no browser
+muten map   [dir] [--json]   # emit app.map.json COLD (no build) — the app graph an AI reads FIRST
 ```
+
+`check` and `map` are the AI-first feedback loop: an agent asks the compiler "is this valid, and what
+did I mean?" (`check --json`) and "what's the whole app?" (`map`) without running a browser. `lint` is an
+alias of `check`.
 
 `build`/`lint` default to the current directory; pass a path to target another. The `muten` bin ships
 with the app (it's a dependency). To scaffold a *new* app, use `npm create muten@latest` (the separate

@@ -10,14 +10,27 @@
 // is a next step.)
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { resolveStyles } from '#engine/project/styles.js';
 import { compose } from '#engine/ir/compose.js';
-import type { PartDef, Value, LoadResult } from '#engine/shared/types.js';
+import type { PartDef, Value, LoadResult, IR } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
+
+// every *.store file under a directory → its parsed IR, keyed by domain name (the app's store slices).
+// Shared by the Vite plugin, the linter and `muten map` so store refs resolve everywhere the engine runs.
+export function findStores(dir: string, out: { [domain: string]: IR } = {}): { [domain: string]: IR } {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) findStores(full, out);
+    else if (entry.name.endsWith('.store')) out[basename(entry.name, '.store')] = parse(readFileSync(full, 'utf8'));
+  }
+  return out;
+}
 
 // Each part file contributes its parts + its state/entities/mock + its colocated .scss.
 export async function loadParts(dir: string): Promise<Parts> {

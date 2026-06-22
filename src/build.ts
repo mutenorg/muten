@@ -6,7 +6,7 @@ import { join, relative } from 'node:path';
 import { Nt, Fmt } from '#engine/shared/vocab.js';
 import { readRoutes, readApi } from '#engine/project/routes.js';
 import { renderSsrBody, fetchSources } from '#engine/project/ssr.js';
-import { sourceRequest } from '#engine/shared/source.js';
+import { routeEntry } from '#engine/project/map.js';
 import { load, loadAllParts } from '#engine/project/load.js';
 import { validate } from '#engine/ir/validate.js';
 import { compile } from '#engine/compile/compile.js';
@@ -75,12 +75,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist')):
     console.log(`✓ /${page.route}  →  ${rel(join(pageOut, 'index.html'))}  (${Object.keys(doc.nodes).length} nodes${ssrd ? ', SSR' : csr.includes('<script') ? ', CSR' : ', static'}${styles.from ? ', + ' + styles.from : ''})`);
     built.push(page.route);
 
-    appMap.routes['/' + page.route] = {
-      file: rel(page.screenPath),
-      models: Object.keys(doc.entities),
-      state: Object.fromEntries(Object.entries(doc.state).map(([name, def]) => [name, typeof def.source === 'string' ? def.source : (def.initial ?? null)])),
-      sources: Object.fromEntries(Object.entries(sources).map(([name, src]) => [name, sourceRequest(src).url])),
-    };
+    appMap.routes['/' + page.route] = routeEntry(rel(page.screenPath), doc, sources);
   }
 
   // the app graph + a route index — but only when no root route ("/") already wrote dist/index.html,
