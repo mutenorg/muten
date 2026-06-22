@@ -1,0 +1,105 @@
+# muten.gbnf — GENERATED from @muten/core by scripts/gen-gbnf.mjs. DO NOT EDIT BY HAND.
+# A constrained-decoding grammar for ONE screen/page. Covers screen/state/store/const/get/entity/
+# meta/use/param/action + the node tree + expressions. (app.muten: routes/shell/api/sources/theme/part
+# are a separate file — out of scope for v1.)
+
+root ::= ws "screen" sp ident ws decls node ws
+
+decls ::= (decl ws)*
+decl ::= use-decl | param-decl | const-decl | entity-decl | state-decl | store-decl | get-decl | meta-decl | action-decl
+
+use-decl    ::= "use" sp ident (ws "," ws ident)* sp "from" sp string
+param-decl  ::= "param" sp ident
+const-decl  ::= "const" sp ident ws "=" ws scalar
+entity-decl ::= "entity" sp ident ws "{" ws (field ws)* "}"
+field       ::= ident sp ident (ws "|" ws ident)* (sp constraint)*
+constraint  ::= "required" | ("min" | "max") ws ":" ws number
+state-decl  ::= "state" ws "{" ws (statevar ws)* "}"
+store-decl  ::= "store" ws "{" ws (statevar ws)* "}"
+statevar    ::= ident ws "=" ws stateinit ws ":" ws type
+stateinit   ::= "query" sp ident | value
+type        ::= ident ("<" ident ">")?
+get-decl    ::= "get" sp ident ws "=" ws expr
+meta-decl   ::= "meta" ws "{" ws (ident sp string ws)* "}"
+action-decl ::= "action" sp ident mutates? input? ws actionbody
+mutates     ::= sp "mutates" sp ident (ws "," ws ident)*
+input       ::= ws "<-" ws ident
+actionbody  ::= "{" ws (stmt ws)* "}"
+stmt        ::= ifstmt | requeststmt | callstmt
+ifstmt      ::= "if" sp expr ws actionbody (ws "else" ws actionbody)?
+requeststmt ::= ("post" | "put" | "delete") sp string (sp "body" sp expr)?
+callstmt    ::= ident "." actionop "(" ws callargs ws ")"
+actionop    ::= "push" | "remove" | "reset" | "set" | "create" | "update" | "delete" | "refetch"
+callargs    ::= refetcharg (ws "," ws refetcharg)* | predarg | expr | ""
+refetcharg  ::= ident ws ":" ws expr
+predarg     ::= ident ws "=>" ws expr
+
+node       ::= whennode | eachnode | linknode | actionnode | customnode | plainnode
+whennode   ::= "when" sp expr ws block
+eachnode   ::= "each" sp expr sp "as" sp ident ws block
+block      ::= "{" ws (node ws)* "}"
+linknode   ::= "Link" (sp (commonpart | "->" ws path))* (ws block)?
+actionnode ::= ("RowAction" | "Button") (sp (commonpart | actionarrow))* (ws block)?
+actionarrow ::= "->" ws dotted (ws "(" ws expr? ws ")")?
+customnode ::= "Custom" sp ident (sp modifier)*
+plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Text" | "Title" | "Span" | "Image" | "SearchField" | "DataTable" | "Form" | "slot") (sp commonpart)* (ws block)?
+commonpart ::= string | ref | level | modifier
+level      ::= "h" [1-6]
+
+modifier   ::= stylemod | classmod | bindmod | submitmod | wheremod | columnsmod | altmod | inputsmod | onmod
+stylemod   ::= "style" ws "(" ws styletoken (ws "," ws styletoken)* ws ")"
+classmod   ::= "class" ws "(" ws classitem (ws "," ws classitem)* ws ")"
+classitem  ::= (string | ident) (sp "when" sp expr)?
+bindmod    ::= "bind" sp (ref | dotted)
+submitmod  ::= "submit" sp dotted
+wheremod   ::= "where" ws "(" ws clause (ws "," ws clause)* ws ")"
+clause     ::= dotted ws cmpop ws (ref | value)
+columnsmod ::= "columns" ws "(" ws ident (ws "," ws ident)* ws ")"
+altmod     ::= "alt" sp string
+inputsmod  ::= "inputs" ws "(" ws argpairs ws ")"
+onmod      ::= "on" ws "(" ws argpairs ws ")"
+argpairs   ::= argpair (ws "," ws argpair)*
+argpair    ::= ident ws ":" ws argval
+argval     ::= string | number | ref | dotted
+
+styletoken ::= (breakpoint ":")? (atom | family "." tokenmod)
+breakpoint ::= "sm" | "md" | "lg" | "xl"
+atom       ::= "row" | "column" | "wrap" | "grid" | "grow" | "center" | "between" | "bold" | "italic"
+family     ::= "gap" | "padding" | "margin" | "cols" | "rows" | "text" | "weight" | "leading" | "align" | "justify" | "items" | "width" | "height"
+tokenmod   ::= ("x." | "y.")? scaleseg
+scaleseg   ::= ident | number
+
+path    ::= ("/" pathseg?)+
+pathseg ::= ident | "{" ws expr ws "}"
+
+# expressions — the parser's precedence ladder (no left recursion: iterate, don't self-reference first)
+expr      ::= ternary
+ternary   ::= orexpr (ws "?" ws ternary ws ":" ws ternary)?
+orexpr    ::= andexpr (sp "or" sp andexpr)*
+andexpr   ::= cmpexpr (sp "and" sp cmpexpr)*
+cmpexpr   ::= addexpr (ws cmpop ws addexpr)*
+cmpop     ::= "==" | "!=" | "<=" | ">=" | "<" | ">" | "contains"
+addexpr   ::= mulexpr (ws ("+" | "-") ws mulexpr)*
+mulexpr   ::= unary (ws ("*" | "/") ws unary)*
+unary     ::= ("not" sp)? primary
+primary   ::= "(" ws ternary ws ")" | string | number | bool | "null" | callorref
+callorref ::= dotted (ws "(" ws (ternary (ws "," ws ternary)*)? ws ")")?
+
+value   ::= array | object | scalar
+array   ::= "[" ws (value (ws "," ws value)*)? ws "]"
+object  ::= "{" ws (objpair (ws "," ws objpair)*)? ws "}"
+objpair ::= (ident | string) ws ":" ws value
+scalar  ::= string | number | bool | "null" | ident
+
+bool   ::= "true" | "false"
+ref    ::= "@" ident ("." ident)*
+dotted ::= "$"? ident ("." ident)*
+ident  ::= [a-zA-Z_] [a-zA-Z0-9_]*
+number ::= [0-9]+ ("." [0-9]+)?
+string ::= "\"" [^"]* "\""
+
+# whitespace — NO comments in the generation grammar on purpose: a weak model degenerates into
+# comment spam (free whitespace) and never closes the page. Humans add comments by hand after.
+ws     ::= wschar*
+sp     ::= wschar+
+wschar ::= [ \t\r\n]
