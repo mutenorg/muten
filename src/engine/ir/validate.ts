@@ -116,6 +116,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     const interps: StringPropValue[] = [];
     if ((n.type === Nt.Text || n.type === Nt.Title || n.type === Nt.Span) && props.value) interps.push(props.value);
     if (n.type === Nt.Image) { if (props.src) interps.push(props.src); if (props.alt) interps.push(props.alt); }
+    if (n.type === Nt.Link && props.to) interps.push(props.to);
     for (const ip of interps) {
       if (typeof ip === 'object' && 'kind' in ip && ip.kind === Ek.Interp) {
         for (const part of ip.parts) if (typeof part !== 'string') checkExpr(part, n, scope);

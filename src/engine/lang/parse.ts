@@ -12,9 +12,9 @@
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { Grammar } from '#engine/lang/grammar.js';
-import { Tk, Pn, Kw, Nt, Mod, StOp } from '#engine/shared/vocab.js';
+import { Tk, Pn, Kw, Nt, Mod, StOp, Ek } from '#engine/shared/vocab.js';
 import type {
-  IR, IRNode, NodeProps, StringPropName, Stmt, IfStmt, Expr, Value, Level,
+  IR, IRNode, NodeProps, StringPropName, Stmt, IfStmt, Expr, Interp, Value, Level,
   Entity, FieldType, EntityConstraints, FieldConstraint,
   StateDef, Route, PartParam, ArgValue, ArgMap, ThemeScale,
 } from '#engine/shared/types.js';
@@ -479,13 +479,21 @@ export class Parser extends Grammar {
 
   // a URL path /seg/seg — an ident attaches to a slash ONLY if glued to it, so `-> /` (root) followed by
   // a sibling node doesn't greedily swallow the node's name into the path.
-  private parsePath(): string {
+  private parsePath(): string | Interp {
+    const parts: Array<string | Expr> = [];
     let url = '';
     while (this.at(Tk.Punct, Pn.Slash)) {
       const slash = this.next(); url += '/';
-      if (this.at(Tk.Ident) && this.peek().pos === slash.pos + 1) url += this.eat(Tk.Ident).v;
+      if (this.at(Tk.Punct, Pn.BraceL) && this.peek().pos === slash.pos + 1) {  // `/{expr}` → a dynamic segment
+        parts.push(url); url = '';
+        this.next(); parts.push(this.parseExpr()); this.eat(Tk.Punct, Pn.BraceR);
+      } else if (this.at(Tk.Ident) && this.peek().pos === slash.pos + 1) {
+        url += this.eat(Tk.Ident).v;
+      }
     }
-    return url;
+    if (!parts.length) return url;                                              // fully static → plain string (unchanged)
+    if (url) parts.push(url);
+    return { kind: Ek.Interp, parts };
   }
 
   // like parsePath, but stops at end-of-line — a route guard's `else /redirect` can't eat the next route.

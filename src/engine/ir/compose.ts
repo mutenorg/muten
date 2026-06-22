@@ -55,7 +55,7 @@ function subProps(props: NodeProps, args: ArgMap): NodeProps {
   if (props.action !== undefined) out.action = refText(props.action, args); // action/submit names: $onSave
   if (props.submit !== undefined) out.submit = refText(props.submit, args);
   if (props.bind !== undefined) out.bind = refText(props.bind, args);
-  if (props.to !== undefined) out.to = refText(props.to, args);
+  if (props.to !== undefined) out.to = typeof props.to === 'string' ? props.to : subInterp(props.to, args);
   if (props.inputs !== undefined) out.inputs = subArgs(props.inputs, args);
   if (props.on !== undefined) out.on = subArgs(props.on, args);
   return out;

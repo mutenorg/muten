@@ -324,7 +324,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Link: { // client-side navigation → <a href="/route"> (the history router intercepts the click)
         lines.push(`const el_${id} = document.createElement('a');`);
         lines.push(`el_${id}.className = ${JSON.stringify(classFor('link', p))};`);
-        lines.push(`el_${id}.href = ${JSON.stringify(p.to || '/')};`);
+        genInterpAttr(id, 'href', p.to ?? '/');  // static path or interpolated (`/product/{p.id}`)
         if (n.children && n.children.length) genChildren(id, `el_${id}`);          // children ⇒ a clickable card that navigates
         else if (p.label !== undefined) genInterpAttr(id, 'textContent', p.label);
         genDynamics(id, p);
@@ -356,7 +356,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     if ((doc.params || []).length) return false;  // a param page needs mount(app, params) — never the static path
     const reactiveType = new Set<string>([Nt.When, Nt.Each, Nt.Custom, Nt.Form, Nt.SearchField, Nt.DataTable, Nt.Slot]);
     const reactiveProp: Array<keyof NodeProps> = ['action', 'bind', 'submit', 'on', 'inputs', 'data'];
-    const interpKeys: Array<keyof NodeProps> = ['value', 'src', 'alt', 'label'];
+    const interpKeys: Array<keyof NodeProps> = ['value', 'src', 'alt', 'label', 'to'];
     for (const id of Object.keys(nodes)) {
       const n = nodes[id]; const p = n.props || {};
       if (reactiveType.has(n.type)) return false;
@@ -379,7 +379,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Span: return `<span${cls('span')}>${escHtml(strOf(p.value))}</span>`;
       case Nt.Title: { const lvl = p.level || 'h1'; return `<${lvl}${cls('title')}>${escHtml(strOf(p.value))}</${lvl}>`; }
       case Nt.Image: return `<img${cls('image')} src="${escAttr(strOf(p.src))}" alt="${escAttr(strOf(p.alt))}">`;
-      case Nt.Link: return `<a${cls('link')} href="${escAttr(p.to || '/')}">${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</a>`;
+      case Nt.Link: return `<a${cls('link')} href="${escAttr(strOf(p.to) || '/')}">${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</a>`;
       case Nt.Button: return `<button${cls('button')}>${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</button>`;
       default: return '';
     }

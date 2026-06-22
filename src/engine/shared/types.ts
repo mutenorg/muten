@@ -218,7 +218,7 @@ export interface NodeProps {
   level?: Level;
   component?: string;
   data?: string;
-  to?: string;
+  to?: string | Interp;  // a route path; interpolated (`/product/{p.id}`) for dynamic navigation
   action?: string;
   arg?: Expr;
   bind?: string;

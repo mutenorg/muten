@@ -70,7 +70,7 @@ await new Promise((r) => setTimeout(r, 600));
 
 // ── assertions ──
 let failures = 0;
-const tbody = registry.find((el) => '__rows' in el);
+const tbody = registry.find((el) => el.tag === 'tbody'); // not just any el with __rows — app gets it from clear-on-boot
 const search = registry.find((el) => el.className === 'search');
 const form = registry.find((el) => el.handlers.submit);
 const assert = (label, got, want) => {
