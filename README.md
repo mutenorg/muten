@@ -37,13 +37,13 @@ action add mutates products, draft <- p {
 }
 
 Page style(column, gap.md) {
-  Form bind @draft submit add "Add product"
+  Form bind(draft) submit(add) "Add product"
 
-  each products.sortDesc(p => p.price) as p {       # render the list, sorted
+  each products.sortDesc by price as p {             # render the list, sorted
     Text "{p.name} - ${p.price}"
   }
 
-  Text "Total: ${products.sum(p => p.price)}"        # a live aggregate, no JS
+  Text "Total: ${products.sum by price}"             # a live aggregate, no JS
 }
 ```
 
@@ -99,11 +99,21 @@ that needs the full React ecosystem, and it doesn't pretend to be.
 | **State** | local `state` · app-global `store` · derived `get` · `action`s with `if/else` · fine-grained signals. A page action can **call a store action** (`cart.add(d)  draft.reset()`): store + local work in one handler |
 | **Lists** | bounded ops, no raw `map`/`reduce`: inline objects (`push({…})`) · in-place `patch` · filtered `each…where` · aggregates `sum`/`count`/`avg`/`min`/`max` · `sort`/`sortDesc` |
 | **Forms** | a `Form` auto-built from an entity, one input per field: `text` · `number` (coerced) · `email` · `bool` (checkbox) · `enum` (select), with built-in validation |
-| **Data** | `query` states over `sources` (full HTTP: method, headers, body, nested `at`) · one `api` block (named multi-backend clients) · optimistic CRUD (`create`/`update`/`delete` + `.pending`/`.error`) · `refetch(q: …, page: …)` · a `post`/`put`/`delete` escape for non-REST |
+| **Data** | `query` states over `sources` (full HTTP: method, headers, body, nested `at`) · one `api` block (named multi-backend clients) · optimistic CRUD (`create`/`update`/`delete` + `.pending`/`.error`) · `refetch(q: …, page: …)` · **`query x live`** (WebSocket real-time: the server pushes, only changed rows re-render) · a `post`/`put`/`delete` escape for non-REST |
 | **Routing** | real-path URLs · params (`/product/:id` → `param id`) · route guards · a `/404` catch-all |
 | **SEO / SSR** | `muten build` pre-renders every route to real HTML (static pages ship zero JS; data pages fetched at build) · per-page `meta { title … description … }` with `og:*` auto-derived |
-| **Interop** (lowest tier first) | `class()` for native HTML + CSS libs · `Custom` for vanilla-JS libs (charts, maps, pickers) · `use fmt from "./lib.ts"` for JS logic · Svelte/React **islands** for a real framework component |
+| **Interop** (lowest tier first) | `class()` for native HTML + CSS libs · `Custom` for vanilla-JS libs (charts, maps, pickers) · `use fmt from "./lib.ts"` for JS logic |
 | **AI-native** | `lint == build` · one source of truth per concept · the full language reference ships in every scaffolded app under `.claude/` (an AGENTS guide + a Claude skill) |
+
+## Reactivity & reconciliation
+
+muten is **Solid's fine-grained signals + Svelte's compile-to-direct-DOM**, with **no virtual DOM**:
+
+- **Reads subscribe, writes notify.** Each `{count}`, `class(active when x)`, `when`, `each` compiles to its own tiny effect that reads exactly the signals it needs - when one changes, only that spot updates, never a re-render of the tree.
+- **Lists reconcile by `id`** (never by index): `each`/`DataTable` keep a per-row signal, so on new data only the rows whose fields changed touch the DOM (the rest are reused or moved in place), and removed rows dispose their effects - no leaks, no zombies. Focus, scroll and input survive live updates.
+- **Updates batch** into one microtask, the way Solid does: a burst of writes in a tick re-renders each spot **once**, not per write - so a real-time feed (a `live` socket) costs one render per frame, not one per message.
+
+No diffing, no virtual-DOM memory, no framework interpreter to ship. That is what keeps muten fast as apps grow; for *huge* lists you still virtualize (render only the visible rows) and send server-side deltas, exactly as you would in any framework.
 
 ## How muten couples with the rest of the web - three tiers
 
@@ -115,24 +125,20 @@ right tier, and the compiler still checks the seam. Reach for the **lowest tier 
 |---|---|---|---|
 | **1 · Pure muten** | the declarative 80% - pages, routing (params, guards, `/404`), `state`/`store`/`get`, the **list toolkit**, `Form` (+validation), `query` over REST, SSG + SEO | a whole **CRUD / SaaS / catalog / dashboard / content** app | **zero extra deps** |
 | **2 · muten + the platform** | native HTML + CSS libs via `class()`, **vanilla JS via `Custom`**, JS logic via `use … from "./lib.ts"` | `<dialog>`, Tailwind/DaisyUI, chart.js, Leaflet, flatpickr, Quill, zod, date-fns | a JS dep - **no framework runtime** |
-| **3 · Svelte / React island** | a real framework component used as a node - props ↓, events ↑ | **shadcn/ui**, a React-only lib (no native/vanilla equivalent) | ships that framework's runtime (lazy, code-split) |
 
-Almost every "hard widget" lands at **tier 2, without React**; tier 3 is the narrow last resort, not the default.
+Almost every "hard widget" lands at **tier 2**. The language stays small by design; anything beyond pure muten + platform escapes lives in ordinary JS.
 
-> "Not expressible in pure muten" usually means **tier 2 (platform)**, rarely **tier 3 (a framework component)** -
-> and every escape is *bounded*: the oracle still checks the border, so the language never grows into a UI kit.
+**Why the escapes stay safe.** The compiler validates the *seam* - the `state` props and `action` callbacks
+crossing into a `Custom`, and the call site of a `use` function (an undeclared one is a `check` error). So
+coupling in chart.js or zod never costs you the oracle on the muten side.
 
-**Why the escapes stay safe.** The compiler validates the *seam* - the `@state` props and `action` callbacks
-crossing into a `Custom`/island, and the call site of a `use` function (an undeclared one is a `check` error). So
-coupling in chart.js, zod, or a shadcn island never costs you the oracle on the muten side.
-
-**Deploy - the honest caveat.** A `use` function or an island ships real JS that the static `muten build` does
+**Deploy - the honest caveat.** A `use` function ships real JS that the static `muten build` does
 **not** bundle:
 
 | Your app uses… | Deploy with |
 |---|---|
 | Pure muten, static content | `muten build` (zero-JS HTML) - or `vite build` |
-| `use` JS functions, islands, or shared cross-page state | **`vite build`** (it bundles them; the static build doesn't) |
+| `use` JS functions or shared cross-page state | **`vite build`** (it bundles them; the static build doesn't) |
 
 `npm run dev` runs every tier regardless - this only affects the production *build*.
 
@@ -229,53 +235,16 @@ muten imposes no theme. A page lays itself out with `style(…)` tokens (analyza
 `theme.muten`) and skins itself via `class("…")` (your CSS / Tailwind / anything). For behavior the
 primitives can't express, drop to a `Custom` component (`src/components/<Name>.js`).
 
-## Islands - Svelte & React
-
-When a page needs a genuinely interactive widget or a framework UI lib muten can't express, mount a real
-Svelte/React component as an **island**. The `svelte:` / `react:` prefix on `use … from` is the only marker;
-the component file is plain Svelte/React and owns its own tooling.
-
-```
-screen home
-
-use Counter from "svelte:./Counter.svelte"   # a Svelte island
-use Likes   from "react:./Likes.jsx"          # a React island
-
-state { total = 10 : number }
-action setTotal mutates total <- n { total.set(n) }
-
-Page style(padding.xl, gap.md) {
-  Counter(start: @total, onChange: setTotal)               # props ↓ as signals, events ↑ to actions
-  Likes(start: @total, onLike: setTotal) client:visible    # code-split, hydrated when scrolled into view
-  Text "muten state ← islands: {total}"
-}
-```
-
-`prop: @state` sends a value **down** (a React island re-renders when the signal changes; Svelte mounts once);
-`onX: action` sends a callback that fires a muten action - that's how an island writes **back** to muten state.
-No `client:` directive = hydrate on load. Add the framework's Vite plugin next to `muten()`:
-
-```js
-// vite.config.mjs
-import muten from '@muten/core/vite-plugin-muten.js';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
-import react from '@vitejs/plugin-react';
-export default { plugins: [muten(), svelte(), react()] };
-```
-
 ## Status & roadmap (honest)
 
 **Pre-1.0 - the core is solid, the edges are young.** Build real apps with it; don't bet a critical
 production system on it yet (small ecosystem, one maintainer, not yet battle-tested).
 
 **Solid today:** the language + compiler, the `check` / `build` / `map` CLI + oracle, the Vite plugin + dev
-server + HMR, the VS Code extension (live-lint + autocomplete), Svelte & React islands.
+server + HMR, the VS Code extension (live-lint + autocomplete).
 The bounded list toolkit - inline objects, `patch`, `each…where`, aggregates (`sum`/`count`/`avg`/`min`/`max`),
 `sort`/`sortDesc`, and page→store action composition, so a real CRUD/dashboard app is pure muten, no JS escape.
 `Form` fields cover `text` · `number` (coerced) · `email` · `bool` (checkbox) · `enum` (select), with validation.
-
-**Experimental:** full island **SSR**: `muten build` server-renders an island's HTML (first paint + SEO),
-but client hydration of that island still needs its framework bundled (pair the SSG HTML with the Vite client build).
 
 **Next, toward 1.0:**
 - a `date`/`textarea` `Form` field type; number formatting (`round` / currency) in expressions.

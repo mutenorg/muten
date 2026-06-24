@@ -26,6 +26,7 @@ function collectRefs(e: Expr, acc: string[] = []): string[] {
   else if (e.kind === Ek.Call) { for (const a of e.args) collectRefs(a, acc); } // args' refs; the fn is checked separately
   else if (e.kind === Ek.Obj) { for (const f of e.fields) collectRefs(f.value, acc); }
   else if (e.kind === Ek.Agg) acc.push(e.list); // the LIST is an outer ref; the body's refs use the lambda var → checked separately
+  else if (e.kind === Ek.Filter) acc.push(e.list); // the LIST is an outer ref; the cond's bare fields are item-implicit → checked separately
   return acc;
 }
 
@@ -36,6 +37,7 @@ function collectCalls(e: Expr, acc: string[] = []): string[] {
   else if (e.kind === Ek.Bin) { collectCalls(e.left, acc); collectCalls(e.right, acc); }
   else if (e.kind === Ek.Tern) { collectCalls(e.cond, acc); collectCalls(e.then, acc); collectCalls(e.else, acc); }
   else if (e.kind === Ek.Obj) { for (const f of e.fields) collectCalls(f.value, acc); }
+  else if (e.kind === Ek.Filter) collectCalls(e.cond, acc); // the cond may call use'd functions too
   return acc;
 }
 
@@ -48,9 +50,8 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   const constNames = new Set(Object.keys(doc.consts || {})); // compile-time constants
   const paramNames = new Set(doc.params || []);              // route params (`param id`)
   const actionNames = new Set(Object.keys(doc.actions || {})); // for `action.pending` / `action.error` refs
-  const isIslandFrom = (from: string) => /^(svelte|react):/.test(from); // adapter-prefixed `use` = a component island
-  const externs = new Set((doc.imports || []).filter((i) => !isIslandFrom(i.from)).flatMap((i) => i.names)); // logic functions callable in exprs
-  const islandNames = new Set((doc.imports || []).filter((i) => isIslandFrom(i.from)).flatMap((i) => i.names)); // foreign-framework components used as nodes
+  const getNames = new Set(Object.keys(doc.gets || {})); // derived values — referenceable like state (page or store)
+  const externs = new Set((doc.imports || []).flatMap((i) => i.names)); // logic functions callable in exprs
   const nodes = doc.nodes || {};
 
   // a `use`'d function call must reference a declared import (the seam to JS stays bounded + checkable)
@@ -109,9 +110,37 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     const ent = doc.entities?.[type];
     return ent ? new Set(['id', ...Object.keys(ent)]) : null;
   };
+  // the predicate scope for `remove`/`patch`: legacy `=>` binds its var (typed elem); the item-implicit
+  // `where` form binds the element's fields BARE (id + entity fields), like the `where`-filter / aggregates.
+  const itemPredScope = (base: Map<string, string>, target: string): Map<string, string> => {
+    const lt = doc.state?.[target]?.type || '';
+    const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
+    const m = new Map(base);
+    const ent = elem ? doc.entities?.[elem] : undefined;
+    if (ent) { m.set('id', 'uuid'); for (const [f, ft] of Object.entries(ent)) m.set(f, ft); }
+    return m;
+  };
+  // THE COLLISION RULE for item-implicit `where`/`by`/`with`: a bare name that is BOTH an item field AND an
+  // action param resolves to the FIELD (item wins), silently making the param unreachable — e.g.
+  // `remove where id == id` deletes everything. Make it an error with a rename fix, so the intent stays explicit.
+  const checkItemShadow = (target: string, params: Set<string>, exprs: Expr[], loc: Loc | null): void => {
+    const lt = doc.state?.[target]?.type || '';
+    const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
+    const ent = elem ? doc.entities?.[elem] : undefined;
+    if (!ent) return;
+    const fields = new Set(['id', ...Object.keys(ent)]);
+    const seen = new Set<string>();
+    for (const expr of exprs) for (const ref of collectRefs(expr)) {
+      const head = ref.split('.')[0];
+      if (fields.has(head) && params.has(head) && !seen.has(head)) { seen.add(head); D.push(diag('item-shadow', `"${head}" is both a field of ${elem} and a param here — inside \`where\`/\`with\` the item field wins, so the param "${head}" is unreachable. Rename the param (e.g. "${head}Arg").`, { loc, from: head })); }
+    }
+  };
   const listElem = (e: Expr | undefined): string => { // the element TYPE of `each <list>` (entity or scalar; '' if unresolved)
     if (!e) return '';
-    const name = e.kind === Ek.Ref ? e.name : (e.kind === Ek.Agg && (e.op === 'sort' || e.op === 'sortDesc')) ? e.list : ''; // `each list.sort(…) as x` → the sorted list's element
+    const name = e.kind === Ek.Ref ? e.name
+      : (e.kind === Ek.Agg && (e.op === 'sort' || e.op === 'sortDesc')) ? e.list // `each list.sort(…) as x` → the sorted list's element
+      : e.kind === Ek.Filter ? e.list                                            // `each (list where cond) as x` → the filtered list's element
+      : '';
     if (!name) return '';
     const t = doc.state?.[name.split('.')[0]]?.type || '';
     return t.startsWith('list<') ? t.slice(5, -1) : '';
@@ -180,13 +209,27 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         const head = e.list.split('.')[0];
         const lt = scope.has(head) ? (scope.get(head) || '') : (doc.state?.[head]?.type || '');
         const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
-        if (lt && !lt.startsWith('list<') && !storeDomains.has(head)) D.push(diag('agg-not-list', `\`${e.op}(…)\` needs a list, but "${e.list}" is "${lt}".`, { loc }));
-        const bodyScope = new Map([...scope, [e.param, elem] as [string, string]]);
+        if (lt && !lt.startsWith('list<') && !storeDomains.has(head)) D.push(diag('agg-not-list', `\`${e.op} …\` needs a list, but "${e.list}" is "${lt}".`, { loc }));
+        const bodyScope = new Map(scope);
+        const ent = elem ? doc.entities?.[elem] : undefined;
+        if (ent) { bodyScope.set('id', 'uuid'); for (const [f, ft] of Object.entries(ent)) bodyScope.set(f, ft); } // `by`/`where`: bind element fields bare (item-implicit)
         // sum/avg/min/max reduce a NUMBER projection (a `min` over text strings → Math.min(…,"2026-07") = NaN);
         // count's body is a true/false condition, so it's exempt.
-        if (e.op !== 'count' && e.op !== 'sort' && e.op !== 'sortDesc') { const bt = exprType(e.body, bodyScope); if (bt && bt !== 'number') D.push(diag('agg-type', `\`${e.op}(…)\` reduces a NUMBER, but the body is "${bt}". Use a number projection (count uses a true/false condition).`, { loc })); }
+        if (e.op !== 'count' && e.op !== 'sort' && e.op !== 'sortDesc') { const bt = exprType(e.body, bodyScope); if (bt && bt !== 'number') D.push(diag('agg-type', `\`${e.op} …\` reduces a NUMBER, but the body is "${bt}". Use a number projection (count uses a true/false condition).`, { loc })); }
         checkExpr(e.body, loc, bodyScope);
-        return; // collectRefs already skips the body (the lambda var isn't in the outer scope)
+        return; // collectRefs already skips the body (the item fields aren't in the outer scope)
+      }
+      if (e.kind === Ek.Filter) { // derived list `<list> where <cond>`: the LIST must be a list; the cond's bare fields are the element's
+        const head = e.list.split('.')[0];
+        const lt = scope.has(head) ? (scope.get(head) || '') : (doc.state?.[head]?.type || '');
+        const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
+        if (lt && !lt.startsWith('list<') && !storeDomains.has(head)) D.push(diag('filter-not-list', `\`${e.list} where …\` needs a list, but "${e.list}" is "${lt}".`, { loc }));
+        // bind each element field as a bare in-scope name (typed), so the cond's `status == "todo"` field-/type-checks
+        const ent = elem ? doc.entities?.[elem] : undefined;
+        const condScope = new Map(scope);
+        if (ent) { condScope.set('id', 'uuid'); for (const [f, ft] of Object.entries(ent)) condScope.set(f, ft); }
+        checkExpr(e.cond, loc, condScope);
+        return; // collectRefs already skips the cond (its bare fields aren't in the outer scope)
       }
       if (e.kind === Ek.Bin) { aggWalk(e.left); aggWalk(e.right); }
       else if (e.kind === Ek.Un) aggWalk(e.operand);
@@ -199,7 +242,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     for (const ref of collectRefs(expr)) {
       const dot = ref.indexOf('.');
       const head = dot === -1 ? ref : ref.slice(0, dot);
-      if (!(scope.has(head) || stateKeys.has(head) || storeDomains.has(head) || constNames.has(head) || paramNames.has(head) || actionNames.has(head))) {
+      if (!(scope.has(head) || stateKeys.has(head) || getNames.has(head) || storeDomains.has(head) || constNames.has(head) || paramNames.has(head) || actionNames.has(head))) {
         const near = closest(head, [...stateKeys, ...scope.keys()]);
         // a bare word with no close state is almost always a meant-to-be-quoted text/enum value (`status == todo`)
         D.push(diag('unknown-ref', `"${head}" is not a known state or item variable here${near ? '' : ` — if it's a text/enum value, quote it: "${head}"`}`, { loc, suggestion: near, from: head }));
@@ -244,11 +287,9 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     seen.add(id);
     if (n.type === 'RowAction' && !inTable) D.push(diag('rowaction-context', 'RowAction only works inside a DataTable (it renders a button per row). Use Button for a standalone action.', { loc: n.loc })); // else compile throws "unsupported primitive"
 
-    if (islandNames.has(n.type)) {
-      // a foreign-framework island (use X from "svelte:…") used as a node — valid; its internals are opaque
-    } else if (!KNOWN_TYPES.has(n.type)) {
+    if (!KNOWN_TYPES.has(n.type)) {
       if (n.args) {
-        D.push(diag('unknown-part', `"${n.type}" is not a known part`, { loc: n.loc, suggestion: closest(n.type, [...(ctx.parts || []), ...islandNames]), from: n.type }));
+        D.push(diag('unknown-part', `"${n.type}" is not a known part`, { loc: n.loc, suggestion: closest(n.type, [...(ctx.parts || [])]), from: n.type }));
       } else {
         D.push(diag('unknown-type', `"${n.type}" is not a known primitive`, { loc: n.loc, suggestion: closest(n.type, [...KNOWN_TYPES]), from: n.type }));
       }
@@ -269,8 +310,8 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       checkAction(props.action, n);
       // `-> action` / `-> action()` where the action declares `<- input` → the call passes nothing → the body
       // reads `undefined` (e.g. `p.id` → TypeError). Require the arg. (store actions: input unknown here → skip.)
-      if (typeof props.action === 'string' && !props.action.includes('.') && doc.actions?.[props.action]?.input && props.arg === undefined)
-        D.push(diag('action-arity', `action "${props.action}" takes an argument (it reads "${doc.actions[props.action].input}") — pass it, e.g. \`-> ${props.action}(row)\``, { loc: n.loc }));
+      if (typeof props.action === 'string' && !props.action.includes('.') && (doc.actions?.[props.action]?.input || doc.actions?.[props.action]?.params?.length) && props.arg === undefined)
+        D.push(diag('action-arity', `action "${props.action}" takes an argument (it reads "${doc.actions[props.action].params?.length ? doc.actions[props.action].params!.map((p) => p.name).join(', ') : doc.actions[props.action].input}") — pass it, e.g. \`-> ${props.action}(row)\``, { loc: n.loc }));
     }
     if (props.submit) checkAction(props.submit, n);
     if (Array.isArray(props.class)) for (const c of props.class) if (typeof c === 'string' && c.includes('{')) // class() does NOT interpolate — it would ship the literal braces into the DOM class
@@ -326,6 +367,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     if (n.type === Nt.When && props.cond) checkExpr(props.cond, n.loc ?? null, scope);
     if (n.type === Nt.Each && props.list) checkExpr(props.list, n.loc ?? null, scope);
     if (props.arg && typeof props.arg === 'object' && 'kind' in props.arg) checkExpr(props.arg as Expr, n.loc ?? null, scope); // `-> action(arg)` on Button/Link/RowAction — the arg was never ref-checked
+    if (props.argRest) for (const a of props.argRest) checkExpr(a, n.loc ?? null, scope);                                     // 2nd+ args of a multi-arg call `-> f(a, b)`
     const interps: StringPropValue[] = [];
     if ((n.type === Nt.Text || n.type === Nt.Title || n.type === Nt.Span) && props.value) interps.push(props.value);
     if (n.type === Nt.Image) { if (props.src) interps.push(props.src); if (props.alt) interps.push(props.alt); }
@@ -354,10 +396,10 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   if (doc.rootId) walk(doc.rootId, new Map());
   else if (ctx.kind !== 'store') D.push(diag('no-root', 'the doc is missing a rootId'));
 
-  // `get` / `effect` are .store-ONLY. On a page they parse but the page compiler emits nothing → the declaration
-  // is silently dropped (and a page that references the `get` then fails with unknown-ref). Reject them up front.
+  // `get` is a derived value (a computed signal) — valid on a PAGE and in a .store alike (the trinity:
+  // state / get / action). `effect` stays store-ONLY: a page reacts through `when`/`each`, not side-effects.
   if (ctx.kind !== 'store') {
-    for (const g of Object.keys(doc.gets || {})) D.push(diag('store-only', `\`get ${g}\` is only valid in a .store — a page has no derived values. Compute it inline (\`{…}\`) or keep a state cell.`));
+    for (const expr of Object.values(doc.gets || {})) checkExpr(expr, null, new Map()); // every page get resolves against page state
     if ((doc.effects || []).length) D.push(diag('store-only', '`effect { }` is only valid in a .store — a page reacts through `when`/`each`, not effects.'));
   }
 
@@ -368,8 +410,8 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     const checkEff = (st: Stmt): void => {
       if (st.op === StOp.If) { checkExpr(st.cond, null, new Map()); for (const s of (st.then || [])) checkEff(s); for (const s of (st.else || [])) checkEff(s); return; }
       if ('target' in st && st.target && !stateKeys.has(st.target)) D.push(diag('undeclared-mutation', `effect mutates "${st.target}" — not a state of this store`, { suggestion: closest(st.target, [...stateKeys]), from: st.target })); // the TARGET was never checked → a typo'd effect target shipped a runtime ReferenceError
-      if (st.op === StOp.Remove) checkExpr(st.pred, null, new Map([[st.param, ''] as [string, string]]));
-      else if (st.op === StOp.Patch) { const inner = new Map([[st.param, ''] as [string, string]]); checkExpr(st.pred, null, inner); checkExpr(st.patch, null, inner); }
+      if (st.op === StOp.Remove) checkExpr(st.pred, null, itemPredScope(new Map(), st.target));
+      else if (st.op === StOp.Patch) { const inner = itemPredScope(new Map(), st.target); checkExpr(st.pred, null, inner); checkExpr(st.patch, null, inner); }
       else if (st.op === StOp.Refetch) { for (const v of Object.values(st.params)) checkExpr(v, null, new Map()); }
       else if (st.op === StOp.Request) { if (st.body) checkExpr(st.body, null, new Map()); }
       else if ('arg' in st && st.arg) checkExpr(st.arg, null, new Map());
@@ -380,7 +422,8 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   // ── actions: a body may only mutate what `mutates` declares, with known ops ──
   for (const [name, a] of Object.entries(doc.actions || {})) {
     const declared = new Set(a.mutates || []);
-    const actionScope = new Map<string, string>(a.input ? [[a.input, ''] as [string, string]] : []); // the `<- input` var is in scope (untyped)
+    const actionScope = new Map<string, string>(a.params?.length ? a.params.map((p) => [p.name, p.type] as [string, string]) : (a.input ? [[a.input, ''] as [string, string]] : [])); // the typed params (or the legacy `<- input` var) are in scope
+    const paramNames = new Set((a.params || []).map((p) => p.name)); // for the item-shadow collision rule
     const checkStmtInner = (st: Stmt): void => {
       // FULL ref-check on every expression in the body (was checkCalls-only → undeclared refs/typos shipped
       // silently and crashed at runtime). Covers `if` conds, set/push args, remove predicates, refetch params.
@@ -419,13 +462,14 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
           }
         }
       }
-      if (st.op === StOp.Remove) checkExpr(st.pred, null, new Map([...actionScope, [st.param, ''] as [string, string]])); // the predicate's lambda var is in scope
-      else if (st.op === StOp.Patch) { // patch(x => pred, { field: val }): the lambda var IS a list element (typed)
+      if (st.op === StOp.Remove) { checkExpr(st.pred, null, itemPredScope(actionScope, st.target)); checkItemShadow(st.target, paramNames, [st.pred], null); } // `remove where id == x` — item fields bare
+      else if (st.op === StOp.Patch) { // `patch where id == x with { field: val }` — fields read bare
         const lt = doc.state?.[st.target]?.type || '';
         const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
-        const inner = new Map([...actionScope, [st.param, elem] as [string, string]]);
+        const inner = itemPredScope(actionScope, st.target);
         checkExpr(st.pred, null, inner);
         checkExpr(st.patch, null, inner);
+        checkItemShadow(st.target, paramNames, [st.pred, st.patch], null);
         if (elem && doc.entities?.[elem] && st.patch.kind === Ek.Obj) { const ent = doc.entities[elem]; for (const f of st.patch.fields) if (!(f.key in ent)) D.push(diag('unknown-field', `action "${name}": "${f.key}" is not a field of ${elem}`, { suggestion: closest(f.key, Object.keys(ent)), from: f.key })); }
       }
       else if (st.op === StOp.Refetch) { for (const v of Object.values(st.params)) checkExpr(v, null, actionScope); }

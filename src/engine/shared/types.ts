@@ -83,8 +83,9 @@ export interface TernExpr { kind: Ek.Tern; cond: Expr; then: Expr; else: Expr; }
 /** A call to a `use`'d JS function: `fmt(date, "…")`. `fn` is the imported name; never a muten primitive. */
 export interface CallExpr { kind: Ek.Call; fn: string; args: Expr[]; }
 export interface ObjExpr { kind: Ek.Obj; fields: Array<{ key: string; value: Expr }>; } // inline object literal: `{ title: @draft.title, qty: 1 }`
-export interface AggExpr { kind: Ek.Agg; op: string; list: string; param: string; body: Expr; } // list aggregate: `lines.sum(l => l.price * l.qty)`
-export type Expr = LitExpr | RefExpr | UnExpr | BinExpr | TernExpr | CallExpr | ObjExpr | AggExpr;
+export interface AggExpr { kind: Ek.Agg; op: string; list: string; body: Expr; } // `lines.sum by price * qty` / `tasks.count where not done` — item-implicit (fields read bare off the row)
+export interface FilterExpr { kind: Ek.Filter; list: string; cond: Expr; } // derived list: `tasks where status == "todo"` — item fields referenced bare (item-implicit)
+export type Expr = LitExpr | RefExpr | UnExpr | BinExpr | TernExpr | CallExpr | ObjExpr | AggExpr | FilterExpr;
 
 /** A `use a, b from "./lib.ts"` — named JS functions muten may call. The seam to the JS ecosystem. */
 export interface ImportDef { names: string[]; from: string; }
@@ -111,8 +112,9 @@ export type StringPropName = 'value' | 'label' | 'src' | 'alt' | 'placeholder' |
 export interface PushStmt { op: StOp.Push; target: string; arg: Expr; }
 export interface SetStmt { op: StOp.Set; target: string; arg: Expr; }
 export interface ResetStmt { op: StOp.Reset; target: string; }
-export interface RemoveStmt { op: StOp.Remove; target: string; param: string; pred: Expr; }
-export interface PatchStmt { op: StOp.Patch; target: string; param: string; pred: Expr; patch: Expr; } // in-place edit: `list.patch(x => x.id == id, { field: val })` → position-preserving map
+export interface ToggleStmt { op: StOp.Toggle; target: string; } // flip a bool state: `open.toggle()` → `open.set(!open)`
+export interface RemoveStmt { op: StOp.Remove; target: string; pred: Expr; } // `tasks.remove where id == taskId` — item fields read bare (item-implicit)
+export interface PatchStmt { op: StOp.Patch; target: string; pred: Expr; patch: Expr; } // `tasks.patch where id == taskId with { done: true }` → position-preserving map (item fields bare)
 /** Server CRUD on a source-backed list: POST/PUT/DELETE the item, then reflect the result in the list. */
 export interface CreateStmt { op: StOp.Create; target: string; arg: Expr; }
 export interface UpdateStmt { op: StOp.Update; target: string; arg: Expr; }
@@ -123,7 +125,7 @@ export interface RefetchStmt { op: StOp.Refetch; target: string; params: { [k: s
 export interface RequestStmt { op: StOp.Request; method: string; url: string | Interp; body: Expr | null; }
 export interface CallStmt { op: StOp.Call; target: string; method: string; args: Expr[]; } // a page action calling a STORE action: `shop.addProduct(draft)` (composition)
 export interface IfStmt { op: StOp.If; cond: Expr; then: Stmt[]; else: Stmt[] | null; }
-export type Stmt = (PushStmt | SetStmt | ResetStmt | RemoveStmt | PatchStmt | CreateStmt | UpdateStmt | DeleteStmt | RefetchStmt | RequestStmt | CallStmt | IfStmt) & { loc?: Loc };
+export type Stmt = (PushStmt | SetStmt | ResetStmt | ToggleStmt | RemoveStmt | PatchStmt | CreateStmt | UpdateStmt | DeleteStmt | RefetchStmt | RequestStmt | CallStmt | IfStmt) & { loc?: Loc };
 
 
 // ── 6. Entities & validation schema ──────────────────────────────────────────
@@ -181,10 +183,12 @@ export interface PartDef {
   css?: string;
 }
 
-/** A declared action: which state it may mutate, its input name, and its body. */
+/** A declared action: which state it may mutate, its input name, and its body.
+ *  `params` (when set) is the multi-param form `action f(a: T, b: T)`; `input` is the legacy `<- v` form. */
 export interface ActionDef {
   mutates: string[];
   input: string;
+  params?: PartParam[];
   body: Stmt[];
 }
 
@@ -230,9 +234,9 @@ export interface NodeProps {
   component?: string;
   data?: string;
   to?: string | Interp;  // a route path; interpolated (`/product/{p.id}`) for dynamic navigation
-  hydrate?: string;      // island hydration directive: `client:visible` | `client:idle` (else: on load)
   action?: string;
   arg?: Expr;
+  argRest?: Expr[];  // 2nd+ args of a multi-arg call `-> f(a, b, c)` (arg holds the 1st); single-arg calls leave this unset
   bind?: string;
   submit?: string;
   // modifiers
@@ -409,7 +413,6 @@ export interface EmitParts {
   storeImports: string;
   storeDecls: string;      // standalone HTML/SSR only: the `.store` slices inlined as `const __store_X = (…)()`
   externImports: string;   // `import { fmt } from "./lib.ts"` for each logic-function `use` declaration
-  islandImports: string;   // adapter import + component import + mount glue for each `use X from "svelte:…"`
   renderBody: string;
   staticHtml: string;
   hasSlot: boolean;
@@ -433,6 +436,7 @@ export interface Scope {
   sigLocals?: Set<string>;   // keyed-each row vars backed by a per-row signal → refs compile to `<v>.get()` so bindings stay live
   input?: string;
   inputIsState?: boolean;
+  item?: { var: string; fields: Set<string> };  // a `<list> where <cond>` filter: bare field refs resolve to `<var>.<field>` (item-implicit)
 }
 
 

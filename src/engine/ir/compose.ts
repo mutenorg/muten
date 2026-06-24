@@ -69,6 +69,7 @@ function subProps(props: NodeProps, args: ArgMap): NodeProps {
   if (props.cond !== undefined) out.cond = subExpr(props.cond, args);
   if (props.list !== undefined) out.list = subExpr(props.list, args);
   if (props.arg !== undefined) out.arg = subExpr(props.arg, args);
+  if (props.argRest !== undefined) out.argRest = props.argRest.map((a) => subExpr(a, args));
   if (props.action !== undefined) out.action = refText(props.action, args); // action/submit names: $onSave
   if (props.submit !== undefined) out.submit = refText(props.submit, args);
   if (props.bind !== undefined) out.bind = refText(props.bind, args);
@@ -94,6 +95,7 @@ function subExpr(e: Expr, args: ArgMap): Expr {
   if (e.kind === Ek.Call) return { ...e, args: e.args.map((a) => subExpr(a, args)) }; // a use'd fn: substitute $params in its args
   if (e.kind === Ek.Obj) return { ...e, fields: e.fields.map((f) => ({ key: f.key, value: subExpr(f.value, args) })) };
   if (e.kind === Ek.Agg) return { ...e, list: refText(e.list, args), body: subExpr(e.body, args) };
+  if (e.kind === Ek.Filter) return { ...e, list: refText(e.list, args), cond: subExpr(e.cond, args) }; // `tasks where …` inside a part: sub $params
   return e; // literal: nothing to substitute
 }
 

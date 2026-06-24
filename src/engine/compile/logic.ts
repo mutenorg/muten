@@ -47,6 +47,15 @@ export class Logic {
     return Object.entries(entity).filter(([, type]) => type === 'uuid').map(([field]) => field);
   }
 
+  // the bare-referenceable fields of `<list>`'s element (for a `where` filter's item-implicit scope).
+  // `tasks : list<Task>` → { id, ...Task fields }; a non-entity element (list<uuid>) → just `id`.
+  private itemFields(list: string): Set<string> {
+    const type = this.ctx.state[list.split('.')[0]]?.type || '';
+    const elem = type.startsWith('list<') ? type.slice(5, -1) : '';
+    const entity = this.ctx.entities[elem];
+    return new Set(['id', ...(entity ? Object.keys(entity) : [])]);
+  }
+
   // does a body contain a server write (create/update/delete)? — recursing into if-branches.
   private bodyHasWrite(body: Stmt[]): boolean {
     return body.some((st) => st.op === StOp.Create || st.op === StOp.Update || st.op === StOp.Delete || st.op === StOp.Request
@@ -68,12 +77,15 @@ export class Logic {
     const tail = rest.length ? '.' + rest.join('.') : '';
     if (scope.sigLocals?.has(head)) return `${head}.get()${tail}`;   // keyed-each row: a per-row signal, so its bindings react to the row's data
     if (scope.locals.has(head)) return head + tail;
+    if (scope.item?.fields.has(head)) return `${scope.item.var}.${name}`;   // `<list> where <cond>`: a bare field of the item → read it off the row
+
     if (this.ctx.params.has(head)) return head + tail;        // a route param: a local string injected at mount
     if (this.ctx.queryStates.has(head)) {
       if (rest[0] === 'loading' || rest[0] === 'error' || rest[0] === 'data') return `${head}.get()${tail}`; // .data/.loading/.error ARE the signal's fields — don't double the .data
       return `${head}.get().data${tail}`;                 // @users → the data array; @users.length → its length
     }
     if (this.ctx.stateKeys.has(head)) return `${head}.get()` + tail;
+    if (this.ctx.gets[head] !== undefined) return `${head}.get()` + tail; // a `get` derived value is a computed signal — read like state
     if (this.ctx.stores[head]) {
       const member = rest[0];
       const more = rest.length > 1 ? '.' + rest.slice(1).join('.') : '';
@@ -94,21 +106,26 @@ export class Logic {
     if (node.kind === Ek.Ref) return this.resolveRef(node.name, scope);
     if (node.kind === Ek.Call) return `${node.fn}(${node.args.map((a) => this.compileExpr(a, scope)).join(', ')})`; // a use'd JS function
     if (node.kind === Ek.Obj) return `{ ${node.fields.map((f) => `${JSON.stringify(f.key)}: ${this.compileExpr(f.value, scope)}`).join(', ')} }`; // inline object literal
-    if (node.kind === Ek.Agg) { // list aggregate → reduce/filter, OR sort → a sorted COPY; lambda var bound bare in scope
+    if (node.kind === Ek.Agg) { // `list.sum by expr` / `list.count where cond` → reduce/filter; item fields read bare off `__it` (item-implicit)
       const list = `(${this.resolveRef(node.list, scope)} ?? [])`;
-      const body = this.compileExpr(node.body, { ...scope, locals: new Set([...scope.locals, node.param]) });
-      if (node.op === 'sort' || node.op === 'sortDesc') { // sort a COPY by the key the lambda projects (no mutation of the source signal)
+      const body = this.compileExpr(node.body, { ...scope, item: { var: '__it', fields: this.itemFields(node.list) } });
+      if (node.op === 'sort' || node.op === 'sortDesc') { // sort a COPY by the projected key (no mutation of the source signal)
         const dir = node.op === 'sortDesc' ? -1 : 1;
-        const key = `((${node.param}) => ${body})`;
+        const key = `((__it) => ${body})`;
         return `[...${list}].sort((__a, __b) => { const __ka = ${key}(__a), __kb = ${key}(__b); return (__ka < __kb ? -1 : __ka > __kb ? 1 : 0) * ${dir}; })`;
       }
-      const reduce = (init: string, step: string): string => `${list}.reduce((__a, ${node.param}) => ${step}, ${init})`;
-      if (node.op === 'count') return `${list}.filter((${node.param}) => ${body}).length`;
+      const reduce = (init: string, step: string): string => `${list}.reduce((__a, __it) => ${step}, ${init})`;
+      if (node.op === 'count') return `${list}.filter((__it) => ${body}).length`;
       if (node.op === 'sum') return reduce('0', `__a + (${body})`);
       if (node.op === 'avg') return `(${reduce('0', `__a + (${body})`)} / (${list}.length || 1))`;
       // min/max guard the empty list → 0 (not ±Infinity, which would render as garbage)
       if (node.op === 'min') return `(${list}.length ? ${reduce('Infinity', `Math.min(__a, ${body})`)} : 0)`;
       return `(${list}.length ? ${reduce('-Infinity', `Math.max(__a, ${body})`)} : 0)`; // max
+    }
+    if (node.kind === Ek.Filter) { // derived list `<list> where <cond>` → filter a COPY; bare fields read off the row (item-implicit, like each-where)
+      const list = `[...(${this.resolveRef(node.list, scope)} ?? [])]`;
+      const cond = this.compileExpr(node.cond, { ...scope, item: { var: '__it', fields: this.itemFields(node.list) } });
+      return `${list}.filter((__it) => ${cond})`;
     }
     if (node.kind === Ek.Tern) return `(${this.compileExpr(node.cond, scope)} ? ${this.compileExpr(node.then, scope)} : ${this.compileExpr(node.else, scope)})`;
     if (node.kind === Ek.Un) {
@@ -141,6 +158,8 @@ export class Logic {
     }
     if (st.op === StOp.Reset) {
       out.push(`${st.target}.set(${JSON.stringify(ctx.state[st.target].initial ?? null)});`);
+    } else if (st.op === StOp.Toggle) {
+      out.push(`${st.target}.set(!${st.target}.get());`); // flip a bool
     } else if (st.op === StOp.Set) {
       out.push(`${st.target}.set(${this.compileExpr(st.arg, scope)});`);
     } else if (st.op === StOp.Push) {
@@ -158,18 +177,18 @@ export class Logic {
         out.push(`${wrap(this.compileExpr(st.arg, scope))}`);
       }
     } else if (st.op === StOp.Remove) {
-      const inner: Scope = { ...scope, locals: new Set([...scope.locals, st.param]) };
+      const inner: Scope = { ...scope, item: { var: '__it', fields: this.itemFields(st.target) } }; // `remove where …` — bare fields off __it
       const pred = this.compileExpr(st.pred, inner);
       out.push(ctx.queryStates.has(st.target)
-        ? `${st.target}.set({ ...${st.target}.get(), data: ${st.target}.get().data.filter((${st.param}) => !(${pred})) });`
-        : `${st.target}.set(${st.target}.get().filter((${st.param}) => !(${pred})));`);
+        ? `${st.target}.set({ ...${st.target}.get(), data: ${st.target}.get().data.filter((__it) => !(${pred})) });`
+        : `${st.target}.set(${st.target}.get().filter((__it) => !(${pred})));`);
     } else if (st.op === StOp.Patch) {
       // in-place edit: map the list, merging the patch object into items the predicate matches. `.map` keeps
       // order (no reorder) and `{ ...item, ...patch }` only overwrites the listed fields (no drop).
-      const inner: Scope = { ...scope, locals: new Set([...scope.locals, st.param]) };
+      const inner: Scope = { ...scope, item: { var: '__it', fields: this.itemFields(st.target) } }; // `patch where … with …` — bare fields off __it
       const pred = this.compileExpr(st.pred, inner);
       const patch = this.compileExpr(st.patch, inner);
-      const mapped = (src: string): string => `${src}.map((${st.param}) => (${pred}) ? { ...${st.param}, ...${patch} } : ${st.param})`;
+      const mapped = (src: string): string => `${src}.map((__it) => (${pred}) ? { ...__it, ...${patch} } : __it)`;
       out.push(ctx.queryStates.has(st.target)
         ? `${st.target}.set({ ...${st.target}.get(), data: ${mapped(`${st.target}.get().data`)} });`
         : `${st.target}.set(${mapped(`${st.target}.get()`)});`);
@@ -245,9 +264,14 @@ export class Logic {
     const decls: string[] = []; // .pending/.error signals for write actions, hoisted above the functions
     const out: string[] = [];
     for (const [name, action] of Object.entries(this.ctx.actions)) {
-      const inputIsState = this.ctx.stateKeys.has(action.input);
-      const scope: Scope = { locals: new Set(), input: action.input, inputIsState };
-      const param = inputIsState ? '' : action.input;
+      // multi-param form `action f(a: T, b: T)`: the params become the function signature AND scope locals,
+      // so refs resolve bare and shadow state. Else fall back to the legacy `<- input` path, unchanged.
+      const hasParams = !!action.params?.length;
+      const inputIsState = !hasParams && this.ctx.stateKeys.has(action.input);
+      const scope: Scope = hasParams
+        ? { locals: new Set(action.params!.map((p) => p.name)) }
+        : { locals: new Set(), input: action.input, inputIsState };
+      const param = hasParams ? action.params!.map((p) => p.name).join(', ') : inputIsState ? '' : action.input;
       if (this.writeActions().has(name)) { // talks to the backend → async, with live .pending / .error
         decls.push(`${exp}const __pending_${name} = signal(false);`, `${exp}const __error_${name} = signal(null);`);
         out.push(`${exp}async function ${name}(${param}) {`);

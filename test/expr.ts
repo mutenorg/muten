@@ -36,28 +36,49 @@ const c = (l, ok, e = '') => { console.log((ok ? '✓' : 'x') + ' ' + l + (ok ? 
   c('field literal value', arg.fields[1].value.kind === 'lit' && arg.fields[1].value.value === 1, JSON.stringify(arg.fields[1]));
 }
 
-// in-place patch: `todos.patch(x => x.id == id, { done: true })`
+// in-place patch: `todos.patch where id == tid with { done: true }` (item-implicit, lambda-free)
 {
-  const st = parse('screen t\nstate { todos = [] : list<T> }\naction tog mutates todos <- id { todos.patch(x => x.id == id, { done: true }) }\nPage { Text "x" }').actions.tog.body[0];
+  const st = parse('screen t\nstate { todos = [] : list<T> }\naction tog(tid: text) mutates todos { todos.patch where id == tid with { done: true } }\nPage { Text "x" }').actions.tog.body[0];
   c('stmt op is patch', st.op === 'patch', st.op);
-  c('patch param + pred', st.param === 'x' && st.pred.kind === 'bin', JSON.stringify([st.param, st.pred?.kind]));
+  c('patch item-implicit (no param) + pred', st.param === undefined && st.pred.kind === 'bin', JSON.stringify([st.param, st.pred?.kind]));
   c('patch is obj literal', st.patch.kind === 'obj' && st.patch.fields[0].key === 'done', JSON.stringify(st.patch));
 }
 
-// list aggregate: `lines.count(c => c.done)` (method + lambda)
+// list aggregate: `lines.count where done` (item-implicit predicate; grouped to compare)
 {
-  const cond = parse('screen t\nstate { lines = [] : list<L> }\nPage { when lines.count(c => c.done) > 0 { Text "x" } }').tree.children[0].props.cond;
+  const cond = parse('screen t\nstate { lines = [] : list<L> }\nPage { when (lines.count where done) > 0 { Text "x" } }').tree.children[0].props.cond;
   const agg = cond.left;
   c('agg kind', agg.kind === 'agg', agg.kind);
-  c('agg op/list/param', agg.op === 'count' && agg.list === 'lines' && agg.param === 'c', JSON.stringify([agg.op, agg.list, agg.param]));
-  c('agg body is ref', agg.body.kind === 'ref' && agg.body.name === 'c.done', JSON.stringify(agg.body));
+  c('agg op/list, no param', agg.op === 'count' && agg.list === 'lines' && agg.param === undefined, JSON.stringify([agg.op, agg.list, agg.param]));
+  c('agg body is bare field ref', agg.body.kind === 'ref' && agg.body.name === 'done', JSON.stringify(agg.body));
 }
 
-// list sort: `cs.sort(c => c.name)` (reuses the agg shape, op=sort)
+// list sort: `cs.sort by name` (item-implicit projection key, agg shape op=sort)
 {
-  const list = parse('screen t\nstate { cs = [] : list<C> }\nPage { each cs.sort(c => c.name) as c { Text "x" } }').tree.children[0].props.list;
+  const list = parse('screen t\nstate { cs = [] : list<C> }\nPage { each cs.sort by name as c { Text "x" } }').tree.children[0].props.list;
   c('sort is agg-shaped', list.kind === 'agg', list.kind);
-  c('sort op/list/param', list.op === 'sort' && list.list === 'cs' && list.param === 'c', JSON.stringify([list.op, list.list, list.param]));
+  c('sort op/list, no param', list.op === 'sort' && list.list === 'cs' && list.param === undefined, JSON.stringify([list.op, list.list, list.param]));
+}
+
+// list-filter EXPRESSION: `ts where status == "todo"` — a standalone derived list (item fields bare)
+{
+  const e = parse('screen t\nstate { ts = [] : list<T> }\nget todo = ts where status == "todo"').gets.todo;
+  c('filter kind', e.kind === 'filter', e.kind);
+  c('filter list', e.list === 'ts', e.list);
+  c('cond is the full comparison', e.cond.kind === 'bin' && e.cond.op === '==' && e.cond.left.kind === 'ref' && e.cond.left.name === 'status', JSON.stringify(e.cond));
+}
+
+// the cond is a FULL expression: `not done`, `and`/`or`, parens all parse after `where`
+{
+  const e = parse('screen t\nstate { ts = [] : list<T> }\nget x = ts where not done and (a or b)').gets.x;
+  c('filter cond top op is and', e.kind === 'filter' && e.cond.kind === 'bin' && e.cond.op === 'and', JSON.stringify(e.cond?.op));
+  c('filter cond left is not(done)', e.cond.left.kind === 'un' && e.cond.left.op === 'not', JSON.stringify(e.cond?.left));
+}
+
+// usable as an `each` list too: `each ts where status == "todo" as t`
+{
+  const list = parse('screen t\nstate { ts = [] : list<T> }\nPage { each ts where status == "todo" as t { Text "x" } }').tree.children[0].props.list;
+  c('each-list filter kind', list.kind === 'filter' && list.list === 'ts', JSON.stringify([list.kind, list.list]));
 }
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');

@@ -160,17 +160,21 @@ export class Grammar {
     const literal = LITERALS.get(name);
     if (literal !== undefined) return { kind: Ek.Lit, value: literal }; // true | false | null
     while (this.at(Tk.Punct, Pn.Dot)) { this.next(); name += '.' + this.eat(Tk.Ident).v; } // user.name, cart.total
+    const dot = name.lastIndexOf('.');
+    const op = dot === -1 ? '' : name.slice(dot + 1);
+    const isAgg = AGG_OPS.has(op) || SORT_OPS.has(op);
+    // canonical lambda-free aggregate: `lines.sum by price * qty` (projection) / `tasks.count where not done` (predicate);
+    // item fields are read BARE (item-implicit), exactly like the `where`-filter and `each`.
+    if (isAgg && (this.at(Tk.Ident, Kw.By) || this.at(Tk.Ident, Kw.Where))) {
+      this.next();
+      return { kind: Ek.Agg, op, list: name.slice(0, dot), body: this.parseExpr() };
+    }
+    if (!isAgg && this.at(Tk.Ident, Kw.Where)) {             // derived list: `tasks where status == "todo"` — item fields read bare
+      this.next();
+      return { kind: Ek.Filter, list: name, cond: this.parseExpr() };
+    }
     if (this.at(Tk.Punct, Pn.ParenL)) {
-      const dot = name.lastIndexOf('.');
-      const op = dot === -1 ? '' : name.slice(dot + 1);
-      if (AGG_OPS.has(op) || SORT_OPS.has(op)) {              // list aggregate (lines.sum(…)) or sort (contacts.sort(c => c.name))
-        this.next();
-        const param = this.eat(Tk.Ident).v;
-        this.eat(Tk.FatArrow);
-        const body = this.ternary();
-        this.eat(Tk.Punct, Pn.ParenR);
-        return { kind: Ek.Agg, op, list: name.slice(0, dot), param, body };
-      }
+      if (isAgg) throw new ParseError(`\`${op}\` takes ${op === 'count' ? '`where <cond>`' : '`by <expr>`'} now, not a \`(x => …)\` lambda — write \`${name.slice(0, dot)}.${op} ${op === 'count' ? 'where <cond>' : 'by <expr>'}\` (item fields read bare)`, this.locOf(this.peek().pos));
       this.next();                                            // a call: fmt(a, b) → a use'd function
       const args: Expr[] = [];
       while (!this.at(Tk.Punct, Pn.ParenR)) { args.push(this.ternary()); if (this.at(Tk.Punct, Pn.Comma)) this.next(); }

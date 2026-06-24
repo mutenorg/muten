@@ -32,14 +32,12 @@ class SElement extends SNode {
   className = '';
   // element properties the generated code assigns directly; serialized as attributes
   src = ''; alt = ''; href = ''; type = ''; value = ''; placeholder = '';
-  rawHTML: string | null = null; // a foreign island's server-rendered HTML — injected verbatim, not escaped
   private text = '';
   constructor(public tag: string) { super(); }
 
   get childNodes(): SNode[] { return this.children; }
   get textContent(): string { return this.text; }
   set textContent(v: string) { this.text = v; for (const c of this.children) c.parentNode = null; this.children = []; }
-  set innerHTML(v: string) { this.rawHTML = v; for (const c of this.children) c.parentNode = null; this.children = []; this.text = ''; }
 
   appendChild<T extends SNode>(child: T): T {
     if (child instanceof SFragment) { for (const c of [...child.children]) this.appendChild(c); return child; }
@@ -90,29 +88,19 @@ function serialize(node: SNode): string {
   for (const [k, v] of Object.entries(node.attrs)) attrs.push(`${k}="${escAttr(v)}"`);
   const open = `<${node.tag}${attrs.length ? ' ' + attrs.join(' ') : ''}>`;
   if (VOID.has(node.tag)) return open;
-  const inner = node.rawHTML != null ? node.rawHTML // island SSR HTML, verbatim
-    : node.children.length ? node.children.map(serialize).join('') : escText(node.textContent);
+  const inner = node.children.length ? node.children.map(serialize).join('') : escText(node.textContent);
   return `${open}${inner}</${node.tag}>`;
 }
 
-// A foreign island encountered while pre-rendering: the build server-renders it (via vite) and replaces
-// the `<!--mi:i-->` marker the factory left in its place. props are opaque (the foreign component's shape).
-export interface IslandReq { adapter: string; path: string; props: { [k: string]: unknown }; }
-
 // Execute a Fmt.Ssr factory (self-contained: inlined runtime + synchronous mock data) against the fake
 // DOM and return the rendered inner HTML of #app. Throws if the page touches something the fake DOM or
-// Node lacks (stores, exotic Custom JS) — the caller falls back to the CSR shell. Islands are collected
-// into `islands` (with a marker left in the HTML) for the caller to server-render + inject asynchronously.
-export function renderSsrBody(factoryCode: string, islands: IslandReq[] = []): string {
+// Node lacks (stores, exotic Custom JS) — the caller falls back to the CSR shell.
+export function renderSsrBody(factoryCode: string): string {
   const document = new SDocument();
   const app = new SElement('div');
-  const __ssrIsland = (adapter: string, path: string, props: { [k: string]: unknown }): string => {
-    islands.push({ adapter, path, props });
-    return `<!--mi:${islands.length - 1}-->`;
-  };
   // ponytail: executing OUR OWN compiled output in a fake DOM — not user input. No sandbox needed.
-  const run = new Function('document', 'app', '__params', '__ssrIsland', factoryCode);
-  run(document, app, {}, __ssrIsland);
+  const run = new Function('document', 'app', '__params', factoryCode);
+  run(document, app, {});
   return app.children.map(serialize).join('');
 }
 

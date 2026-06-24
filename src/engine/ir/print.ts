@@ -23,7 +23,8 @@ function printExpr(e: Expr): string {
     case Ek.Tern: return `${wrap(e.cond)} ? ${wrap(e.then)} : ${wrap(e.else)}`;
     case Ek.Call: return `${e.fn}(${e.args.map(printExpr).join(', ')})`;
     case Ek.Obj: return `{ ${e.fields.map((f) => `${f.key}: ${printExpr(f.value)}`).join(', ')} }`;
-    case Ek.Agg: return `${e.list}.${e.op}(${e.param} => ${printExpr(e.body)})`;
+    case Ek.Agg: return `${e.list}.${e.op} ${e.op === 'count' ? 'where' : 'by'} ${printExpr(e.body)}`; // `lines.sum by price * qty` / `tasks.count where not done`
+    case Ek.Filter: return `${e.list} where ${printExpr(e.cond)}`; // derived list `tasks where status == "todo"`
   }
 }
 // parenthesize nested binary/ternary so re-parse rebuilds the same tree (over-parenthesizes; structure wins)
@@ -60,8 +61,9 @@ function printStmt(s: Stmt, ind: string): string {
     case StOp.Push: return `${s.target}.push(${printExpr(s.arg)})`;
     case StOp.Set: return `${s.target}.set(${printExpr(s.arg)})`;
     case StOp.Reset: return `${s.target}.reset()`;
-    case StOp.Remove: return `${s.target}.remove(${s.param} => ${printExpr(s.pred)})`;
-    case StOp.Patch: return `${s.target}.patch(${s.param} => ${printExpr(s.pred)}, ${printExpr(s.patch)})`;
+    case StOp.Toggle: return `${s.target}.toggle()`;
+    case StOp.Remove: return `${s.target}.remove where ${printExpr(s.pred)}`;
+    case StOp.Patch: return `${s.target}.patch where ${printExpr(s.pred)} with ${printExpr(s.patch)}`;
     case StOp.Create: return `${s.target}.create(${printExpr(s.arg)})`;
     case StOp.Update: return `${s.target}.update(${printExpr(s.arg)})`;
     case StOp.Delete: return `${s.target}.delete(${printExpr(s.arg)})`;
@@ -89,7 +91,7 @@ function printNode(n: IRNode, ind: string): string {
     const pos = p.value ?? p.label ?? p.src ?? p.placeholder ?? p.submitLabel;
     if (pos !== undefined) head += ` ${printStringProp(pos)}`;
     if (p.to !== undefined) head += ` -> ${printPath(p.to)}`;
-    else if (p.action) head += ` -> ${p.action}${p.arg !== undefined ? `(${printExpr(p.arg)})` : ''}`;
+    else if (p.action) head += ` -> ${p.action}${p.arg !== undefined ? `(${[p.arg, ...(p.argRest || [])].map(printExpr).join(', ')})` : ''}`;
     if (p.data) head += ` @${p.data}`;
     if (p.bind) head += ` bind ${p.bind.includes('.') ? p.bind : '@' + p.bind}`;
     if (p.where) head += ` ${Mod.Where}(${p.where.join(', ')})`;
@@ -122,7 +124,9 @@ const printState = (name: string, s: StateDef): string => {
   return `${name} = ${rhs} : ${s.type}`;
 };
 const printAction = (name: string, a: ActionDef): string => {
-  const head = `action ${name}${a.mutates.length ? ` mutates ${a.mutates.join(', ')}` : ''}${a.input ? ` <- ${a.input}` : ''}`;
+  const sig = a.params?.length ? `(${a.params.map((p) => `${p.name}: ${p.type}`).join(', ')})` : '';
+  const tail = a.params?.length ? '' : (a.input ? ` <- ${a.input}` : ''); // multi-param and `<- input` never combine
+  const head = `action ${name}${sig}${a.mutates.length ? ` mutates ${a.mutates.join(', ')}` : ''}${tail}`;
   return `${head} {\n${a.body.map((s) => IND + printStmt(s, IND)).join('\n')}\n}`;
 };
 const printRoute = (r: Route): string =>

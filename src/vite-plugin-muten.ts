@@ -130,7 +130,7 @@ if (root) {
 
       if (id === '\0' + SHELL) { // persistent chrome (navbar + slot); falls back to a bare outlet
         const tree = appIr?.shell || { type: Nt.Shell, props: {}, children: [{ type: Nt.Slot, props: {} }] };
-        const doc = toDoc({ ...(appIr || {}), screen: 'shell', entities: {}, state: {}, actions: {}, tree }); // spread appIr so shell islands' `imports` survive (chrome stays state/action-free)
+        const doc = toDoc({ ...(appIr || {}), screen: 'shell', entities: {}, state: {}, actions: {}, tree }); // spread appIr so shell `imports` survive (chrome stays state/action-free)
         // shell + pages emit ONLY their token CSS; the reset/base lives in the project stylesheet
         // (loaded once via main), so there's no duplicate .stack to fight the cascade.
         return compileModule(doc, {}, '', {}, {}, { stores: storesMeta, theme });

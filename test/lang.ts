@@ -40,6 +40,27 @@ const TH = mergeTheme({ space: { sm: '8px', md: '16px', lg: '24px' }, font: { lg
   const btn = parse('screen t\nMain { Button "B" -> pick("build") }').tree.children[0];
   ok('literal string arg', btn.props.arg.kind === 'lit' && btn.props.arg.value === 'build', JSON.stringify(btn.props.arg));
 }
+// multi-param action `action f(a: T, b: T)` — params parse, compile to a multi-arg signature + call
+{
+  const ir = parse('screen s\nstate { x = 0 : number }\naction f(a: number, b: number) mutates x { x.set(a) }\nPage { Button "y" -> f(1, 2) }');
+  const a = ir.actions.f;
+  ok('multi-param parsed', Array.isArray(a.params) && a.params.length === 2 && a.params[0].name === 'a' && a.params[0].type === 'number', JSON.stringify(a.params));
+  ok('multi-param keeps input empty', a.input === '', JSON.stringify(a.input));
+  const btn = ir.tree.children[0];
+  ok('multi-arg call: 1st arg + rest', btn.props.arg.value === 1 && btn.props.argRest && btn.props.argRest[0].value === 2, JSON.stringify([btn.props.arg, btn.props.argRest]));
+  const code = compile(toDoc(ir), {}, '', {}, {}, { format: 'module' });
+  ok('multi-param signature emitted', code.includes('function f(a, b)'), '');
+  ok('multi-arg call emitted', code.includes('f(1, 2)'), '');
+}
+// backward-compat: the legacy `<- input` form still parses + compiles unchanged
+{
+  const ir = parse('screen s\nstate { x = 0 : number }\naction g mutates x <- v { x.set(v) }\nPage { Button "y" -> g(3) }');
+  const a = ir.actions.g;
+  ok('legacy input preserved', a.input === 'v' && a.params === undefined, JSON.stringify([a.input, a.params]));
+  const code = compile(toDoc(ir), {}, '', {}, {}, { format: 'module' });
+  ok('legacy signature emitted', code.includes('function g(v)'), '');
+  ok('legacy call emitted', code.includes('g(3)'), '');
+}
 // Button: interpolated label + children
 {
   const b1 = parse('screen t\nMain { Button "{x}" -> a }').tree.children[0];

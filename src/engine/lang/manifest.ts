@@ -134,7 +134,7 @@ export const KEYWORD_DOCS = {
   theme: 'The project theme block (theme.muten): `theme { space { md "16px" }  breakpoints { md "768px" } }`. Supplies the token SCALE; the engine owns only the vocabulary. The reset/base CSS lives in your stylesheet.',
   get: 'A `.store` derived/memoized value (getter): `get total = items.length`. Read as `domain.total`, recomputes when deps change.',
   effect: 'A `.store` reactive side-effect (Angular-style): `effect { ... }`. Re-runs automatically when the store state it reads changes.',
-  action: 'Declares a mutation: `action delete mutates users <- id { users.remove(u => u.id == id) }`.',
+  action: 'Declares a mutation: `action delete(uid: text) mutates users { users.remove where id == uid }`.',
   mutates: 'Lists the state an action may mutate — the linter enforces it.',
   mock: 'Inline mock data for queries: `mock { listUsers: [ { name: "Ana", role: admin } ] }`.',
   sources: 'Real data sources for queries: `sources { listChars: { url: "https://api...", at: "results" } }`.',
@@ -162,12 +162,13 @@ export const KEYWORD_DOCS = {
   contains: 'Case-insensitive substring match: `name contains @q`.',
 };
 
-export const ACTION_OPS = ['push', 'remove', 'patch', 'reset', 'set', 'create', 'update', 'delete', 'refetch'];
+export const ACTION_OPS = ['push', 'remove', 'patch', 'reset', 'toggle', 'set', 'create', 'update', 'delete', 'refetch'];
 export const ACTION_OP_DOCS = {
-  push: 'Append to a list state: `users.push(draft)` or an inline object `users.push({ name: draft.name, role: "admin" })` (auto-fills uuid fields). Move/edit an item in place with `remove(x => x.id == c.id)` + `push({ id: c.id, …, field: newVal })`.',
-  remove: 'Remove matching items locally: `users.remove(u => u.id == id)`.',
-  patch: 'Edit matching items IN PLACE (position-preserving): `todos.patch(t => t.id == id, { done: not t.done })`. Only list the fields that change. Use this to toggle/move/update an item instead of remove+push.',
+  push: 'Append to a list state: `users.push(draft)` or an inline object `users.push({ name: draft.name, role: "admin" })` (auto-fills uuid fields). Prefer `patch` to edit in place; `remove where … ` + `push(…)` only if you truly need to reorder.',
+  remove: 'Remove matching items locally (item fields bare): `users.remove where id == userId`. The param must be named differently from any field (the oracle flags `id == id`).',
+  patch: 'Edit matching items IN PLACE (position-preserving): `todos.patch where id == todoId with { done: not done }`. Item fields are bare; list ONLY the fields that change. Use this to toggle/move/update an item instead of remove+push.',
   reset: 'Reset a state to its declared initial: `draft.reset()`.',
+  toggle: 'Flip a bool state: `open.toggle()` (same as `open.set(not open)`).',
   set: 'Set a state value: `rating.set(v)` or an entity draft to an inline object: `draft.set({ name: c.name })`.',
   create: 'POST an item to a source-backed list, then append the result: `orders.create(draft)`.',
   update: 'PUT an item (by id) to a source-backed list, then replace it: `orders.update(order)`.',

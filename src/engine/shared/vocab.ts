@@ -43,8 +43,8 @@ export enum Kw {
   Get = 'get', Effect = 'effect', Action = 'action', Mutates = 'mutates',
   Mock = 'mock', Sources = 'sources', Routes = 'routes', Shell = 'shell',
   Part = 'part', Const = 'const', Theme = 'theme', Query = 'query', Every = 'every', Live = 'live', Param = 'param', Api = 'api', Body = 'body', Meta = 'meta',
-  Use = 'use', From = 'from', Client = 'client',
-  When = 'when', Each = 'each', As = 'as', Where = 'where', If = 'if', Else = 'else',
+  Use = 'use', From = 'from',
+  When = 'when', Each = 'each', As = 'as', Where = 'where', By = 'by', With = 'with', If = 'if', Else = 'else',
   Guard = 'guard', Not = 'not', And = 'and', Or = 'or', Contains = 'contains',
   Required = 'required', Min = 'min', Max = 'max',
   True = 'true', False = 'false', Null = 'null',
@@ -79,17 +79,17 @@ export enum BOp {
 export enum UOp { Not = 'not' }
 
 /** Expression AST node kinds (discriminants). */
-export enum Ek { Lit = 'lit', Ref = 'ref', Un = 'un', Bin = 'bin', Tern = 'tern', Interp = 'interp', Call = 'call', Obj = 'obj', Agg = 'agg' }
+export enum Ek { Lit = 'lit', Ref = 'ref', Un = 'un', Bin = 'bin', Tern = 'tern', Interp = 'interp', Call = 'call', Obj = 'obj', Agg = 'agg', Filter = 'filter' }
 
-// list aggregates: `list.sum(x => expr)` / `list.count(x => cond)` / avg / min / max. A method+lambda form
-// (reuses the list method API + the `=>` of remove/patch); `.length` stays the count-all.
+// list aggregates: `list.sum by expr` (projection) / `list.count where cond` (predicate) / avg / min / max.
+// Item-implicit (fields read bare, like a `where`-filter); `.length` stays the count-all.
 export const AGG_OPS = new Set<string>(['sum', 'count', 'avg', 'min', 'max']);
-// list sort: `contacts.sort(c => c.name)` (asc) / `scores.sortDesc(s => s.points)` (desc). Same method+lambda
-// shape as the aggregates (reuses AggExpr), but RETURNS A LIST (used in `each` / a `get`), not a scalar.
+// list sort: `contacts.sort by name` (asc) / `scores.sortDesc by points` (desc). Same item-implicit `by`
+// projection (reuses AggExpr), but RETURNS A LIST (used in `each` / a `get`), not a scalar.
 export const SORT_OPS = new Set<string>(['sort', 'sortDesc']);
 
 /** Action-body statement ops (discriminants) — mutations + the `if` branch. */
-export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Remove = 'remove', Patch = 'patch', Create = 'create', Update = 'update', Delete = 'delete', Refetch = 'refetch', Request = 'request', Call = 'call', If = 'if' }
+export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle', Remove = 'remove', Patch = 'patch', Create = 'create', Update = 'update', Delete = 'delete', Refetch = 'refetch', Request = 'request', Call = 'call', If = 'if' }
 
 /** Node modifiers (post-primitive). */
 export enum Mod {

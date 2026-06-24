@@ -52,7 +52,7 @@ entity Product { title text }
 state { q = "" : text  page = 1 : number  products = query products : list<Product> }
 sources { products: { url: "/products", at: "data" } }
 action apply mutates products <- term { products.refetch(q: term, page: page, sort: "new") }
-Page { SearchField bind q  Button "Go" -> apply(q)  each products as o { Text "{o.title}" } }`)));
+Page { SearchField bind(q)  Button "Go" -> apply(q)  each products as o { Text "{o.title}" } }`)));
 ok('refetch builds N params (input+state+literal)', rjs.includes('__refetch("products", { "q": term, "page": page.get(), "sort": "new" }, products)'));
 ok('refetch stays sync (a read, not a write)', rjs.includes('function apply(term)') && !rjs.includes('async function apply'));
 ok('__refetch helper emitted', rjs.includes('function __refetch(name, params, sig)'));

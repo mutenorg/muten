@@ -99,6 +99,8 @@ export function emitSsr(parts: EmitParts): string {
 
   ${parts.stateDecls}
 
+  ${parts.getDecls}
+
   ${parts.actionDecls}
 
   ${parts.componentDecls}
@@ -148,7 +150,6 @@ export function emitModule(parts: EmitParts): string {
   return `import { signal, computed, effect, root, onCleanup, __eq, __id, __has } from 'virtual:muten/runtime';
 ${parts.storeImports}
 ${parts.externImports}
-${parts.islandImports}
 export const screen = ${JSON.stringify(parts.screen)};
 export const css = ${JSON.stringify(`${parts.tokenCss}\n${parts.projectCss}`)};
 export const meta = ${JSON.stringify(parts.meta)};
@@ -159,6 +160,8 @@ export function mount(app, __params) {
   ${parts.paramDecls}
 
   ${parts.stateDecls}
+
+  ${parts.getDecls}
 
   ${parts.actionDecls}
 
@@ -201,6 +204,9 @@ ${metaTags(parts.meta, parts.screen)}
 
   // ── declared state (state from the IR) ──
   ${parts.stateDecls}
+
+  // ── page-level derived values (get → computed) ──
+  ${parts.getDecls}
 
   // ── actions (actions from the IR) ──
   ${parts.actionDecls}

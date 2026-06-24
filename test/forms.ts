@@ -11,7 +11,7 @@ entity Account { email email required  password text required min:6 }
 state { draft = {} : Account  done = false : bool }
 action submit mutates done <- d { done.set(true) }
 Page {
-  Form bind @draft submit submit "Create"
+  Form bind(draft) submit(submit) "Create"
   Text "{done}"
 }
 `;

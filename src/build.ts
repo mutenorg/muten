@@ -2,13 +2,10 @@
 // A pure-ish library function: it throws on any error; the CLI (bin/muten.ts) formats + exits.
 
 import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
-import { join, relative, resolve, dirname } from 'node:path';
-import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
+import { join, relative, dirname } from 'node:path';
 import { Nt, Fmt } from '#engine/shared/vocab.js';
 import { readRoutes, readApi } from '#engine/project/routes.js';
-import { renderSsrBody, fetchSources, type IslandReq } from '#engine/project/ssr.js';
-import type { ViteDevServer, PluginOption } from 'vite';
+import { renderSsrBody, fetchSources } from '#engine/project/ssr.js';
 import { routeEntry } from '#engine/project/map.js';
 import { load, loadAllParts, findStores } from '#engine/project/load.js';
 import { validateStoresAndGuards } from '#engine/project/check-app.js';
@@ -59,41 +56,6 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist')):
   // the "root that knows everything" (north star): an index of the app, derived from the build.
   const appMap: AppMap = { app: appRoot.split(/[\\/]/).pop() || '', parts: Object.keys(sharedParts), routes: {} };
 
-  // Full island SSR: spin up a minimal vite ourselves (configFile:false → not the app's DEV config) with the
-  // app's own svelte/react plugins in PRODUCTION mode, so islands compile without dev-only instrumentation
-  // (svelte's `push_element` etc.) or the deps_ssr two-instance split. Then server-render each + inject the HTML.
-  const server: { vite: ViteDevServer | null } = { vite: null }; // holder so the closure's assignment survives TS narrowing
-  const appRequire = createRequire(join(appRoot, 'package.json'));
-  const appImport = (spec: string): Promise<{ [k: string]: Function }> => import(pathToFileURL(appRequire.resolve(spec)).href);
-  const getVite = async (): Promise<ViteDevServer> => {
-    if (server.vite) return server.vite;
-    const { createServer } = await import('vite');
-    const plugins: PluginOption[] = [];
-    try { const m = await appImport('@sveltejs/vite-plugin-svelte'); plugins.push(m.svelte({ compilerOptions: { dev: false } })); } catch { /* svelte not installed → skip */ }
-    try { const m = await appImport('@vitejs/plugin-react'); plugins.push(m.default()); } catch { /* react not installed → skip */ }
-    // optimizeDeps pre-bundles react (incl. its CJS jsx runtimes) via esbuild → clean ESM, so the dev-server
-    // module runner can load them (raw CJS would throw `module is not defined`). svelte compiles in prod (above).
-    const v = await createServer({ configFile: false, root: appRoot, mode: 'production', appType: 'custom', server: { middlewareMode: true }, logLevel: 'silent', plugins, resolve: { dedupe: ['svelte'] }, optimizeDeps: { include: ['react', 'react-dom', 'react/jsx-runtime', 'react/jsx-dev-runtime'] } });
-    server.vite = v;
-    return v;
-  };
-  const ssrIsland = async (req: IslandReq, screenDir: string): Promise<string> => {
-    const vite = await getVite(); // load the component AND the framework's server-renderer through THE SAME vite,
-    const Comp = (await vite.ssrLoadModule(resolve(screenDir, req.path))).default; // so they share one fw instance
-    if (req.adapter === 'svelte') {
-      const m = await vite.ssrLoadModule('svelte/server'); // foreign border (vite's any) — render(Component, {props}) → { body }
-      return m.render(Comp, { props: req.props }).body;
-    }
-    if (req.adapter === 'react') { // react-dom/server is CJS — load it through Node (native CJS), not vite's SSR transform
-      const rd = await import(pathToFileURL(appRequire.resolve('react-dom/server')).href);
-      const r = await import(pathToFileURL(appRequire.resolve('react')).href);
-      const renderToString = rd.renderToString || rd.default.renderToString;
-      const createElement = r.createElement || r.default.createElement;
-      return renderToString(createElement(Comp, req.props));
-    }
-    return '';
-  };
-
   for (const page of pages) {
     if (page.route.includes(':')) { console.log(`• /${page.route} — skipped (route params run in the SPA runtime, not the static build)`); continue; }
     let loaded;
@@ -109,7 +71,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist')):
     // `use` logic functions live in external .ts files that the standalone build CANNOT inline (no bundler).
     // The page compiles a CALL to them with no definition → runtime ReferenceError. Warn loudly instead of
     // shipping silently-broken HTML (the deploy path for `use` is `vite build`, which bundles them).
-    const useFns = (doc.imports || []).filter((i) => !/^(svelte|react):/.test(i.from)).flatMap((i) => i.names);
+    const useFns = (doc.imports || []).flatMap((i) => i.names);
     if (useFns.length) console.log(`  ⚠ /${page.route}: \`use\` function(s) ${useFns.join(', ')} are NOT inlined into the standalone build — they'll throw at runtime. Use \`vite build\` for a bundle that includes them.`);
 
     const { ok, diagnostics } = validate(doc, { parts: partNames, stores, storeMembers }); // project-aware: parts + stores (parity with `check`)
@@ -134,14 +96,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist')):
       try {
         // bake remote sources into the build-time data so source-backed lists pre-render too (not just mock)
         const ssrData = Object.keys(sources).length ? { ...data, ...await fetchSources(sources, api) } : data;
-        const islands: IslandReq[] = [];
-        let body = renderSsrBody(compile(doc, ssrData, styles.css, components, sources, { format: Fmt.Ssr, api, stores: storesMeta, storeCode }), islands);
-        for (let i = 0; i < islands.length; i++) { // server-render each island + drop its HTML in place of the marker
-          let h = ''; // a failed island leaves an empty placeholder → it just hydrates client-side (no page-wide CSR)
-          try { h = await ssrIsland(islands[i], dirname(page.screenPath)); }
-          catch (e) { console.log(`  • island ${islands[i].path} → client-only (${e instanceof Error ? e.message : e})`); }
-          body = body.replace(`<!--mi:${i}-->`, h);
-        }
+        const body = renderSsrBody(compile(doc, ssrData, styles.css, components, sources, { format: Fmt.Ssr, api, stores: storesMeta, storeCode }));
         html = csr.replace('<div id="app"></div>', `<div id="app">${body}</div>`);
         ssrd = true;
       } catch { /* keep the CSR shell — the client renders it */ }
@@ -155,7 +110,6 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist')):
 
     appMap.routes['/' + page.route] = routeEntry(rel(page.screenPath), doc, sources);
   }
-  if (server.vite) await server.vite.close(); // tear down the island-SSR vite server (if any island forced it up)
 
   // `muten build` emits STATIC per-route HTML (great for content/landing). A stateful multi-page app — a shared
   // .store across pages, route guards, a persistent shell — is an SPA: each static page reloads from scratch, so

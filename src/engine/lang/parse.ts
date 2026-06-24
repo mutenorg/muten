@@ -41,11 +41,13 @@ export class Parser extends Grammar {
     super(source);
 
     this.modifiers = new Map([
-      [Mod.Bind, (props: NodeProps) => { // @local, or `@store.member` (the `@` sigil only captures the head — read the dotted tail too)
+      [Mod.Bind, (props: NodeProps) => { // canonical `bind(name)`; bare name / `@name` still parse during migration
+        const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next();
         if (this.at(Tk.Ref)) { let b = this.eat(Tk.Ref).v; while (this.at(Tk.Punct, Pn.Dot)) { this.next(); b += '.' + this.eat(Tk.Ident).v; } props.bind = b; }
         else props.bind = this.parseDotted();
+        if (paren) this.eat(Tk.Punct, Pn.ParenR);
       }],
-      [Mod.Submit, (props: NodeProps) => { props.submit = this.parseDotted(); }],
+      [Mod.Submit, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.submit = this.parseDotted(); if (paren) this.eat(Tk.Punct, Pn.ParenR); }],
       [Mod.Where, (props: NodeProps) => { props.where = this.parseParenList(() => this.rebuildClause()); }],
       [Mod.Columns, (props: NodeProps) => { props.columns = this.parseParenList(() => this.eat(Tk.Ident).v); }],
       [Mod.Style, (props: NodeProps) => { props.style = this.parseParenList(() => this.parseStyleToken()); }],
@@ -54,7 +56,7 @@ export class Parser extends Grammar {
         if (this.at(Tk.Ident, Kw.When)) { this.next(); return { name, cond: this.parseExpr() }; }
         return name;
       }); }],
-      [Mod.Alt, (props: NodeProps) => { props.alt = this.parseInterpolation(this.eat(Tk.String).v); }],  // Image a11y/SEO text
+      [Mod.Alt, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.alt = this.parseInterpolation(this.eat(Tk.String).v); if (paren) this.eat(Tk.Punct, Pn.ParenR); }],  // Image a11y/SEO text
       [Mod.Inputs, (props: NodeProps) => { props.inputs = this.parseArgs(); }],   // Custom: inputs(k: value, …)
       [Mod.On, (props: NodeProps) => { props.on = this.parseArgs(); }],           // Custom: on(event: action, …)
     ]);
@@ -63,8 +65,8 @@ export class Parser extends Grammar {
       [StOp.Push, (target: string): Stmt => ({ op: StOp.Push, target, arg: this.parseExpr() })],
       [StOp.Set, (target: string): Stmt => ({ op: StOp.Set, target, arg: this.parseExpr() })],
       [StOp.Reset, (target: string): Stmt => ({ op: StOp.Reset, target })],
-      [StOp.Remove, (target: string): Stmt => { const param = this.eat(Tk.Ident).v; this.eat(Tk.FatArrow); return { op: StOp.Remove, target, param, pred: this.parseExpr() }; }],
-      [StOp.Patch, (target: string): Stmt => { const param = this.eat(Tk.Ident).v; this.eat(Tk.FatArrow); const pred = this.parseExpr(); this.eat(Tk.Punct, Pn.Comma); return { op: StOp.Patch, target, param, pred, patch: this.parseExpr() }; }], // patch(x => pred, { field: val })
+      [StOp.Toggle, (target: string): Stmt => ({ op: StOp.Toggle, target })], // `flag.toggle()` — flip a bool
+      // remove/patch are NOT here: they parse inline as `remove where <cond>` / `patch where <cond> with { … }` (no parens, item-implicit)
       [StOp.Create, (target: string): Stmt => ({ op: StOp.Create, target, arg: this.parseExpr() })], // POST to the source
       [StOp.Update, (target: string): Stmt => ({ op: StOp.Update, target, arg: this.parseExpr() })], // PUT /:id
       [StOp.Delete, (target: string): Stmt => ({ op: StOp.Delete, target, arg: this.parseExpr() })], // DELETE /:id
@@ -107,7 +109,8 @@ export class Parser extends Grammar {
         const names = [this.eat(Tk.Ident).v];
         while (this.at(Tk.Punct, Pn.Comma)) { this.next(); names.push(this.eat(Tk.Ident).v); }
         this.eat(Tk.Ident, Kw.From);
-        (ir.imports = ir.imports || []).push({ names, from: this.eat(Tk.String).v });
+        const from = this.eat(Tk.String).v;
+        (ir.imports = ir.imports || []).push({ names, from });
       }],
     ]);
     while (!this.at(Tk.Eof)) {
@@ -200,16 +203,20 @@ export class Parser extends Grammar {
     (ir.gets = ir.gets || {})[name] = this.parseExpr();
   }
 
-  // action <name> mutates <targets> <- <input> { <statements> } — the mutation logic lives HERE
+  // action <name>[(a: T, b: T)] mutates <targets> [<- <input>] { <statements> } — the mutation logic lives HERE
   // (in the source), declared and bounded; the compiler only translates it, it never invents it.
+  // Two parameter forms, both supported: the multi-param `(a: T, b: T)` (typed, like a part), and the
+  // legacy single `<- input`. They never combine — a `(…)` action reads its params; a `<- v` action its input.
   private parseAction(ir: IR): void {
     this.eat(Tk.Ident, Kw.Action);
     const name = this.eat(Tk.Ident).v;
+    let params: PartParam[] | undefined;   // optional typed params: `action f(a: T, b: T)`
+    if (this.at(Tk.Punct, Pn.ParenL)) params = this.parseParenList(() => { const pn = this.eat(Tk.Ident).v; this.eat(Tk.Punct, Pn.Colon); return { name: pn, type: this.parseType() }; });
     const mutates: string[] = []; // optional: a pure command (e.g. an explicit `post`) mutates nothing local
     if (this.at(Tk.Ident, Kw.Mutates)) { this.next(); mutates.push(this.eat(Tk.Ident).v); while (this.at(Tk.Punct, Pn.Comma)) { this.next(); mutates.push(this.eat(Tk.Ident).v); } }
-    let input = '';               // optional input parameter (`<- item`)
+    let input = '';               // optional legacy input parameter (`<- item`)
     if (this.at(Tk.LArrow)) { this.next(); input = this.eat(Tk.Ident).v; }
-    ir.actions[name] = { mutates, input, body: this.parseActionBody() };
+    ir.actions[name] = { mutates, input, params, body: this.parseActionBody() };
   }
 
   // { statement* } — an action body or an `if` branch; each statement is a declared mutation.
@@ -252,6 +259,14 @@ export class Parser extends Grammar {
     const target = this.eat(Tk.Ident).v;
     this.eat(Tk.Punct, Pn.Dot);
     const method = this.eat(Tk.Ident).v;
+    // lambda-free predicate mutation (the ONLY form): `tasks.remove where id == x` / `tasks.patch where id == x with { … }`
+    if (method === StOp.Remove || method === StOp.Patch) {
+      if (!this.at(Tk.Ident, Kw.Where)) throw new ParseError(`\`${method}\` takes a \`where <cond>\` predicate now, not a \`(x => …)\` lambda — write \`${target}.${method} where <cond>\`${method === StOp.Patch ? ' with { … }' : ''} (item fields read bare)`, this.locOf(this.peek().pos));
+      this.next();
+      const pred = this.parseExpr();
+      if (method === StOp.Patch) { this.eat(Tk.Ident, Kw.With); return { op: StOp.Patch, target, pred, patch: this.parseExpr() }; }
+      return { op: StOp.Remove, target, pred };
+    }
     this.eat(Tk.Punct, Pn.ParenL);
     const build = this.statements.get(method);
     if (!build) { // not a built-in op → a store-action call `shop.add(draft)` (validate confirms target is a store)
@@ -402,9 +417,8 @@ export class Parser extends Grammar {
     const head = this.eat(Tk.Ident);
     const type = head.v;
     const loc = this.locOf(head.pos);
-    if (this.at(Tk.Punct, Pn.ParenL)) { // part instance / island: Name(arg: value) [client:visible]
+    if (this.at(Tk.Punct, Pn.ParenL)) { // part instance: Name(arg: value)
       const args = this.parseArgs();
-      if (this.at(Tk.Ident, Kw.Client)) { this.next(); this.eat(Tk.Punct, Pn.Colon); return { type, args, props: { hydrate: this.eat(Tk.Ident).v }, loc }; }
       return { type, args, loc };
     }
 
@@ -441,14 +455,20 @@ export class Parser extends Grammar {
     return node;
   }
 
-  // the `->` part of a node: a Link's destination, or an action (with an optional single argument).
+  // the `->` part of a node: a Link's destination, or an action (with optional comma-separated arguments).
+  // One arg lands in `props.arg` (unchanged); a multi-param action `-> f(a, b)` keeps the rest in `argRest`.
   private parseArrow(type: string, props: NodeProps): void {
     this.next();
     if (type === Nt.Link) { props.to = this.parsePath(); return; }
     props.action = this.parseDotted();                  // local `add`, store `cart.add`, or a `$onSave` param
     if (!this.at(Tk.Punct, Pn.ParenL)) return;
     this.next();
-    if (!this.at(Tk.Punct, Pn.ParenR)) props.arg = this.parseExpr(); // one arg: a ref OR a literal
+    if (!this.at(Tk.Punct, Pn.ParenR)) {
+      props.arg = this.parseExpr();                     // first arg: a ref OR a literal
+      const rest: Expr[] = [];
+      while (this.at(Tk.Punct, Pn.Comma)) { this.next(); rest.push(this.parseExpr()); }
+      if (rest.length) props.argRest = rest;            // 2nd+ args only set for a multi-arg call
+    }
     this.eat(Tk.Punct, Pn.ParenR);
   }
 
