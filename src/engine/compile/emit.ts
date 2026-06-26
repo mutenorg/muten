@@ -51,7 +51,16 @@ export const BUILTINS_JS = `function upper(s) { return String(s == null ? '' : s
   function money(n, cur) { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: cur || 'USD' }).format(Number(n) || 0); } catch (e) { return String(n); } }
   function ago(iso) { const t = new Date(iso).getTime(); if (isNaN(t)) return String(iso == null ? '' : iso); const s = (Date.now() - t) / 1000; if (s < 45) return 'just now'; if (s < 5400) return Math.max(1, Math.round(s / 60)) + 'm ago'; if (s < 86400) return Math.round(s / 3600) + 'h ago'; return Math.round(s / 86400) + 'd ago'; }
   function date(iso) { const d = new Date(iso); return isNaN(d.getTime()) ? String(iso == null ? '' : iso) : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); }
-  function time(iso) { const d = new Date(iso); return isNaN(d.getTime()) ? String(iso == null ? '' : iso) : d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }`;
+  function time(iso) { const d = new Date(iso); return isNaN(d.getTime()) ? String(iso == null ? '' : iso) : d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }
+  function now() { return new Date().toISOString(); }
+  function before(s, sep) { s = String(s == null ? '' : s); const i = s.indexOf(String(sep == null ? '' : sep)); return i < 0 ? s : s.slice(0, i); }
+  function after(s, sep) { const str = String(s == null ? '' : s), sp = String(sep == null ? '' : sep); const i = str.indexOf(sp); return i < 0 ? '' : str.slice(i + sp.length); }
+  function datetime(iso) { const d = new Date(iso); return isNaN(d.getTime()) ? String(iso == null ? '' : iso) : d.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }); }
+  function weekday(iso) { const d = new Date(iso); return isNaN(d.getTime()) ? String(iso == null ? '' : iso) : d.toLocaleDateString(undefined, { weekday: 'long' }); }
+  function calendar(iso) { const d = new Date(iso); if (isNaN(d.getTime())) return String(iso == null ? '' : iso); const n = new Date(); const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime(); const diff = Math.round((day(n) - day(d)) / 86400000); const tm = time(iso); if (diff === 0) return 'Today at ' + tm; if (diff === 1) return 'Yesterday at ' + tm; if (diff === -1) return 'Tomorrow at ' + tm; return date(iso) + ' at ' + tm; }
+  function isToday(iso) { const d = new Date(iso); if (isNaN(d.getTime())) return false; const n = new Date(); return d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate(); }
+  function isPast(iso) { const t = new Date(iso).getTime(); return !isNaN(t) && t < Date.now(); }
+  function isFuture(iso) { const t = new Date(iso).getTime(); return !isNaN(t) && t > Date.now(); }`;
 
 function dataLayer(parts: EmitParts): string {
   return `${BUILTINS_JS}

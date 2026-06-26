@@ -10,6 +10,7 @@ import type { Plugin, ResolvedConfig, HmrContext, ViteDevServer } from 'vite';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { load, loadAllParts, findStores } from '#engine/project/load.js';
+import { apiClientNames } from '#engine/project/routes.js';
 import { validate } from '#engine/ir/validate.js';
 import { compileModule, compileStore } from '#engine/compile/compile.js';
 import { emitTheme } from '#engine/style/tokens.js';
@@ -169,8 +170,25 @@ if (root) {
       // page-to-store action composition. Without it, both are wrongly rejected.
       const storeMembers: { [d: string]: string[] } = {};
       for (const [d, m] of Object.entries(storesMeta)) storeMembers[d] = [...(m.state || []), ...(m.gets || []), ...(m.actions || [])];
-      const { ok, diagnostics } = validate(loaded.doc, { parts: loaded.partNames, stores: Object.keys(storesMeta), storeMembers, classValidator });
-      if (!ok) throw new Error('muten: ' + diagnostics.map((d) => d.message).join(' · '));
+      const { ok, diagnostics } = validate(loaded.doc, { parts: loaded.partNames, stores: Object.keys(storesMeta), storeMembers, classValidator, apiClients: apiClientNames(appIr?.api || {}) });
+      if (!ok) {
+        // A TRACKABLE live error: point at the exact .muten line with a code frame + the "did you mean",
+        // not a flat join of messages. The dev-server overlay then reads like a TypeScript error.
+        const first = diagnostics.find((d) => d.loc) || diagnostics[0];
+        const rel = id.replace(/\\/g, '/');
+        const where = first.loc ? `${rel}:${first.loc.line}:${first.loc.col}` : rel;
+        let frame = '';
+        if (first.loc) {
+          const srcLine = code.split('\n')[first.loc.line - 1] ?? '';
+          const gutter = String(first.loc.line);
+          frame = `\n  ${gutter} | ${srcLine}\n  ${' '.repeat(gutter.length)} | ${' '.repeat(Math.max(0, first.loc.col - 1))}^`;
+        }
+        const tip = first.suggestion ? `\n  did you mean \`${first.suggestion}\`?` : '';
+        const more = diagnostics.length > 1 ? `\n  (+${diagnostics.length - 1} more problem${diagnostics.length > 2 ? 's' : ''})` : '';
+        const err = new Error(`[muten] ${first.message}\n  at ${where}${frame}${tip}${more}`) as Error & { loc?: { file: string; line: number; column: number }; id?: string };
+        if (first.loc) { err.loc = { file: id, line: first.loc.line, column: first.loc.col }; err.id = id; }
+        throw err;
+      }
 
       const customNames = [...new Set(Object.values(loaded.doc.nodes).filter((n) => n.type === Nt.Custom).map((n) => n.props?.component))];
       const components: { [name: string]: string } = {};
@@ -180,7 +198,8 @@ if (root) {
         if (existsSync(path)) components[name] = readFileSync(path, 'utf8');
       }
 
-      return { code: compileModule(loaded.doc, loaded.data, loaded.styles.css, components, loaded.sources, { stores: storesMeta, api: appIr?.api || {}, iconResolver: makeIconResolver(appRoot) }), map: null };
+      // sources live in app.muten (next to `api`), so a page's `query x` resolves against the APP's sources; a page-local `sources` block still overrides.
+      return { code: compileModule(loaded.doc, loaded.data, loaded.styles.css, components, { ...(appIr?.sources || {}), ...loaded.sources }, { stores: storesMeta, api: appIr?.api || {}, iconResolver: makeIconResolver(appRoot) }), map: null };
     },
 
     handleHotUpdate(ctx: HmrContext) {

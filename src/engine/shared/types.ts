@@ -390,7 +390,7 @@ export interface CompileCtx {
 
 /** An editable Form field derived from an entity (excludes the auto uuid id). */
 export interface EnumField { name: string; kind: Fk.Enum; options: string[]; }
-export interface SimpleField { name: string; kind: Fk.Text | Fk.Email | Fk.Number | Fk.Bool; }
+export interface SimpleField { name: string; kind: Fk.Text | Fk.Email | Fk.Number | Fk.Bool | Fk.Date; }
 export type EditableField = EnumField | SimpleField;
 
 /** Input to compileStore(): one .store domain slice (state + get + actions + effects + entities). */
@@ -442,6 +442,7 @@ export interface ValidateCtx {
   storeMembers?: { [domain: string]: string[] };  // each store's members (state + gets + actions) -> catch typos like `cart.kount`
   kind?: FileKind;
   classValidator?: ClassValidator;                // when set, class() names are validated against the framework's theme
+  apiClients?: string[];                           // named api clients (from app.muten `api {}`); a `post "client:/x"` prefix is checked against these. undefined -> not threaded, skip the check
 }
 
 /** A lexical scope while compiling expressions: lambda locals + the action input. */

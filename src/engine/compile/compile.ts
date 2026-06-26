@@ -258,7 +258,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
             lines.push(`${fv}.className = 'mu-field-check';`);
           } else {
             lines.push(`const ${fv} = document.createElement('input');`);
-            lines.push(`${fv}.type = ${JSON.stringify(f.kind === Fk.Email ? 'email' : f.kind === Fk.Number ? 'number' : 'text')};`);
+            lines.push(`${fv}.type = ${JSON.stringify(f.kind === Fk.Email ? 'email' : f.kind === Fk.Number ? 'number' : f.kind === Fk.Date ? 'date' : 'text')};`);
             lines.push(`${fv}.className = 'mu-field';`);
             lines.push(`${fv}.placeholder = ${JSON.stringify(f.name)};`);
           }

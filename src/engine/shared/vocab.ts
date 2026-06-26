@@ -61,7 +61,7 @@ export enum Nt {
 export enum Fmt { Module = 'module', Store = 'store', Html = 'html', Ssr = 'ssr' }
 
 /** Editable form-field kinds (how a Form renders an entity field). */
-export enum Fk { Text = 'text', Email = 'email', Number = 'number', Bool = 'bool', Enum = 'enum' }
+export enum Fk { Text = 'text', Email = 'email', Number = 'number', Bool = 'bool', Enum = 'enum', Date = 'date' }
 
 /** Binary operators (in the expression AST). */
 export enum BOp {

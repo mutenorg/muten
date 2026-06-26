@@ -9,6 +9,7 @@ import { parse } from '#engine/lang/parse.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { validate } from '#engine/ir/validate.js';
 import { closest, diag, ParseError } from '#engine/shared/diagnostics.js';
+import { readApi, apiClientNames } from '#engine/project/routes.js';
 import { PRIMITIVE_NAMES } from '#engine/lang/manifest.js';
 import type { PartDef, Route, Diagnostic, ValidateResult, StateDef, CompletionResult, CompletionState } from '#engine/shared/types.js';
 
@@ -138,12 +139,15 @@ export function analyze(filePath: string, text: string): ValidateResult {
   }
   if (ir.routes) return analyzeRoutes(filePath, ir.routes); // app.muten: route-level checks only
   if (ir.theme) return { ok: true, diagnostics: [] };       // theme.muten: config only, nothing to validate
+  const appRoot = findAppRoot(filePath);
+  const apiClients = appRoot ? apiClientNames(readApi(appRoot)) : undefined; // the app's named api clients, so a `post "client:/x"` prefix is checked
   if (filePath.endsWith('.store')) { // .store domain slice (state + get + action + effect)
-    return validate({ screen: 'store', state: ir.state || {}, actions: ir.actions || {}, entities: ir.entities || {}, gets: ir.gets || {}, effects: ir.effects || [], consts: {}, constraints: {}, rootId: undefined, nodes: {} }, { kind: 'store' });
+    return validate({ screen: 'store', state: ir.state || {}, actions: ir.actions || {}, entities: ir.entities || {}, gets: ir.gets || {}, effects: ir.effects || [], consts: {}, constraints: {}, rootId: undefined, nodes: {} }, { kind: 'store', apiClients });
   }
-  const parts = projectParts(filePath);
+  const parts = { ...projectParts(filePath) };
+  for (const [name, def] of Object.entries(ir.parts || {})) parts[name] = { ...def, state: {}, entities: {}, mock: {}, css: '' }; // the page's OWN inline parts (load() composes these too — without this the IDE falsely flags them unknown)
   const { doc } = composeDoc(ir, parts); // resolve parts (typos flagged) + hoist state -> flat doc
-  return validate(doc, { parts: Object.keys(parts), stores: projectStores(filePath), storeMembers: projectStoreMembers(filePath) });
+  return validate(doc, { parts: Object.keys(parts), stores: projectStores(filePath), storeMembers: projectStoreMembers(filePath), apiClients });
 }
 
 // Autocomplete context: parts, state, and actions visible to this file across the whole app.

@@ -58,6 +58,7 @@ export function editableFields(entity: Entity): EditableField[] {
     else if (type === 'email') fields.push({ name, kind: Fk.Email });
     else if (type === 'number') fields.push({ name, kind: Fk.Number });
     else if (type === 'bool') fields.push({ name, kind: Fk.Bool });
+    else if (type === 'date') fields.push({ name, kind: Fk.Date });
     else fields.push({ name, kind: Fk.Text });
   }
   return fields;

@@ -5,6 +5,7 @@
 
 import { Ek, StOp, BOp, UOp, Fmt } from '#engine/shared/vocab.js';
 import { JS_BINOP } from '#engine/compile/helpers.js';
+import { elementType, elementFields, type RefFacts } from '#engine/ir/refs.js';
 import type { CompileCtx, Expr, Stmt, Scope, Value, ValueObject } from '#engine/shared/types.js';
 
 export class Logic {
@@ -43,30 +44,15 @@ export class Logic {
     return Object.entries(entity).filter(([, type]) => type === 'uuid').map(([field]) => field);
   }
 
-  // bare-referenceable fields of `<list>`'s element, for a `where`/`by` item-implicit scope.
-  // `tasks : list<Task>` -> { id, ...Task fields }; non-entity element (list<uuid>) -> just `id`.
-  private itemFields(list: string): Set<string> {
-    const entity = this.ctx.entities[this.listElemType(list.split('.')[0])];
-    return new Set(['id', ...(entity ? Object.keys(entity) : [])]);
-  }
+  // the SHARED resolver's inputs — the SAME facts the linter holds (engine/ir/refs.ts), so what a list
+  // resolves to can never drift between lint and runtime (the old two-layer ReferenceError bug).
+  private get refFacts(): RefFacts { return { state: this.ctx.state, gets: this.ctx.gets, entities: this.ctx.entities }; }
 
-  // element-entity name behind a list head: a state's `list<X>`, OR a derived `get` whose body resolves
-  // to a list (a `where`-filter or a sort over another list/get). '' when not a list-of-entity; cycle-guarded.
-  // Without this, an aggregate/filter OVER a get compiled its body's bare fields as undefined globals
-  // (a runtime ReferenceError), the mirror of the same gap in validate.
-  private listElemType(head: string, seen: Set<string> = new Set()): string {
-    const stateType = this.ctx.state[head]?.type || '';
-    if (stateType.startsWith('list<')) return stateType.slice(5, -1);
-    const body = this.ctx.gets[head];
-    if (body !== undefined && !seen.has(head)) { seen.add(head); return this.getBodyElemType(body, seen); }
-    return '';
-  }
-  private getBodyElemType(e: Expr, seen: Set<string>): string {
-    if (!e) return '';
-    if (e.kind === Ek.Ref) return this.listElemType(e.name.split('.')[0], seen);
-    if (e.kind === Ek.Filter) return this.listElemType(e.list.split('.')[0], seen);
-    if (e.kind === Ek.Agg && (e.op === 'sort' || e.op === 'sortDesc')) return this.listElemType(e.list.split('.')[0], seen);
-    return '';
+  // bare-referenceable fields of `<list>`'s element, for a `where`/`by` item-implicit scope — via the
+  // SHARED resolver, so the linter and the emitter agree on exactly which fields a row exposes
+  // (`tasks : list<Task>` -> { id, ...Task fields }; a non-entity element (list<uuid>) -> just `id`).
+  private itemFields(list: string): Set<string> {
+    return elementFields(elementType(list.split('.')[0], this.refFacts), this.refFacts);
   }
 
   // does the body contain a server write (create/update/delete)? recurses into if-branches.

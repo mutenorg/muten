@@ -135,7 +135,7 @@ export const MODIFIER_DOCS = {
 
 // Built-in formatting functions: callable like a `use`'d function but ALWAYS available (no import). The bounded
 // answer to "muten has no dates/string ops" — a FIXED set, so the language stays small and the oracle knows them.
-export const BUILTINS = ['upper', 'lower', 'initial', 'truncate', 'money', 'ago', 'date', 'time'];
+export const BUILTINS = ['upper', 'lower', 'initial', 'truncate', 'money', 'ago', 'date', 'time', 'datetime', 'calendar', 'weekday', 'now', 'isToday', 'isPast', 'isFuture', 'before', 'after'];
 export const BUILTIN_DOCS: { [k: string]: string } = {
   upper: 'upper(text) → UPPERCASE.',
   lower: 'lower(text) → lowercase.',
@@ -145,6 +145,15 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   ago: 'ago(isoText) → relative time: "just now" / "5m ago" / "3h ago" / "2d ago" (the timestamp is a text field holding an ISO string).',
   date: 'date(isoText) → short date, e.g. "Jan 5".',
   time: 'time(isoText) → short time, e.g. "3:42 PM".',
+  datetime: 'datetime(isoText) → full date + time, e.g. "Jan 5, 2024, 3:42 PM".',
+  calendar: 'calendar(isoText) → chat/feed-style smart timestamp: "Today at 3:42 PM" / "Yesterday at 3:42 PM" / "Jan 5 at 3:42 PM". The right default for a message timestamp.',
+  weekday: 'weekday(isoText) → the day name, e.g. "Monday".',
+  now: 'now() → the CURRENT time as an ISO string. Use it to stamp a new record before sending: `messages.push({ text: draft, time: now() })`. (Pairs with ago/date/time, which format a timestamp.)',
+  isToday: 'isToday(isoText) → bool: is the date today? For `when`/grouping: `when isToday(msg.time) { … }`.',
+  isPast: 'isPast(isoText) → bool: is the date before now? (deadlines, expiry).',
+  isFuture: 'isFuture(isoText) → bool: is the date after now? (upcoming events).',
+  before: 'before(text, sep) → the part of `text` BEFORE the first `sep` (whole string if not found): `before(user.email, "@")` → the username; `before(name, " ")` → first name.',
+  after: 'after(text, sep) → the part of `text` AFTER the first `sep` (empty if not found): `after(user.email, "@")` → the domain.',
 };
 export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from'];
 export const KEYWORD_DOCS = {

@@ -4,7 +4,7 @@
 import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { Nt, Fmt } from '#engine/shared/vocab.js';
-import { readRoutes, readApi } from '#engine/project/routes.js';
+import { readRoutes, readApi, readSources } from '#engine/project/routes.js';
 import { renderSsrBody, fetchSources } from '#engine/project/ssr.js';
 import { routeEntry } from '#engine/project/map.js';
 import { load, loadAllParts, findStores } from '#engine/project/load.js';
@@ -49,6 +49,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
 
   const pages = readRoutes(appRoot); // throws on missing/duplicate/dangling routes
   const api = readApi(appRoot);      // app-wide backend config (base + headers) for source fetches
+  const appSources = readSources(appRoot); // app-wide `sources` (in app.muten) — merged into each page's queries
   console.log(`Host app: ${appRoot}`);
   console.log(`Pages: ${pages.map((p) => '/' + p.route).join(', ')}\n`);
 
@@ -66,7 +67,8 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
       const d: Diagnostic = { code: e.code, severity: 'error', message: e.message, loc: e.loc, suggestion: null };
       throw new Error(`/${page.route}\n   ` + formatDiagnostic(d, rel(page.screenPath)));
     }
-    const { doc, data, sources, styles, partNames } = loaded;
+    const { doc, data, sources: pageSources, styles, partNames } = loaded;
+    const sources = { ...appSources, ...pageSources }; // app.muten sources resolve the page's `query x`; a page-local source overrides
 
     // `use` functions live in external .ts files that the standalone build cannot bundle; the page
     // would compile a call with no definition -> runtime ReferenceError. Warn instead of shipping broken HTML.

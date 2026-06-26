@@ -6,13 +6,14 @@
 import { diag, closest } from '#engine/shared/diagnostics.js';
 import { PRIMITIVE_NAMES, ACTION_OPS, PRIMITIVES, BUILTINS } from '#engine/lang/manifest.js';
 import { Nt, Ek, StOp, BOp } from '#engine/shared/vocab.js';
-import type { Doc, FlatNode, ValidateCtx, ValidateResult, Diagnostic, Expr, Stmt, StringPropValue, Loc } from '#engine/shared/types.js';
+import { exprListType, isKnownHead, type RefFacts, type KnownHeads } from '#engine/ir/refs.js';
+import type { Doc, FlatNode, ValidateCtx, ValidateResult, Diagnostic, Expr, Stmt, RequestStmt, StringPropValue, Loc } from '#engine/shared/types.js';
 
 const KNOWN_TYPES = new Set<string>([...PRIMITIVE_NAMES, Nt.Shell]); // manifest primitives + Shell wrapper (app.muten root)
 const REF_PROPS: Array<'bind' | 'data'> = ['bind', 'data']; // props whose value is @state
 const KNOWN_OPS = new Set<string>([...ACTION_OPS, StOp.Request]); // Request is parsed + compiled but is not a method op
 const SOURCE_OPS = new Set<string>([StOp.Create, StOp.Update, StOp.Delete, StOp.Refetch]); // hit the backend, so the list MUST be query/source-backed
-const SCALARS = ['text', 'number', 'bool', 'uuid', 'email', 'string'];
+const SCALARS = ['text', 'number', 'bool', 'uuid', 'email', 'string', 'date'];
 
 // collect the variable names referenced by an expression AST
 function collectRefs(e: Expr, acc: string[] = []): string[] {
@@ -53,6 +54,23 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   const actionNames = new Set(Object.keys(doc.actions || {})); // needed for `action.pending` / `action.error` refs
   const getNames = new Set(Object.keys(doc.gets || {})); // derived values, referenceable like state (page or store)
   const externs = new Set([...BUILTINS, ...(doc.imports || []).flatMap((i) => i.names)]); // built-in formatting fns + use'd logic functions, callable in exprs
+  // the SHARED resolver's inputs — the SAME facts the emitter holds, so lint and runtime can't disagree on what resolves.
+  const refFacts: RefFacts = { state: doc.state || {}, gets: doc.gets || {}, entities: doc.entities || {} };
+  const knownHeads: KnownHeads = { stateKeys, gets: getNames, stores: storeDomains, consts: constNames, routeParams: paramNames, actions: actionNames };
+  // `post/put/delete "client:/path"` selects a NAMED api client; an unknown prefix silently 404s at runtime
+  // (the `post "default:/x"` footgun). Checked only when the app's clients were threaded in (ctx.apiClients).
+  const checkReqUrl = (st: RequestStmt & { loc?: Loc }): void => {
+    if (!ctx.apiClients) return;
+    const lead = typeof st.url === 'string' ? st.url : (typeof st.url.parts[0] === 'string' ? st.url.parts[0] : '');
+    const m = lead.match(/^([a-zA-Z][\w-]*):/);
+    if (!m || m[1] === 'http' || m[1] === 'https') return;             // no `client:` prefix, or an absolute URL
+    const client = m[1];
+    if (ctx.apiClients.includes(client)) return;                       // a declared client — fine
+    const tip = ctx.apiClients.length
+      ? `declared clients are: ${ctx.apiClients.join(', ')}`
+      : `the flat \`api { base }\` form has no named clients — drop the \`${client}:\` prefix (write \`${st.method} "${lead.slice(client.length + 1)}…"\`)`;
+    D.push(diag('unknown-client', `${st.method} "${lead}…": "${client}" is not a declared api client — ${tip}.`, { loc: st.loc ?? null, suggestion: ctx.apiClients.length ? closest(client, ctx.apiClients) : null, from: client }));
+  };
   const nodes = doc.nodes || {};
 
   // a `use`'d function call must reference a declared import: keeps the JS seam bounded and checkable
@@ -104,7 +122,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       }
     } else if (def.initial !== undefined && def.initial !== null) {
       // a scalar state's initial value must match its declared type (e.g. `count = "" : number` is a bug)
-      const want = t === 'number' ? 'number' : t === 'bool' ? 'boolean' : (['text', 'string', 'email', 'uuid'].includes(t) ? 'string' : '');
+      const want = t === 'number' ? 'number' : t === 'bool' ? 'boolean' : (['text', 'string', 'email', 'uuid', 'date'].includes(t) ? 'string' : '');
       if (want && typeof def.initial !== want) {
         D.push(diag('type-mismatch', `state "${name}" is typed "${t}" but its initial value is a ${typeof def.initial}`, { loc: def.loc }));
       }
@@ -198,26 +216,11 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     return ''; // bin/call/obj/tern/un: don't infer
   };
 
-  // The list type behind a derived `get` (or a chain of them), so an aggregate/filter OVER a get
-  // still resolves the element's fields (`get won = opps where … ` then `won.sum by amount`).
-  // '' when not a list or unresolvable; cycle-guarded against a get that references itself.
-  const refListType = (name: string, scope: Map<string, string>, seen: Set<string>): string => {
-    const head = name.split('.')[0];
-    if (scope.has(head)) return scope.get(head) || '';
-    const st = doc.state?.[head]?.type;
-    if (st) return st;                                   // state (a query's `.data` is the same list type)
-    if (doc.gets && head in doc.gets && !seen.has(head)) { seen.add(head); return getBodyListType(doc.gets[head], scope, seen); }
-    return '';
-  };
-  const getBodyListType = (e: Expr, scope: Map<string, string>, seen: Set<string>): string => {
-    if (!e) return '';
-    if (e.kind === Ek.Ref) return refListType(e.name, scope, seen);
-    if (e.kind === Ek.Filter) return refListType(e.list, scope, seen);                                          // a `where`-filter preserves the element type
-    if (e.kind === Ek.Agg && (e.op === 'sort' || e.op === 'sortDesc')) return refListType(e.list, scope, seen); // a sorted copy: same element type
-    return '';
-  };
-  const getListType = (head: string, scope: Map<string, string>): string =>
-    (doc.gets && head in doc.gets) ? getBodyListType(doc.gets[head], scope, new Set([head])) : '';
+  // The list type behind a derived `get` (or a chain of them), so an aggregate/filter OVER a get still
+  // resolves the element's fields (`get won = opps where … ` then `won.sum by amount`). Delegated to the
+  // SHARED resolver (engine/ir/refs.ts) so the linter and the emitter resolve element types IDENTICALLY.
+  const getListType = (head: string): string =>
+    (doc.gets && head in doc.gets) ? exprListType(doc.gets[head], refFacts, new Set([head])) : '';
   // arithmetic `- * /` on a non-number operand produces NaN at runtime. `+` is also string concat, so it's left alone.
   const checkArith = (e: Expr, loc: Loc | null, scope: Map<string, string>): void => {
     if (e.kind === Ek.Bin) {
@@ -228,7 +231,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       // comparing two known, incompatible types is always false/true: the classic `when step == "1"` (a number
       // state vs a quoted string) silently never matches. null compares with anything, so it's exempt.
       if ([BOp.Eq, BOp.Neq, BOp.Lt, BOp.Gt, BOp.Lte, BOp.Gte].includes(e.op) && !(e.left.kind === Ek.Lit && e.left.value === null) && !(e.right.kind === Ek.Lit && e.right.value === null)) {
-        const norm = (t: string): string => (t === 'number' || t === 'bool') ? t : (t.startsWith('enum:') || ['text', 'string', 'email', 'uuid'].includes(t)) ? 'text' : t;
+        const norm = (t: string): string => (t === 'number' || t === 'bool') ? t : (t.startsWith('enum:') || ['text', 'string', 'email', 'uuid', 'date'].includes(t)) ? 'text' : t;
         const lt = exprType(e.left, scope), rt = exprType(e.right, scope);
         if (lt && rt && norm(lt) !== norm(rt)) D.push(diag('compare-type', `comparing a ${lt} to a ${rt} — they never match (always ${e.op === BOp.Neq ? 'true' : 'false'}). Likely a quoted number (\`== "1"\` vs \`== 1\`) or a type mismatch.`, { loc }));
         // enum equality against a NON-member is always false — a typo'd status/stage (incl. a `match` arm value) that silently never matches.
@@ -243,7 +246,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
         if (elem && doc.entities?.[elem]) D.push(diag('contains-entity', `\`contains\` on a list of "${elem}" objects checks object identity, not a field — it is always false. Use a \`list<scalar>\` (e.g. list<text>), or filter a field with \`each … where field == x\`.`, { loc }));
         else if (elem) { // a scalar list: the searched value's type must match the element type, else `includes` is always false
-          const norm = (t: string): string => (t === 'number' || t === 'bool') ? t : (t.startsWith('enum:') || ['text', 'string', 'email', 'uuid'].includes(t)) ? 'text' : t;
+          const norm = (t: string): string => (t === 'number' || t === 'bool') ? t : (t.startsWith('enum:') || ['text', 'string', 'email', 'uuid', 'date'].includes(t)) ? 'text' : t;
           const rt = exprType(e.right, scope);
           if (rt && norm(elem) !== norm(rt)) D.push(diag('contains-type', `\`contains\` searches a list of ${elem}, but the value is a ${rt} — it never matches (always false).`, { loc }));
         }
@@ -264,7 +267,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       if (e.kind === Ek.Agg) {
         const head = e.list.split('.')[0];
         let lt = scope.has(head) ? (scope.get(head) || '') : (doc.state?.[head]?.type || '');
-        if (!lt) lt = getListType(head, scope); // a `get` resolving to a derived list (chained aggregate / filter)
+        if (!lt) lt = getListType(head); // a `get` resolving to a derived list (chained aggregate / filter)
         const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
         if (lt && !lt.startsWith('list<') && !storeDomains.has(head)) D.push(diag('agg-not-list', `\`${e.op} …\` needs a list, but "${e.list}" is "${lt}".`, { loc }));
         const bodyScope = new Map(scope);
@@ -286,7 +289,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       if (e.kind === Ek.Filter) { // derived list `<list> where <cond>`: list must be a list; cond's bare fields are the element's
         const head = e.list.split('.')[0];
         let lt = scope.has(head) ? (scope.get(head) || '') : (doc.state?.[head]?.type || '');
-        if (!lt) lt = getListType(head, scope); // a `get` resolving to a derived list (chained aggregate / filter)
+        if (!lt) lt = getListType(head); // a `get` resolving to a derived list (chained aggregate / filter)
         const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
         if (lt && !lt.startsWith('list<') && !storeDomains.has(head)) D.push(diag('filter-not-list', `\`${e.list} where …\` needs a list, but "${e.list}" is "${lt}".`, { loc }));
         // bind each element field as a bare in-scope name so the cond's `status == "todo"` field- and type-checks
@@ -307,7 +310,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     for (const ref of collectRefs(expr)) {
       const dot = ref.indexOf('.');
       const head = dot === -1 ? ref : ref.slice(0, dot);
-      if (!(scope.has(head) || stateKeys.has(head) || getNames.has(head) || storeDomains.has(head) || constNames.has(head) || paramNames.has(head) || actionNames.has(head))) {
+      if (!isKnownHead(head, (x) => scope.has(x), knownHeads)) {
         const near = closest(head, [...stateKeys, ...scope.keys()]);
         // a bare word with no close state is almost always a meant-to-be-quoted text/enum value (`status == todo`)
         D.push(diag('unknown-ref', `"${head}" is not a known state or item variable here${near ? '' : ` — if it's a text/enum value, quote it: "${head}"`}`, { loc, suggestion: near, from: head }));
@@ -416,10 +419,17 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       for (const v of Object.values(props.inputs || {})) if (typeof v === 'string') checkRef(v, n);
       for (const v of Object.values(props.on || {})) if (typeof v === 'string') checkAction(v, n);
     }
-    // Icon resolves to inline SVG at BUILD, so its name must be a static `set:name` literal. A dynamic/interpolated
-    // name (`Icon "{m.icon}"`, a per-row icon) lints clean today and then HARD-FAILS at `vite build` — catch it here.
-    if (n.type === Nt.Icon && typeof props.name === 'string' && (props.name.includes('{') || !props.name.includes(':')))
-      D.push(diag('icon-name', `Icon "${props.name}" must be a static "set:name" literal (e.g. \`Icon "lucide:settings"\`) — icons inline at build, so the name can't be dynamic/interpolated. For a per-row icon, branch over static Icons with \`when\`/\`match\` (or a \`part\` per icon).`, { loc: n.loc, from: props.name }));
+    // Icon resolves to inline SVG at BUILD, so its name must be a static `set:name` literal. A data-driven name
+    // (`Icon "{m.icon}"`) parses to an Interp, NOT a string — so the old `typeof === 'string'` check missed exactly
+    // the case it claimed to catch (a per-row icon from data). Catch BOTH: the interpolated form and the missing set.
+    if (n.type === Nt.Icon) {
+      const nm = props.name;
+      if (typeof nm === 'string') { // Icon's name is a RAW string (not interp-parsed): `{x}` stays literal text
+        if (nm.includes('{') || !nm.includes(':'))
+          D.push(diag('icon-name', `Icon "${nm}" must be a static "set:name" literal (e.g. \`Icon "lucide:settings"\`) — icons inline at build, so the name can't be dynamic/interpolated. For a per-row icon, branch over static Icons with \`when\`/\`match\` (or a \`part\` per icon); for a name that comes from data, drop to a \`Custom\` component.`, { loc: n.loc, from: nm }));
+      } else if (nm && 'kind' in nm && nm.kind === Ek.Interp) // defensive: should an Icon name ever be interp-parsed
+        D.push(diag('icon-name', `Icon's name is data-driven/interpolated — it must be a static "set:name" literal (icons inline at build). For a per-row icon use \`when\`/\`match\` over static Icons, or a \`Custom\` component for a name from data.`, { loc: n.loc }));
+    }
     // expression references: when condition, each list, reactive Text/Image interpolation
     if (n.type === Nt.When && props.cond) {
       checkExpr(props.cond, n.loc ?? null, scope);
@@ -492,7 +502,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     if (st.op === StOp.Remove) checkExpr(st.pred, null, itemPredScope(new Map(), st.target));
     else if (st.op === StOp.Patch) { const inner = itemPredScope(new Map(), st.target); checkExpr(st.pred, null, inner); checkExpr(st.patch, null, inner); }
     else if (st.op === StOp.Refetch) { for (const v of Object.values(st.params)) checkExpr(v, null, new Map()); }
-    else if (st.op === StOp.Request) { if (st.body) checkExpr(st.body, null, new Map()); }
+    else if (st.op === StOp.Request) { if (st.body) checkExpr(st.body, null, new Map()); checkReqUrl(st); }
     else if (st.op === StOp.Extern) { if (!externs.has(st.fn)) D.push(diag('unknown-function', `"${st.fn}" is not a use'd function`, { suggestion: closest(st.fn, [...externs]), from: st.fn })); for (const a of st.args) checkExpr(a, null, new Map()); }
     else if ('arg' in st && st.arg) checkExpr(st.arg, null, new Map());
   };
@@ -558,7 +568,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         if (elem && doc.entities?.[elem] && st.patch.kind === Ek.Obj) { const ent = doc.entities[elem]; for (const f of st.patch.fields) if (!(f.key in ent)) D.push(diag('unknown-field', `action "${name}": "${f.key}" is not a field of ${elem}`, { suggestion: closest(f.key, Object.keys(ent)), from: f.key })); }
       }
       else if (st.op === StOp.Refetch) { for (const v of Object.values(st.params)) checkExpr(v, null, actionScope); }
-      else if (st.op === StOp.Request) { if (st.body) checkExpr(st.body, null, actionScope); }
+      else if (st.op === StOp.Request) { if (st.body) checkExpr(st.body, null, actionScope); checkReqUrl(st); }
       else if ('arg' in st && st.arg) checkExpr(st.arg, null, actionScope);
     };
     // Pin every diagnostic to the statement's line. Inner checks push messages without a loc of their own

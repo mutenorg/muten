@@ -33,3 +33,17 @@ export function readApi(appRoot: string): { [name: string]: Value } {
   try { return parse(readFileSync(root, 'utf8')).api || {}; }
   catch { return {}; }
 }
+
+/** The NAMED api clients a `post "client:/path"` can target. The flat `api { base }` form registers NONE
+ *  (its keys are base/headers, not clients), so `post "default:/x"` is the classic silent-404 footgun. */
+export function apiClientNames(api: { [name: string]: Value }): string[] {
+  return ('base' in api || 'headers' in api) ? [] : Object.keys(api);
+}
+
+// app-wide `sources { … }` (defined in app.muten next to `api`); a page's `query x` resolves against these.
+export function readSources(appRoot: string): { [name: string]: Value } {
+  const root = join(appRoot, 'src', 'app.muten');
+  if (!existsSync(root)) return {};
+  try { return parse(readFileSync(root, 'utf8')).sources || {}; }
+  catch { return {}; }
+}

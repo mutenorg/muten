@@ -4,7 +4,7 @@
 
 import { join, relative } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
-import { readRoutes } from '#engine/project/routes.js';
+import { readRoutes, readApi, apiClientNames } from '#engine/project/routes.js';
 import { load, loadParts, findStores } from '#engine/project/load.js';
 import { validateStoresAndGuards } from '#engine/project/check-app.js';
 import { parse } from '#engine/lang/parse.js';
@@ -20,6 +20,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
   const stores = Object.keys(storeIRs);
   const storeMembers: { [d: string]: string[] } = {};
   for (const [d, ir] of Object.entries(storeIRs)) storeMembers[d] = [...Object.keys(ir.state || {}), ...Object.keys(ir.gets || {}), ...Object.keys(ir.actions || {})];
+  const apiClients = apiClientNames(readApi(appRoot));           // the app's named api clients, so a `post "client:/x"` prefix is checked
   const pages = readRoutes(appRoot);
 
   const found: Array<{ file: string } & Diagnostic> = [];
@@ -27,7 +28,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
     let diagnostics: Diagnostic[] = [];
     try {
       const { doc, partNames } = await load(page.screenPath, sharedParts);
-      diagnostics = validate(doc, { parts: partNames, stores, storeMembers }).diagnostics;
+      diagnostics = validate(doc, { parts: partNames, stores, storeMembers, apiClients }).diagnostics;
     } catch (e) {
       if (!(e instanceof ParseError)) throw e;             // a syntax error becomes one diagnostic; anything else is a real bug
       diagnostics = [{ code: e.code, severity: 'error', message: e.message, loc: e.loc, suggestion: null }];
@@ -43,7 +44,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
     try {
       const appIr = parse(readFileSync(appFile, 'utf8'));
       if (appIr.shell) {
-        for (const d of validate(toDoc({ ...appIr, tree: appIr.shell }), { stores, storeMembers }).diagnostics) {
+        for (const d of validate(toDoc({ ...appIr, tree: appIr.shell }), { stores, storeMembers, apiClients }).diagnostics) {
           if (!json) console.log(formatDiagnostic(d, rel(appFile)));
           found.push({ file: rel(appFile), ...d });
         }
