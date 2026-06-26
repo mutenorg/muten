@@ -396,6 +396,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     if (props.arg && typeof props.arg === 'object' && 'kind' in props.arg) checkExpr(props.arg as Expr, n.loc ?? null, scope); // `-> action(arg)` on Button/Link/RowAction: arg was previously unchecked
     if (props.argRest) for (const a of props.argRest) checkExpr(a, n.loc ?? null, scope);                                     // 2nd+ args of a multi-arg call `-> f(a, b)`
     if (Array.isArray(props.class)) for (const c of props.class) if (typeof c !== 'string' && c.cond) checkExpr(c.cond, n.loc ?? null, scope); // reactive `class(x when cond)`: the cond was unchecked → a stale state ref (e.g. a renamed state) passed lint but shipped a runtime ReferenceError
+    if (props.aria) for (const expr of Object.values(props.aria)) checkExpr(expr, n.loc ?? null, scope);  // `aria(key: expr)` values are real expressions: an unknown/renamed state ref is caught here, not at runtime
     const interps: StringPropValue[] = [];
     if ((n.type === Nt.Text || n.type === Nt.Title || n.type === Nt.Span) && props.value) interps.push(props.value);
     if (n.type === Nt.Image) { if (props.src) interps.push(props.src); if (props.alt) interps.push(props.alt); }

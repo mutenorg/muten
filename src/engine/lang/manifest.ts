@@ -119,7 +119,7 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
 };
 
-export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'class', 'alt', 'inputs', 'on'];
+export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'class', 'alt', 'inputs', 'on', 'aria'];
 export const MODIFIER_DOCS = {
   bind: 'Two-way bind to a @state, e.g. `bind @search`.',
   submit: 'Action to run on form submit, e.g. `submit createUser`.',
@@ -129,12 +129,13 @@ export const MODIFIER_DOCS = {
   alt: 'Required accessible/SEO text for an Image: `alt "{p.title}"`. Use "" for decorative images.',
   inputs: 'Custom component inputs: `inputs(data: @sales)`.',
   on: 'Custom component events wired to actions: `on(select: pick)`.',
+  aria: 'Accessibility attributes on ANY node — the bounded way to write `aria-*`/`role` (muten is HTML + logic): `aria(label: "Close", role: "dialog", expanded: menuOpen)`. Each key → `aria-<key>`; `role` → `role`. A literal value is a static attribute; a value that reads state is REACTIVE (e.g. `aria(expanded: open)` keeps aria-expanded in sync). Use this for an accessible interactive widget instead of escaping to Custom.',
 };
 
 export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from'];
 export const KEYWORD_DOCS = {
   screen: 'Declares the screen name: `screen users_dashboard`.',
-  entity: 'Declares a data shape + validation: `entity User { name text required  email email required  password text min:8 }` (implicit uuid id). Constraints: `required`, `min:N`, `max:N`.',
+  entity: 'Declares a data shape + validation: `entity User { name text required  email email required  zip text pattern:"^\\d{5}$" }` (implicit uuid id). Constraints: `required`, `min:N`, `max:N`, `pattern:"<regex>"`. An `email` field validates its format on submit; `pattern` matches a value against your regex.',
   state: 'Declares reactive state: `state { search = "" : text  users = query listUsers : list<User> }`.',
   store: 'App-GLOBAL reactive state (shared across pages, no prop drilling): `store { cart = [] : list<number> }`. Referenced by name like local state.',
   const: 'A compile-time IMMUTABLE scalar, inlined (never reactive): `const TAX = 0.21`. Scalars only — structured config uses a block (e.g. theme).',
@@ -157,7 +158,7 @@ export const KEYWORD_DOCS = {
   part: 'Reusable composition: `part Card(item: Item, onPick: action) { ... }`. Pass OBJECTS (`$item.field`) and ACTION callbacks (`-> $onPick(...)`). Inlined at build time.',
   param: 'Declares a route param read from the URL: `param id` for a route `/x/:id`. Usable in interpolation/`when`/expressions like a read-only string.',
   query: 'An async data source. The state exposes `.loading`, `.error` and `.data`.',
-  persist: 'Backs a local state with localStorage: `state { theme = "dark" : text persist }`. Hydrates from storage on load (falls back to the declared initial) and saves on every change — survives reload. For page-local state; not for query-backed.',
+  persist: 'Backs a state with localStorage: `state { theme = "dark" : text persist }` (or `favs = [] : list<number> persist`). Hydrates on load (falls back to the declared initial) and saves on every change — survives reload. THE declarative localStorage — never hand-roll load/save in a `use` fn. Works page-local AND in a `.store` for app-global persisted state (favorites/cart/settings). Not for query-backed state.',
   every: 'Poll a query on a timer: `query orders every 5s` (also `500ms`, `2m`). Silent auto-refetch — keyed reconciliation updates only the rows that changed (no full re-render, no loading flash).',
   if: 'Conditional INSIDE an action body: `if <expr> { … } else { … }` — the only branching in actions (toggles, validation, add-or-remove).',
   when: 'Conditional render: `when <expr> { ... }`.',

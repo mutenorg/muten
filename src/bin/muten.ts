@@ -15,7 +15,7 @@ const json = args.includes('--json');
 const root = resolve(dir || process.cwd());
 
 try {
-  if (cmd === 'build') await buildApp(root);
+  if (cmd === 'build') await buildApp(root, undefined, (args.find((a) => a.startsWith('--url=')) || '').slice(6)); // --url=https://site.com → absolute sitemap/robots URLs
   else if (cmd === 'check' || cmd === 'lint') process.exit((await lintApp(root, json)) ? 1 : 0);
   else if (cmd === 'map') {
     const map = await mapApp(root);

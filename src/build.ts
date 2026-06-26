@@ -14,8 +14,9 @@ import { compile, compileStore } from '#engine/compile/compile.js';
 import { formatDiagnostic, ParseError } from '#engine/shared/diagnostics.js';
 import type { Diagnostic, AppMap, StoreSlice } from '#engine/shared/types.js';
 
-export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist')): Promise<{ routes: string[]; outDir: string }> {
+export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), baseUrl = ''): Promise<{ routes: string[]; outDir: string }> {
   const rel = (p: string) => relative(appRoot, p);
+  const base = baseUrl.replace(/\/+$/, ''); // app's deploy origin (from --url=) for canonical / og:url / sitemap; '' → relative
   rmSync(outDir, { recursive: true, force: true }); // wipe first so deleted pages don't leave stale routes
 
   const sharedParts = await loadAllParts(appRoot); // parts are global: load all up front
@@ -101,6 +102,20 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist')):
       } catch { /* keep the CSR shell — the client renders it */ }
     }
 
+    // SEO by nature: per-page canonical + og:url/type + JSON-LD WebPage + `<html lang>`, injected into the
+    // <head> from the route + the page's `meta {}` — no per-page work. Absolute URLs when --url= is set.
+    {
+      const m = doc.meta || {};
+      const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+      const canonical = base ? `${base}/${page.route}` : '';
+      const seo = ['<meta property="og:type" content="website">'];
+      if (canonical) seo.push(`<link rel="canonical" href="${esc(canonical)}">`, `<meta property="og:url" content="${esc(canonical)}">`);
+      const ld: { [k: string]: string } = { '@context': 'https://schema.org', '@type': 'WebPage', name: m.title || doc.screen };
+      if (m.description) ld.description = m.description;
+      if (canonical) ld.url = canonical;
+      seo.push(`<script type="application/ld+json">${JSON.stringify(ld)}</script>`);
+      html = html.replace('<html lang="en">', `<html lang="${esc(m.lang || 'en')}">`).replace('</head>', seo.join('\n') + '\n</head>');
+    }
     const pageOut = join(outDir, page.route);
     mkdirSync(pageOut, { recursive: true });
     writeFileSync(join(pageOut, 'index.html'), html);
@@ -123,6 +138,14 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist')):
     writeFileSync(join(outDir, 'index.html'), `<!doctype html><meta charset="utf-8"><title>app</title>\n<h1>Routes</h1>\n<ul>\n      ${links}\n</ul>\n`);
     console.log(`\n✓ ${rel(join(outDir, 'index.html'))} → route index`);
   }
+  // SEO by nature: a sitemap + robots.txt so every built route is crawlable/discoverable — derived from the
+  // routes, no per-page work. Absolute URLs when `--url=` is given (the sitemap spec wants them); relative
+  // otherwise (still useful, and a deploy that knows its host can pass --url=https://…).
+  const urls = built.map((r) => `  <url><loc>${base}/${r}</loc></url>`).join('\n');
+  writeFileSync(join(outDir, 'sitemap.xml'), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`);
+  writeFileSync(join(outDir, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${base}/sitemap.xml\n`);
+  console.log(`✓ ${rel(join(outDir, 'sitemap.xml'))} + robots.txt (${built.length} route${built.length === 1 ? '' : 's'}${base ? '' : ' — pass --url=https://… for absolute URLs'})`);
+
   writeFileSync(join(outDir, 'app.map.json'), JSON.stringify(appMap, null, 2));
   console.log(`✓ ${rel(join(outDir, 'app.map.json'))} → app graph (the root the AI reads)`);
 

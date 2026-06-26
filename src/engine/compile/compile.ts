@@ -72,6 +72,14 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       if (event === 'enter') lines.push(`el_${id}.addEventListener('keydown', (e) => { if (e.key === 'Enter') ${logic.actionRef(act)}(); });`); // synthetic: Enter key only
       else lines.push(`el_${id}.addEventListener(${JSON.stringify(event)}, () => ${logic.actionRef(act)}());`);
     }
+    // aria(...) — author-expressed accessibility: `key` → `aria-<key>` (`role` → `role`). A literal value is a
+    // static attribute; a value that reads state is wrapped in an effect, so e.g. `aria(expanded: open)` stays in sync.
+    for (const [key, expr] of Object.entries(p.aria || {})) {
+      const attr = key === 'role' ? 'role' : 'aria-' + key;
+      const val = logic.compileExpr(expr, pageScope);
+      if (expr.kind === Ek.Lit) lines.push(`el_${id}.setAttribute(${JSON.stringify(attr)}, String(${val}));`);
+      else lines.push(`effect(() => el_${id}.setAttribute(${JSON.stringify(attr)}, String(${val})));`);
+    }
   };
 
   const genChildren = (id: string, parentVar: string): void => {
@@ -118,6 +126,10 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       lines.push(`const el_${id} = document.createElement('${tag}');`);
       lines.push(`el_${id}.className = ${JSON.stringify(classFor(base, p))};`);
       if (n.type === Nt.Nav && typeof p.label === 'string') lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(p.label)});`);
+      // a11y by default (compiler-emitted): <main> is the focus target on navigation + the skip-link anchor.
+      if (n.type === Nt.Page) lines.push(`el_${id}.id = 'mu-main'; el_${id}.tabIndex = -1;`);
+      // a11y by default: a keyboard skip-link as the shell's first child, so Tab jumps past the chrome to content.
+      if (n.type === Nt.Shell) lines.push(`{ const sk = document.createElement('a'); sk.href = '#mu-main'; sk.className = 'mu-skip-link'; sk.textContent = 'Skip to content'; el_${id}.appendChild(sk); }`);
       lines.push(`${parentVar}.appendChild(el_${id});`);
       genDynamics(id, p);
       genChildren(id, `el_${id}`);
@@ -129,6 +141,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const sig = logic.bindSig(p.bind);
         lines.push(`const el_${id} = document.createElement('input');`);
         lines.push(`el_${id}.type = 'search';`);
+        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Search')});`); // a11y: an accessible name (a placeholder is not one)
         lines.push(`el_${id}.className = ${JSON.stringify(classFor('search', p))};`);
         genInterpAttr(id, 'placeholder', p.placeholder); // static OR interpolated ("Message #{channel}" stays reactive)
         lines.push(`effect(() => { if (el_${id}.value !== ${sig}.get()) el_${id}.value = ${sig}.get(); });`); // two-way: state->input so `.reset()` clears the box; guarded to avoid yanking the caret
@@ -151,9 +164,9 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`el_${id}.className = ${JSON.stringify(classFor('datatable', p))};`);
         lines.push(`const head_${id} = el_${id}.createTHead().insertRow();`);
         for (const col of columns) {
-          lines.push(`{ const th = document.createElement('th'); th.textContent = ${JSON.stringify(col)}; head_${id}.appendChild(th); }`);
+          lines.push(`{ const th = document.createElement('th'); th.scope = 'col'; th.textContent = ${JSON.stringify(col)}; head_${id}.appendChild(th); }`); // a11y: scope ties data cells to their column header
         }
-        if (rowActions.length) lines.push(`head_${id}.appendChild(document.createElement('th'));`);
+        if (rowActions.length) lines.push(`{ const th = document.createElement('th'); th.scope = 'col'; head_${id}.appendChild(th); }`);
         lines.push(`const body_${id} = el_${id}.createTBody();`);
         lines.push(`${parentVar}.appendChild(el_${id});`);
 
@@ -211,7 +224,13 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const fieldVars: Array<EditableField & { var: string; c?: FieldConstraint }> = [];
         for (const f of fields) {
           const fv = `f_${id}_${f.name}`;
+          const grp = `g_${fv}`;
+          const labelText = f.name.charAt(0).toUpperCase() + f.name.slice(1); // a11y: a real label, never just a placeholder
           fieldVars.push({ ...f, var: fv, c: fc[f.name] });
+          // a11y BY DEFAULT (compiler-emitted, the author writes nothing): every field is a group =
+          // <label for=id> + the control + its error, with id/for paired and the error linked back.
+          lines.push(`const ${grp} = document.createElement('div'); ${grp}.className = 'mu-field-group';`);
+          lines.push(`{ const lb = document.createElement('label'); lb.className = 'mu-label'; lb.htmlFor = ${JSON.stringify(fv)}; lb.textContent = ${JSON.stringify(labelText)}; ${grp}.appendChild(lb); }`);
           if (f.kind === Fk.Enum) {
             lines.push(`const ${fv} = document.createElement('select');`);
             lines.push(`${fv}.className = 'mu-field';`);
@@ -228,6 +247,8 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
             lines.push(`${fv}.className = 'mu-field';`);
             lines.push(`${fv}.placeholder = ${JSON.stringify(f.name)};`);
           }
+          lines.push(`${fv}.id = ${JSON.stringify(fv)};`);                                         // matches the label's htmlFor
+          if (fc[f.name]?.required) lines.push(`${fv}.setAttribute('aria-required', 'true');`);   // SR announces the field is required
           // each edit patches the draft's sub-field immutably so the reflect effect re-runs.
           // Checkbox stores `checked` boolean; number coerces via Number(), else value is a raw string.
           if (f.kind === Fk.Bool) lines.push(`${fv}.addEventListener('change', (e) => ${sig}.set({ ...${sig}.get(), ${JSON.stringify(f.name)}: e.target.checked }));`);
@@ -235,23 +256,30 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
             const val = f.kind === Fk.Number ? '(Number(e.target.value) || 0)' : 'e.target.value';
             lines.push(`${fv}.addEventListener('input', (e) => ${sig}.set({ ...${sig}.get(), ${JSON.stringify(f.name)}: ${val} }));`);
           }
-          lines.push(`el_${id}.appendChild(${fv});`);
-          if (fc[f.name]) lines.push(`const err_${fv} = document.createElement('small'); err_${fv}.className = 'mu-field-error'; el_${id}.appendChild(err_${fv});`);
+          lines.push(`${grp}.appendChild(${fv});`);
+          // error span: linked to its input via aria-describedby + announced live (a11y by default). Email
+          // fields always get one (they now validate format even without an explicit constraint).
+          if (fc[f.name] || f.kind === Fk.Email) lines.push(`const err_${fv} = document.createElement('small'); err_${fv}.className = 'mu-field-error'; err_${fv}.id = ${JSON.stringify('err_' + fv)}; err_${fv}.setAttribute('aria-live', 'polite'); ${fv}.setAttribute('aria-describedby', ${JSON.stringify('err_' + fv)}); ${grp}.appendChild(err_${fv});`);
+          lines.push(`el_${id}.appendChild(${grp});`);
         }
 
         lines.push(`{ const sb = document.createElement('button'); sb.type = 'submit'; sb.className = 'mu-submit'; sb.textContent = ${JSON.stringify(typeof p.submitLabel === 'string' ? p.submitLabel : 'Submit')}; el_${id}.appendChild(sb); }`);
         // submit: validate against schema constraints; only call the action when every field passes.
         const vChecks: string[] = [];
         for (const fv of fieldVars) {
-          if (!fv.c) continue;
+          if (!fv.c && fv.kind !== Fk.Email) continue; // email always validates its format; others only if they carry a constraint
           const err = `err_${fv.var}`, val = `String(__d[${JSON.stringify(fv.name)}] ?? '')`;
           vChecks.push(`${err}.textContent = '';`);
-          if (fv.c.required) vChecks.push(`if (!${val}.trim()) { ${err}.textContent = 'Required'; __ok = false; }`);
+          if (fv.c?.required) vChecks.push(`if (!${val}.trim()) { ${err}.textContent = 'Required'; __ok = false; }`);
+          // email type now ACTUALLY validates format (was cosmetic): a non-empty value must look like an email.
+          if (fv.kind === Fk.Email) vChecks.push(`if (${val} && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(${val})) { ${err}.textContent = 'Enter a valid email'; __ok = false; }`);
+          // `pattern:"<regex>"`: a non-empty value must match the author's regex (phone / zip / SKU / …).
+          if (fv.c?.pattern) vChecks.push(`if (${val} && !new RegExp(${JSON.stringify(fv.c.pattern)}).test(${val})) { ${err}.textContent = 'Invalid format'; __ok = false; }`);
           // number field: min/max is a value bound; text field: min/max is a character-length bound.
-          if (fv.c.min != null) vChecks.push(fv.kind === Fk.Number
+          if (fv.c?.min != null) vChecks.push(fv.kind === Fk.Number
             ? `if (${val} !== '' && Number(${val}) < ${fv.c.min}) { ${err}.textContent = 'Min ${fv.c.min}'; __ok = false; }`
             : `if (${val} && ${val}.length < ${fv.c.min}) { ${err}.textContent = 'Min ${fv.c.min} characters'; __ok = false; }`);
-          if (fv.c.max != null) vChecks.push(fv.kind === Fk.Number
+          if (fv.c?.max != null) vChecks.push(fv.kind === Fk.Number
             ? `if (${val} !== '' && Number(${val}) > ${fv.c.max}) { ${err}.textContent = 'Max ${fv.c.max}'; __ok = false; }`
             : `if (${val}.length > ${fv.c.max}) { ${err}.textContent = 'Max ${fv.c.max} characters'; __ok = false; }`);
         }
@@ -294,6 +322,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const ref = typeof p.name === 'string' ? p.name : '';
         lines.push(`const el_${id} = document.createElement('span');`);
         lines.push(`el_${id}.className = ${JSON.stringify(classFor('icon', p))};`);
+        lines.push(`el_${id}.setAttribute('aria-hidden', 'true');`); // a11y: icons are decorative by default; meaning lives in adjacent text
         lines.push(`el_${id}.innerHTML = ${JSON.stringify(opts.iconResolver ? opts.iconResolver(ref) : '')};`);
         lines.push(`${parentVar}.appendChild(el_${id});`);
         genDynamics(id, p);

@@ -190,6 +190,7 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }): vo
       injectCss(module.css);
       if (module.meta) applyMeta(module.meta);
       disposePage = scope(() => { module.mount(outlet, params); });
+      const main = outlet.querySelector('main'); if (main instanceof HTMLElement) main.focus(); // a11y: move focus to content on nav (the <main> is tabIndex -1)
     });
   };
   // intercept internal link clicks for client-side navigation (external/new-tab/downloads pass through)

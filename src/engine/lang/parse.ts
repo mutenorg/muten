@@ -55,6 +55,7 @@ export class Parser extends Grammar {
       [Mod.Alt, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); const t = this.eat(Tk.String); props.alt = this.parseInterpolation(t.v, t.pos + 1); if (paren) this.eat(Tk.Punct, Pn.ParenR); }],  // Image a11y/SEO alt text
       [Mod.Inputs, (props: NodeProps) => { props.inputs = { ...props.inputs, ...this.parseArgs() }; }],   // Custom inputs(k: value, ...)
       [Mod.On, (props: NodeProps) => { props.on = { ...props.on, ...this.parseArgs() }; }],               // Custom on(event: action, ...)
+      [Mod.Aria, (props: NodeProps) => { props.aria = { ...props.aria, ...this.parseAriaArgs() }; }],      // aria(label: "Close", expanded: isOpen) -> aria-*/role
     ]);
 
     this.statements = new Map([
@@ -141,13 +142,14 @@ export class Parser extends Grammar {
     if (Object.keys(constraints).length) (ir.constraints = ir.constraints || {})[name] = constraints;
   }
 
-  // Validation suffix on an entity field: `required`, `min:N`, `max:N` (any order, all optional).
+  // Validation suffix on an entity field: `required`, `min:N`, `max:N`, `pattern:"<regex>"` (any order, all optional).
   private parseConstraints(): FieldConstraint {
     const constraint: FieldConstraint = {};
-    while (this.at(Tk.Ident, Kw.Required) || this.at(Tk.Ident, Kw.Min) || this.at(Tk.Ident, Kw.Max)) {
+    while (this.at(Tk.Ident, Kw.Required) || this.at(Tk.Ident, Kw.Min) || this.at(Tk.Ident, Kw.Max) || this.at(Tk.Ident, Kw.Pattern)) {
       const key = this.next().v;
       if (key === Kw.Required) { constraint.required = true; continue; }
       this.eat(Tk.Punct, Pn.Colon);
+      if (key === Kw.Pattern) { constraint.pattern = this.eat(Tk.String).v; continue; } // `pattern:"^\d{5}$"` — a regex string
       const num = Number(this.eat(Tk.Number).v);
       if (key === Kw.Min) constraint.min = num; else constraint.max = num;
     }
@@ -584,6 +586,21 @@ export class Parser extends Grammar {
     if (this.at(Tk.Ref)) return this.next().v;               // @state
     if (this.at(Tk.Param)) return { $param: this.next().v }; // $param (nested parts)
     return this.parseDotted();                                // bare ref / store action (cart.add) / enum
+  }
+
+  // `aria( key: <expr>, ... )`: each value is a full expression — a literal compiles to a static attribute,
+  // a value that reads state compiles to a reactive effect (e.g. `aria(expanded: menuOpen)`).
+  private parseAriaArgs(): { [key: string]: Expr } {
+    this.eat(Tk.Punct, Pn.ParenL);
+    const out: { [key: string]: Expr } = {};
+    while (!this.at(Tk.Punct, Pn.ParenR)) {
+      const key = this.eat(Tk.Ident).v;
+      this.eat(Tk.Punct, Pn.Colon);
+      out[key] = this.parseExpr();
+      if (this.at(Tk.Punct, Pn.Comma)) this.next();
+    }
+    this.eat(Tk.Punct, Pn.ParenR);
+    return out;
   }
 }
 

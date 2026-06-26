@@ -143,6 +143,7 @@ export interface FieldConstraint {
   required?: boolean;
   min?: number;
   max?: number;
+  pattern?: string;   // `pattern:"<regex>"` — a non-empty value must match this regular expression (phone/zip/SKU/…)
 }
 /** field name → its constraints. */
 export interface EntityConstraints { [field: string]: FieldConstraint; }
@@ -252,6 +253,7 @@ export interface NodeProps {
   class?: Array<string | ClassCond>;   // static look classes + reactive toggles, e.g. `active when isOpen`
   inputs?: ArgMap;
   on?: ArgMap;
+  aria?: { [key: string]: Expr };   // aria(label: "Close", expanded: isOpen) → aria-*/role attrs; reactive when the value reads state
   // control flow (When/Each)
   cond?: Expr;
   list?: Expr;
