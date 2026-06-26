@@ -1,6 +1,6 @@
 {
   "name": "@muten/core",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "description": "AI-first frontend framework — compiles .muten files to vanilla JS + signals.",
   "repository": {
     "type": "git",

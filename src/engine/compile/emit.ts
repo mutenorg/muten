@@ -41,8 +41,21 @@ export const RUNTIME = `// ── fine-grained signals runtime (~18 lines, no de
 // The data layer: a query is a reactive signal { data, loading, error }. Real `sources` fetch over
 // HTTP; otherwise a mock with a small delay so loading/error states are visible. `__req`/`__rows`
 // are inlined from engine/shared/source.ts so build-time SSG and runtime fetching are identical.
+// Built-in pure functions: a FIXED, oracle-known vocabulary for the universal formatting needs (dates, case,
+// initials, currency, truncation) so they never force a `use` escape. Inlined in every JS path (and SSR), so a
+// model writes `{ago(msg.time)}` / `{initial(user.name)}` instead of hand-rolling buggy Date/string logic.
+export const BUILTINS_JS = `function upper(s) { return String(s == null ? '' : s).toUpperCase(); }
+  function lower(s) { return String(s == null ? '' : s).toLowerCase(); }
+  function initial(s) { return String(s == null ? '' : s).trim().charAt(0).toUpperCase(); }
+  function truncate(s, n) { s = String(s == null ? '' : s); n = Number(n) || 0; return s.length > n ? s.slice(0, n) + '…' : s; }
+  function money(n, cur) { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: cur || 'USD' }).format(Number(n) || 0); } catch (e) { return String(n); } }
+  function ago(iso) { const t = new Date(iso).getTime(); if (isNaN(t)) return String(iso == null ? '' : iso); const s = (Date.now() - t) / 1000; if (s < 45) return 'just now'; if (s < 5400) return Math.max(1, Math.round(s / 60)) + 'm ago'; if (s < 86400) return Math.round(s / 3600) + 'h ago'; return Math.round(s / 86400) + 'd ago'; }
+  function date(iso) { const d = new Date(iso); return isNaN(d.getTime()) ? String(iso == null ? '' : iso) : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); }
+  function time(iso) { const d = new Date(iso); return isNaN(d.getTime()) ? String(iso == null ? '' : iso) : d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }); }`;
+
 function dataLayer(parts: EmitParts): string {
-  return `const __DATA = ${JSON.stringify(parts.data)};
+  return `${BUILTINS_JS}
+  const __DATA = ${JSON.stringify(parts.data)};
   const __SOURCES = ${JSON.stringify(parts.sources)};
   const __API = ${JSON.stringify(parts.api)};
   const __UUIDS = ${JSON.stringify(parts.queryUuids)};
@@ -56,7 +69,7 @@ function dataLayer(parts: EmitParts): string {
   function __write(name, method, id, body) { const s = __SOURCES[name]; const q = __req(s, __API); let url = q.url; if (id != null) { url = (url.charAt(url.length - 1) === '/' ? url.slice(0, -1) : url) + '/' + encodeURIComponent(id); } const init = { method: method, headers: { ...q.headers } }; if (body != null) { init.body = JSON.stringify(body); if (!init.headers['content-type'] && !init.headers['Content-Type']) init.headers['content-type'] = 'application/json'; } return fetch(url, init).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return method === 'DELETE' ? null : r.json(); }); }
   function __refetch(name, params, sig) { const q = __req(__SOURCES[name], __API); let url = q.url; const rest = {}; for (const k in params) { const tok = '{' + k + '}'; if (url.indexOf(tok) >= 0) url = url.split(tok).join(encodeURIComponent(params[k])); else rest[k] = params[k]; } const qs = Object.keys(rest).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(rest[k])).join('&'); url = qs ? url + (url.indexOf('?') >= 0 ? '&' : '?') + qs : url; sig.set({ ...sig.get(), loading: true, error: null }); fetch(url, { method: q.method, headers: { ...q.headers } }).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then((j) => sig.set({ data: __fill(name, __rows(j, q.at)), loading: false, error: null })).catch((e) => sig.set({ ...sig.get(), loading: false, error: String(e) })); }   /* a {key} in the source url is filled from refetch params; the rest become the query string */
   function __send(url, method, body) { let d = { url: url, method: method }; const ci = url.indexOf(':'); if (ci > 0 && __API[url.slice(0, ci)]) d = { api: url.slice(0, ci), url: url.slice(ci + 1), method: method }; const q = __req(d, __API); const init = { method: q.method, headers: { ...q.headers } }; if (body != null) { init.body = JSON.stringify(body); if (!init.headers['content-type'] && !init.headers['Content-Type']) init.headers['content-type'] = 'application/json'; } return fetch(q.url, init).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.status === 204 ? null : r.json().catch(() => null); }); }
-  function query(name, live) { const sig = signal({ data: [], loading: true, error: null }); if (live) { let ws, tries = 0, dead = false; const open = () => { const q = __req(__SOURCES[name], __API); ws = new WebSocket(q.url); ws.onopen = () => { tries = 0; }; ws.onmessage = (e) => { try { sig.set({ data: __fill(name, __rows(JSON.parse(e.data), q.at)), loading: false, error: null }); } catch { /* ignore a malformed frame */ } }; ws.onerror = () => { sig.set({ ...sig.get(), error: 'socket error' }); }; ws.onclose = () => { if (dead) return; sig.set({ ...sig.get(), loading: false }); setTimeout(open, Math.min(1000 * 2 ** tries++, 15000)); }; }; open(); onCleanup(() => { dead = true; if (ws) ws.close(); }); } else { __fetch(name).then((d) => sig.set({ data: d, loading: false, error: null })).catch((e) => sig.set({ data: [], loading: false, error: String(e) })); } return sig; }`;
+  function query(name, live) { const sig = signal({ data: [], loading: true, error: null }); if (live) { let ws, tries = 0, dead = false; const open = () => { if (dead) return; const q = __req(__SOURCES[name], __API); ws = new WebSocket(q.url); ws.onopen = () => { tries = 0; }; ws.onmessage = (e) => { try { sig.set({ data: __fill(name, __rows(JSON.parse(e.data), q.at)), loading: false, error: null }); } catch { /* ignore a malformed frame */ } }; ws.onerror = () => { sig.set({ ...sig.get(), error: 'socket error' }); }; ws.onclose = () => { if (dead) return; sig.set({ ...sig.get(), loading: false }); setTimeout(open, Math.min(1000 * 2 ** tries++, 15000)); }; }; open(); onCleanup(() => { dead = true; if (ws) ws.close(); }); } else { __fetch(name).then((d) => sig.set({ data: d, loading: false, error: null })).catch((e) => sig.set({ data: [], loading: false, error: String(e) })); } return sig; }`;
 }
 
 // One .store domain slice -> shared ESM module (state + get + actions, no DOM).
@@ -90,6 +103,7 @@ export function mount(app) { app.innerHTML = ${JSON.stringify(parts.staticHtml)}
 // the build can run it against a fake DOM (see project/ssr.ts) and serialize real markup.
 export function emitSsr(parts: EmitParts): string {
   return `${RUNTIME}
+  ${BUILTINS_JS}
   let __seq = 0;
   function __id() { return 'id-' + (++__seq); }
   const __DATA = ${JSON.stringify(parts.data)};

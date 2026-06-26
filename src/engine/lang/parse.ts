@@ -47,8 +47,14 @@ export class Parser extends Grammar {
       [Mod.Where, (props: NodeProps) => { props.where = this.parseParenList(() => this.rebuildClause()); }],
       [Mod.Columns, (props: NodeProps) => { props.columns = this.parseParenList(() => this.eat(Tk.Ident).v); }],
       // a second `class()` appends, never overwrites the first
-      [Mod.Class, (props: NodeProps) => { props.class = [...(props.class || []), ...this.parseParenList(() => { // raw look classes + `name when cond`
-        const name = this.at(Tk.String) ? this.next().v : this.eat(Tk.Ident).v;
+      [Mod.Class, (props: NodeProps) => { props.class = [...(props.class || []), ...this.parseParenList(() => { // raw classes + `name when cond` + interpolated `"prefix-{x}"`
+        if (this.at(Tk.String)) {
+          const t = this.next();
+          if (t.v.includes('{')) { const i = this.parseInterpolation(t.v, t.pos + 1); return typeof i === 'string' ? i : { interp: i }; } // `class("status-{x}")` -> reactive class token
+          if (this.at(Tk.Ident, Kw.When)) { this.next(); return { name: t.v, cond: this.parseExpr() }; }
+          return t.v;
+        }
+        const name = this.eat(Tk.Ident).v;
         if (this.at(Tk.Ident, Kw.When)) { this.next(); return { name, cond: this.parseExpr() }; }
         return name;
       })]; }],

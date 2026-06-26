@@ -32,6 +32,16 @@ class SElement extends SNode {
   // element properties the generated code assigns directly; serialized as attributes
   src = ''; alt = ''; href = ''; type = ''; value = ''; placeholder = '';
   style = { setProperty(_name: string, _val: string): void { /* SSR is structure-only; a `style(--v)` CSS var doesn't change serialized HTML */ } };
+  // reactive classes (toggle / `class("status-{x}")`) run their effect once at SSR, reflecting the initial state into className
+  get classList() {
+    const set = (): Set<string> => new Set(this.className.split(' ').filter(Boolean));
+    const commit = (s: Set<string>): void => { this.className = [...s].join(' '); };
+    return {
+      add: (...ts: string[]): void => { const s = set(); for (const t of ts) s.add(t); commit(s); },
+      remove: (...ts: string[]): void => { const s = set(); for (const t of ts) s.delete(t); commit(s); },
+      toggle: (t: string, on?: boolean): void => { const s = set(); const want = on === undefined ? !s.has(t) : on; if (want) s.add(t); else s.delete(t); commit(s); },
+    };
+  }
   private text = '';
   constructor(public tag: string) { super(); }
 

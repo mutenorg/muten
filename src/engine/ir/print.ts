@@ -5,7 +5,7 @@
 import { Ek, StOp, Nt, Mod } from '#engine/shared/vocab.js';
 import type {
   IR, IRNode, Expr, Interp, ParamRef, Stmt, Value, Scalar, StateDef, ActionDef,
-  Route, Entity, EntityConstraints, PartDef, ArgMap, ArgValue, ClassCond, StringPropValue,
+  Route, Entity, EntityConstraints, PartDef, ArgMap, ArgValue, ClassCond, ClassInterp, StringPropValue,
 } from '#engine/shared/types.js';
 
 const IND = '  ';
@@ -51,8 +51,10 @@ function printStringProp(v: StringPropValue): string {
 
 const printArgValue = (v: ArgValue): string => typeof v === 'number' ? String(v) : typeof v === 'string' ? v : '$lit' in v ? JSON.stringify(v.$lit) : '$' + v.$param;
 const printArgMap = (m: ArgMap): string => Object.entries(m).map(([k, v]) => `${k}: ${printArgValue(v)}`).join(', ');
-const printClass = (c: string | ClassCond): string =>
-  typeof c === 'string' ? (isIdent(c) ? c : JSON.stringify(c)) : `${isIdent(c.name) ? c.name : JSON.stringify(c.name)} when ${printExpr(c.cond)}`;
+const printClass = (c: string | ClassCond | ClassInterp): string =>
+  typeof c === 'string' ? (isIdent(c) ? c : JSON.stringify(c))
+    : 'interp' in c ? printStringProp(c.interp)
+      : `${isIdent(c.name) ? c.name : JSON.stringify(c.name)} when ${printExpr(c.cond)}`;
 
 // ── statements (action bodies / store effects) ────────────────────────────────
 function printStmt(s: Stmt, ind: string): string {

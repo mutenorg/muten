@@ -237,11 +237,13 @@ file-level conventions (≤500 lines, honest types, data-table dispatch, no magi
 ## Styling & escape hatch
 
 muten imposes no theme. There is ONE way to style: `class("…")` (your CSS / Tailwind / anything) carries both
-layout and look. `theme.muten` holds the design values and muten emits them as `:root` CSS custom properties
-(`--space-md`, `--color-primary`, ...) that your CSS / `class()` consumes. For a CSS value that **changes at
-runtime** (a progress width, a dynamic transform), `style(w: "{pct}%")` binds it to state via a CSS variable
-`--w` (the only thing `style()` can set — never an arbitrary property). For behavior the primitives can't
-express, drop to a `Custom` component (`src/components/<Name>.js`).
+layout and look — and it composes reactively: toggle a token (`class(active when x)`) or build one from a value
+(`class("status-{m.status}")` → `status-online`/`status-idle`, the reference oracle-checked). `theme.muten` holds
+the design values and muten emits them as `:root` CSS custom properties (`--space-md`, `--color-primary`, ...)
+that your CSS consumes. For a CSS value that **changes at runtime** (a progress width, a dynamic transform),
+`style(w: "{pct}%")` binds it to a CSS variable `--w` (the only thing `style()` can set). Common formatting is
+**built in** — `ago` / `date` / `time` / `initial` / `money` / `upper` / `truncate` (no `use` for dates or
+initials). For behavior the primitives can't express, drop to a `Custom` component (`src/components/<Name>.js`).
 
 ## Status & roadmap (honest)
 

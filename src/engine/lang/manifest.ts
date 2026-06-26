@@ -133,6 +133,19 @@ export const MODIFIER_DOCS = {
   style: 'The bounded way to bind a DYNAMIC CSS value to state — for progress bars, data-driven sizes, transforms: `style(w: "{pct}%")`. Each key becomes a CSS custom property `--key` (muten prepends `--`, so it can ONLY set variables, never arbitrary properties — no competing with class()/Tailwind). The value is an interpolated string; it is REACTIVE when it reads state. Your CSS consumes it: `.bar { width: var(--w); }`. Use class() for STATIC styling; use style() only for a value that changes at runtime.',
 };
 
+// Built-in formatting functions: callable like a `use`'d function but ALWAYS available (no import). The bounded
+// answer to "muten has no dates/string ops" — a FIXED set, so the language stays small and the oracle knows them.
+export const BUILTINS = ['upper', 'lower', 'initial', 'truncate', 'money', 'ago', 'date', 'time'];
+export const BUILTIN_DOCS: { [k: string]: string } = {
+  upper: 'upper(text) → UPPERCASE.',
+  lower: 'lower(text) → lowercase.',
+  initial: 'initial(name) → first letter, uppercased — avatar initials: `Text "{initial(user.name)}"`.',
+  truncate: 'truncate(text, n) → first n characters, + "…" if longer.',
+  money: 'money(number[, "USD"]) → localized currency, e.g. $1,234.56.',
+  ago: 'ago(isoText) → relative time: "just now" / "5m ago" / "3h ago" / "2d ago" (the timestamp is a text field holding an ISO string).',
+  date: 'date(isoText) → short date, e.g. "Jan 5".',
+  time: 'time(isoText) → short time, e.g. "3:42 PM".',
+};
 export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from'];
 export const KEYWORD_DOCS = {
   screen: 'Declares the screen name: `screen users_dashboard`.',
@@ -160,7 +173,7 @@ export const KEYWORD_DOCS = {
   param: 'Declares a route param read from the URL: `param id` for a route `/x/:id`. Usable in interpolation/`when`/expressions like a read-only string.',
   query: 'An async data source. The state exposes `.loading`, `.error` and `.data`.',
   persist: 'Backs a state with localStorage: `state { theme = "dark" : text persist }` (or `favs = [] : list<number> persist`). Hydrates on load (falls back to the declared initial) and saves on every change — survives reload. THE declarative localStorage — never hand-roll load/save in a `use` fn. Works page-local AND in a `.store` for app-global persisted state (favorites/cart/settings). Not for query-backed state.',
-  every: 'Poll a query on a timer: `query orders every 5s` (also `500ms`, `2m`). Silent auto-refetch — keyed reconciliation updates only the rows that changed (no full re-render, no loading flash).',
+  every: 'NOT SUPPORTED — `query x every Ns` (polling) is rejected by the oracle (it would silently never refresh). For real-time use `query x live` (a WebSocket); for periodic or triggered refresh, call `refetch()` from an action.',
   if: 'Conditional INSIDE an action body: `if <expr> { … } else { … }` — the only branching in actions (toggles, validation, add-or-remove).',
   when: 'Conditional render: `when <expr> { ... }`.',
   each: 'List render: `each <list> as <item> { ... }`. Optional `where`: `each posts as p where p.published { ... }` renders only matching items.',

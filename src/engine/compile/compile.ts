@@ -62,6 +62,13 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   // reactive element bits: conditional classes (`class(active when cond)`) + events (`on(keydown: fn)`).
   const genDynamics = (id: string, p: NodeProps): void => {
     for (const c of p.class || []) if (typeof c !== 'string') {
+      if ('interp' in c) {
+        // `class("status-{x}")` — interpolated token, applied reactively: swap the previous computed token(s)
+        // for the new whenever the value changes (split() so a multi-word result is handled token-by-token).
+        const js = c.interp.parts.map((pt) => typeof pt === 'string' ? JSON.stringify(pt) : `String(${logic.compileExpr(pt, pageScope)})`).join(' + ');
+        lines.push(`{ let __cp = ''; effect(() => { const __c = ${js}; if (__c === __cp) return; if (__cp) el_${id}.classList.remove(...__cp.split(' ').filter(Boolean)); if (__c) el_${id}.classList.add(...__c.split(' ').filter(Boolean)); __cp = __c; }); }`);
+        continue;
+      }
       // `class("a b c" when cond)` may hold MULTIPLE tokens; classList.toggle rejects a token with
       // spaces, so split (at compile time) and toggle each with the condition computed once.
       const toggles = c.name.trim().split(/\s+/).map((t) => `el_${id}.classList.toggle(${JSON.stringify(t)}, __on);`).join(' ');

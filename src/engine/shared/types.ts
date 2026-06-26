@@ -225,6 +225,7 @@ export interface ThemeAdapter {
 
 /** A `class()` entry: a plain look class, or one toggled reactively (`active when isOpen`). */
 export interface ClassCond { name: string; cond: Expr; }
+export interface ClassInterp { interp: Interp; }   // `class("status-{x}")` — a class token whose value interpolates state, applied reactively (swap on change)
 
 /** A node's props: a named bag of authoring options (no catch-all — every field is declared). */
 export interface NodeProps {
@@ -250,7 +251,7 @@ export interface NodeProps {
   // modifiers
   where?: string[];
   columns?: string[];
-  class?: Array<string | ClassCond>;   // static look classes + reactive toggles, e.g. `active when isOpen`
+  class?: Array<string | ClassCond | ClassInterp>;   // static classes, reactive toggles (`active when isOpen`), interpolated tokens (`status-{x}`)
   inputs?: ArgMap;
   on?: ArgMap;
   aria?: { [key: string]: Expr };   // aria(label: "Close", expanded: isOpen) → aria-*/role attrs; reactive when the value reads state

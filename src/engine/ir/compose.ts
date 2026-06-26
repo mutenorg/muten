@@ -59,7 +59,7 @@ function substitute(node: IRNode, args: ArgMap): IRNode {
 // node props: substitute only props that can carry a $param (text, expr, ref, args).
 function subProps(props: NodeProps, args: ArgMap): NodeProps {
   const out: NodeProps = { ...props }; // passthrough for level/style/where/columns/component/data/as
-  if (props.class !== undefined) out.class = props.class.map((c) => typeof c === 'string' ? c : { name: c.name, cond: subExpr(c.cond, args) }); // `class(x when $flag)`: sub $param in the condition
+  if (props.class !== undefined) out.class = props.class.map((c) => typeof c === 'string' ? c : 'interp' in c ? { interp: subInterp(c.interp, args) } : { name: c.name, cond: subExpr(c.cond, args) }); // `class(x when $flag)` / `class("p-{$x}")`: sub $param in the cond or the interpolation
   if (props.value !== undefined) out.value = subStringProp(props.value, args);
   if (props.label !== undefined) out.label = subStringProp(props.label, args);
   if (props.src !== undefined) out.src = subStringProp(props.src, args);

@@ -4,7 +4,7 @@
 // so the editor and build never disagree. Used by the live linter, `muten lint`, and Vite.
 
 import { diag, closest } from '#engine/shared/diagnostics.js';
-import { PRIMITIVE_NAMES, ACTION_OPS, PRIMITIVES } from '#engine/lang/manifest.js';
+import { PRIMITIVE_NAMES, ACTION_OPS, PRIMITIVES, BUILTINS } from '#engine/lang/manifest.js';
 import { Nt, Ek, StOp, BOp } from '#engine/shared/vocab.js';
 import type { Doc, FlatNode, ValidateCtx, ValidateResult, Diagnostic, Expr, Stmt, StringPropValue, Loc } from '#engine/shared/types.js';
 
@@ -52,7 +52,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   const paramNames = new Set(doc.params || []);              // route params (`param id`)
   const actionNames = new Set(Object.keys(doc.actions || {})); // needed for `action.pending` / `action.error` refs
   const getNames = new Set(Object.keys(doc.gets || {})); // derived values, referenceable like state (page or store)
-  const externs = new Set((doc.imports || []).flatMap((i) => i.names)); // logic functions callable in exprs
+  const externs = new Set([...BUILTINS, ...(doc.imports || []).flatMap((i) => i.names)]); // built-in formatting fns + use'd logic functions, callable in exprs
   const nodes = doc.nodes || {};
 
   // a `use`'d function call must reference a declared import: keeps the JS seam bounded and checkable
@@ -379,8 +379,6 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         D.push(diag('action-arity', `action "${props.action}" takes an argument (it reads "${doc.actions[props.action].params?.length ? doc.actions[props.action].params!.map((p) => p.name).join(', ') : doc.actions[props.action].input}") — pass it, e.g. \`-> ${props.action}(row)\``, { loc: n.loc }));
     }
     if (props.submit) checkAction(props.submit, n);
-    if (Array.isArray(props.class)) for (const c of props.class) if (typeof c === 'string' && c.includes('{')) // class() does not interpolate: it ships the literal braces into the DOM class
-      D.push(diag('class-interp', `class() does not interpolate "{…}": "${c}" would ship the braces literally. For a dynamic class use \`class(name when cond)\` (e.g. \`class(stage-applied when status == "applied")\`).`, { loc: n.loc, from: c }));
     if (Array.isArray(props.where)) for (const clause of props.where) if (typeof clause === 'string' && clause.trim()) { // where() compiles only `==`/`contains`, comma-separated; anything else throws or silently miscompiles
       if (!/(?:==|\bcontains\b)/.test(clause)) D.push(diag('unsupported-where', `where clause "${clause.trim()}" — where() supports only \`==\` and \`contains\` (e.g. where(role == admin, name contains @q)).`, { loc: n.loc, from: clause.trim() }));
       else if (/\b(?:and|or)\b/.test(clause)) D.push(diag('unsupported-where', `where clause "${clause.trim()}" — combine conditions with a COMMA, not \`and\`/\`or\`: where(role == admin, name contains @q).`, { loc: n.loc, from: clause.trim() }));
@@ -439,7 +437,10 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     }
     if (props.arg && typeof props.arg === 'object' && 'kind' in props.arg) checkExpr(props.arg as Expr, n.loc ?? null, scope); // `-> action(arg)` on Button/Link/RowAction: arg was previously unchecked
     if (props.argRest) for (const a of props.argRest) checkExpr(a, n.loc ?? null, scope);                                     // 2nd+ args of a multi-arg call `-> f(a, b)`
-    if (Array.isArray(props.class)) for (const c of props.class) if (typeof c !== 'string' && c.cond) checkExpr(c.cond, n.loc ?? null, scope); // reactive `class(x when cond)`: the cond was unchecked → a stale state ref (e.g. a renamed state) passed lint but shipped a runtime ReferenceError
+    if (Array.isArray(props.class)) for (const c of props.class) if (typeof c !== 'string') { // reactive class: cond / interpolated refs were unchecked → a stale state ref passed lint but shipped a runtime ReferenceError
+      if ('cond' in c) checkExpr(c.cond, n.loc ?? null, scope);
+      else if ('interp' in c) for (const pt of c.interp.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);
+    }
     if (props.aria) for (const expr of Object.values(props.aria)) checkExpr(expr, n.loc ?? null, scope);  // `aria(key: expr)` values are real expressions: an unknown/renamed state ref is caught here, not at runtime
     if (props.styleVars) for (const sv of Object.values(props.styleVars)) if (typeof sv !== 'string') for (const pt of sv.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);  // `style(w: "{ref}")` interpolations: an unknown state ref is caught here, not at runtime
     const interps: StringPropValue[] = [];
@@ -579,7 +580,9 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     for (const n of Object.values(nodes)) {
       if (!Array.isArray(n.props.class)) continue;
       for (const c of n.props.class) {
-        for (const issue of ctx.classValidator.check(typeof c === 'string' ? c : c.name)) {
+        const cls = typeof c === 'string' ? c : 'name' in c ? c.name : null; // an interpolated token (`status-{x}`) has a dynamic value — can't validate statically
+        if (cls === null) continue;
+        for (const issue of ctx.classValidator.check(cls)) {
           D.push(diag('unknown-class', `class "${issue.cls}" is not a known class or theme token (define it in your stylesheet/theme, or fix the typo)`, { loc: n.loc, suggestion: issue.suggestion, from: issue.cls }));
         }
       }
