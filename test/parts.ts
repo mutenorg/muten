@@ -43,5 +43,30 @@ check('class($param cond) substituted: $flag → on', boxCls?.props?.class?.[0]?
 const navIcon = compose(parse('screen t\nPage { NavItem(icon: "lucide:users") }').tree, { NavItem: parse('part NavItem(icon: text) { Icon $icon }').parts.NavItem }).tree.children?.[0];
 check('part passes Icon: $icon → "lucide:users" (static after inline)', navIcon?.type === 'Icon' && navIcon?.props?.name === 'lucide:users', JSON.stringify(navIcon?.props));
 
+// SLOT: a wrapper part with `slot` inlines the caller's children at that position (in the caller's scope).
+const panel = parse('part Panel(title: text) { Stack class("card") { Span "{$title}"  slot } }').parts.Panel;
+const filled = compose(parse('screen t\nPage { Panel(title: "Sales") { Text "a"  Text "b" } }').tree, { Panel: panel }).tree.children?.[0];
+check('slot: wrapper Stack inlined', filled?.type === 'Stack', filled?.type);
+check('slot: header stays before the slot', filled?.children?.[0]?.type === 'Span', filled?.children?.[0]?.type);
+check('slot: caller children injected at the slot', filled?.children?.length === 3 && filled.children[1]?.props?.value === 'a' && filled.children[2]?.props?.value === 'b', JSON.stringify(filled?.children?.map((c) => c.type)));
+
+// no children passed → the slot marker is removed (never survives to compile as a stray shell outlet).
+const empty = compose(parse('screen t\nPage { Panel(title: "x") }').tree, { Panel: panel }).tree.children?.[0];
+check('slot: no children → slot removed', empty?.children?.length === 1 && empty.children[0]?.type === 'Span', JSON.stringify(empty?.children?.map((c) => c.type)));
+
+// nesting the SAME wrapper through a slot is finite (it's the caller's content), so the recursion guard must allow it.
+let nestOk = true;
+try {
+  const nested = compose(parse('screen t\nPage { Panel(title: "out") { Panel(title: "in") { Text "deep" } } }').tree, { Panel: panel }).tree.children?.[0];
+  const innerPanel = nested?.children?.[1];
+  nestOk = innerPanel?.type === 'Stack' && innerPanel?.children?.[1]?.props?.value === 'deep';
+} catch { nestOk = false; }
+check('slot: nesting the same wrapper works (no false recursion)', nestOk);
+
+// a part takes ONE slot — two is rejected at parse (would inject the same content twice).
+let guard = false;
+try { parse('part Bad() { Stack { slot  slot } }'); } catch { guard = true; }
+check('slot: >1 slot in a part is rejected', guard);
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nALL OK');
 process.exit(fails ? 1 : 0);

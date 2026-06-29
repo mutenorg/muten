@@ -3,7 +3,7 @@
 // still mutate it by id. Resolves nested parts. Substitution is explicit per value shape
 // (prop / expression / interpolation / arg), honestly typed with no generic any.
 
-import { Ek } from '#engine/shared/vocab.js';
+import { Ek, Nt } from '#engine/shared/vocab.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap, ArgValue, PartDef } from '#engine/shared/types.js';
 
@@ -31,20 +31,30 @@ export function composeDoc(ir: IR, parts: Parts): { doc: Doc; used: string[] } {
   return { doc: toDoc({ ...ir, entities, state, tree }), used };
 }
 
-function composeNode(node: IRNode, parts: Parts, used: Set<string>, chain: Set<string> = new Set()): IRNode {
+// `slot` carries the call-site children to inject at the part's `slot` marker. They're composed once, in the
+// CALLER's chain — so nesting the same wrapper (`Panel { Panel { … } }`) is fine; only a part whose BODY cites
+// itself is the unterminating cycle the chain guard catches.
+function composeNode(node: IRNode, parts: Parts, used: Set<string>, chain: Set<string> = new Set(), slot: IRNode[] = []): IRNode {
   const part = parts[node.type];
   if (part) {                                          // it's a part instance
     if (chain.has(node.type)) throw new Error(`part "${node.type}" references itself (directly or through another part) — parts inline at build, so a cycle can never terminate. Remove the self-reference.`);
     used.add(node.type);
+    const kids = (node.children || []).flatMap((c) => composeChild(c, parts, used, chain, slot)); // the call's children become this part's slot content (forwarding any enclosing slot)
     const inlined = substitute(part.tree, node.args || {});
-    return composeNode(inlined, parts, used, new Set([...chain, node.type]));   // resolve nested parts; track the expansion chain to catch recursion
+    return composeNode(inlined, parts, used, new Set([...chain, node.type]), kids);   // resolve nested parts; the part's `slot` fills with kids
   }
   const out: IRNode = { type: node.type };
   if (node.loc) out.loc = node.loc;   // page's own nodes keep their source position
   if (node.args) out.args = node.args; // unresolved part instance (typo): validate flags it unknown-part
   if (node.props) out.props = node.props;
-  if (node.children) out.children = node.children.map((c) => composeNode(c, parts, used, chain));
+  if (node.children) out.children = node.children.flatMap((c) => composeChild(c, parts, used, chain, slot));
   return out;
+}
+
+// A child position: a `slot` marker expands to the already-composed slot content; any other node composes to itself.
+function composeChild(c: IRNode, parts: Parts, used: Set<string>, chain: Set<string>, slot: IRNode[]): IRNode[] {
+  if (c.type === Nt.Slot) return slot;                 // inject the caller's children here (empty array if the call passed none)
+  return [composeNode(c, parts, used, chain, slot)];
 }
 
 // replaces { $param: "x" } with args.x across the part's whole subtree

@@ -19,13 +19,17 @@ export class Logic {
     return !!slice && (slice[kind] || []).includes(member);
   }
 
+  // ctx-refs mode (HMR patch builders only): a re-built node reads state/actions/gets/params through the LIVE
+  // `ctx` object instead of mount-closure locals, so it binds to the SAME signals. Off in the main module.
+  private cx(name: string): string { return this.ctx.ctxRefs ? 'ctx.' + name : name; }
+
   // action name -> its callable. Store action `cart.add` -> `__store_cart.add` (domain marked used);
   // local action stays as written; missing name compiles to nothing.
   actionRef(name: string | undefined): string {
     if (!name) return '';
     const [domain, member] = name.split('.');
     if (member && this.inStore(domain, member, 'actions')) { this.ctx.usedStores.add(domain); return `__store_${domain}.${member}`; }
-    return name;
+    return this.cx(name);
   }
 
   // bind/data target -> signal name. `@local` -> `local`; `cart.query` -> `__store_cart.query`.
@@ -77,13 +81,13 @@ export class Logic {
     if (scope.locals.has(head)) return head + tail;
     if (scope.item?.fields.has(head)) return `${scope.item.var}.${name}`;   // `<list> where <cond>`: bare field of the item, read off the row
 
-    if (this.ctx.params.has(head)) return head + tail;        // route param: local string injected at mount
+    if (this.ctx.params.has(head)) return this.cx(head) + tail;        // route param: local string injected at mount
     if (this.ctx.queryStates.has(head)) {
       if (rest[0] === 'loading' || rest[0] === 'error' || rest[0] === 'data') return `${head}.get()${tail}`; // .loading/.error/.data are the signal's own fields, no double .data
       return `${head}.get().data${tail}`;                 // @users -> data array; @users.length -> its length
     }
-    if (this.ctx.stateKeys.has(head)) return `${head}.get()` + (rest.length ? '?.' + rest.join('?.') : ''); // optional-chain nested entity access: `{o.inner.name}` on `o = {} : Entity` must not throw on the empty record
-    if (this.ctx.gets[head] !== undefined) return `${head}.get()` + (rest.length ? '?.' + rest.join('?.') : ''); // `get` is a computed signal, read like state
+    if (this.ctx.stateKeys.has(head)) return `${this.cx(head)}.get()` + (rest.length ? '?.' + rest.join('?.') : ''); // optional-chain nested entity access: `{o.inner.name}` on `o = {} : Entity` must not throw on the empty record
+    if (this.ctx.gets[head] !== undefined) return `${this.cx(head)}.get()` + (rest.length ? '?.' + rest.join('?.') : ''); // `get` is a computed signal, read like state
     if (this.ctx.stores[head]) {
       const member = rest[0];
       const more = rest.length > 1 ? '.' + rest.slice(1).join('.') : '';
@@ -183,7 +187,7 @@ export class Logic {
           : `${st.target}.set([...${st.target}.get(), ${value}]);`;
         if (isEntity) { // entity list: copy item + auto-fill uuid fields
           out.push(`{ const __it = { ...${this.compileExpr(st.arg, scope)} };`);
-          for (const field of this.uuidFields(elem)) out.push(`  if (__it.${field} === null || __it.${field} === undefined) __it.${field} = __id(); // auto uuid`);
+          for (const field of this.uuidFields(elem)) out.push(`  if (__it.${field} === null || __it.${field} === undefined) __it.${field} = __id();`);
           out.push(`  ${wrap('__it')} }`);
         } else { // scalar list (ids, numbers): push value as-is
           out.push(`${wrap(this.compileExpr(st.arg, scope))}`);
@@ -268,7 +272,7 @@ export class Logic {
     const out: string[] = [];
     for (const [name, def] of Object.entries(this.ctx.state)) {
       if (typeof def.source === 'string' && def.source.startsWith('query:')) {
-        out.push(`${exp}const ${name} = query(${JSON.stringify(def.source.slice('query:'.length))}${def.live ? ', true' : ''}); // async: ${name}.loading / .error / .data${def.live ? ' (websocket live)' : ''}`);
+        out.push(`${exp}const ${name} = query(${JSON.stringify(def.source.slice('query:'.length))}${def.live ? ', true' : ''});`);
       } else {
         let initial: Value = def.initial ?? null;
         const elem = def.type.startsWith('list<') ? def.type.slice(5, -1) : '';

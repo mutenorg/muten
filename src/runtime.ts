@@ -2,7 +2,13 @@
 // Shared by every compiled .muten module. Vite serves it as `virtual:muten/runtime`;
 // the standalone HTML format inlines an equivalent. No dependencies, ~50 lines.
 
-import type { Signal, EffectRun, PageModule, RouteDef } from '#engine/shared/types.js';
+import type { Signal, EffectRun, PageModule, RouteDef, PageInstance, NodeRegistry } from '#engine/shared/types.js';
+
+// The HMR handle lives on the mounted page element (`el.__muten`); the dev client reaches it + the runtime via window.
+declare global {
+  interface Element { __muten?: PageInstance; }
+  interface Window { __muten_page?: PageInstance; __muten_screen?: string; __muten_rt?: { [k: string]: unknown }; }
+}
 
 let current: EffectRun | null = null;            // effect currently running, so reads can subscribe it
 let owner: Array<EffectRun | (() => void)> | null = null;   // effects + onCleanup teardowns in the current scope, disposed together
@@ -56,6 +62,25 @@ export function root<T>(fn: () => T): { value: T; dispose: () => void } {
 }
 export function scope(fn: () => void): () => void { return root(fn).dispose; }
 export function onCleanup(fn: () => void): void { if (owner) owner.push(fn); }
+
+// SURGICAL HMR: rebuild ONE node by id against the SAME live signals (ctx), keeping its CHILDREN (their DOM,
+// effects and state) and every sibling intact — muten's "address + mutate by id" made real at runtime, no VDOM,
+// no full reload. `build(ctx, parent, nodes)` builds the node's OWN element + own props/effects (NOT its
+// children) and returns that element. We then re-parent the existing children into it and dispose only this
+// node's own scope, so a class/text/attr edit never resets a child's signal. Returns false (caller reloads) for
+// an unknown/detached node, or when `build` doesn't yield an element (a structural change the diff should catch).
+export function patchNode(inst: PageInstance, id: string, build: (ctx: { [k: string]: unknown }, parent: Element, nodes: NodeRegistry) => Element): boolean {
+  const node = inst.nodes[id];
+  if (!node || !node.el.parentNode) return false;
+  let fresh: Element | undefined;
+  const dispose = root(() => { fresh = build(inst.ctx, node.parent, inst.nodes); }).dispose; // node's own effects in a fresh scope
+  if (!(fresh instanceof Element)) { dispose(); return false; }
+  while (node.el.firstChild) fresh.appendChild(node.el.firstChild); // move existing children — their state/effects survive
+  node.dispose?.();                                                 // re-patch: stop the prior patch's scope. First patch: the original effects stay on the detached node (cleaned on nav) — ponytail: dev leak bounded by edit count
+  node.el.replaceWith(fresh);                                       // swap in place — siblings untouched
+  inst.nodes[id] = { el: fresh, dispose, parent: node.parent };
+  return true;
+}
 
 // `a contains b`: list membership or case-insensitive substring, one operator for both.
 export function __has<T>(a: readonly T[] | string | null | undefined, b: T): boolean {
@@ -182,14 +207,19 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }): vo
     }
     if (path === mounted) return;
     mounted = path;
-    if (disposePage) disposePage();           // stop the previous page's effects to avoid stale-DOM crashes
-    disposePage = null;
-    outlet.replaceChildren();
-    scrollTo(0, 0);
+    // load-then-swap: keep the current page on screen until the next one is ready, then replace in ONE frame.
+    // (Clearing before the async load left a blank gap that made the whole UI flash/jump on every navigation.)
     def.load().then((module: PageModule) => {
+      if (mounted !== path) return;            // a newer navigation superseded this load — drop the stale result
+      if (disposePage) disposePage();          // stop the previous page's effects to avoid stale-DOM crashes
       injectCss(module.css);
       if (module.meta) applyMeta(module.meta);
-      disposePage = scope(() => { module.mount(outlet, params); });
+      disposePage = scope(() => {
+        outlet.replaceChildren();
+        const pageEl = module.mount(outlet, params); // atomic swap: no blank frame
+        if (typeof window !== 'undefined') { window.__muten_page = pageEl.__muten; window.__muten_screen = module.screen; } // dev HMR target
+      });
+      scrollTo(0, 0);
       const main = outlet.querySelector('main'); if (main instanceof HTMLElement) main.focus(); // a11y: move focus to content on nav (the <main> is tabIndex -1)
     });
   };
@@ -208,3 +238,6 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }): vo
   // tracking every guard signal ensures logging in/out re-renders the active route automatically.
   effect(() => { for (const key of keys) { const guard = routes[key].guard; if (guard) guard(); } render(); });
 }
+
+// dev HMR: the injected client evals a compiled patch builder and needs these runtime fns in scope. Harmless in prod.
+if (typeof window !== 'undefined') window.__muten_rt = { patchNode, signal, computed, effect, root, onCleanup, __eq, __order, __has, __id };

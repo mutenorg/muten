@@ -14,6 +14,10 @@ const GENERIC_PREFIX: { [section: string]: string } = {
   weight: '--weight-', leading: '--leading-', breakpoints: '--breakpoint-', size: '--size-',
 };
 const META_SECTIONS = new Set(['scheme', 'target']); // config, not CSS vars
+// `dark {}` / `light {}` are COLOR-SCHEME blocks: the same color tokens (ink/fg/panel/…) per scheme. They
+// emit as --color-* under [data-theme="<scheme>"] so one theme.muten drives BOTH modes (the default scheme,
+// theme.scheme.mode, is also inlined into :root). An adapter handles schemes via its own blocks instead.
+const SCHEME_SECTIONS = ['dark', 'light'];
 
 export function emitTheme(theme: ThemeRaw = {}, adapter?: ThemeAdapter): string {
   if (adapter) { // a plugin's library-specific format: walk its blocks, map values × prefix (still no library name here)
@@ -29,8 +33,20 @@ export function emitTheme(theme: ThemeRaw = {}, adapter?: ThemeAdapter): string 
     }
     return out.length ? out.join('\n\n') + '\n' : '';
   }
-  // default: plain CSS custom properties, library-neutral.
-  const lines = Object.entries(theme).filter(([s]) => !META_SECTIONS.has(s))
+  // default: plain CSS custom properties, library-neutral, with native light/dark schemes.
+  const colorPrefix = GENERIC_PREFIX.colors;
+  const schemeLines = (mode: string): string[] =>
+    Object.entries(theme[mode] || {}).map(([k, v]) => `  ${colorPrefix}${k}: ${v};`);
+  const sharedLines = Object.entries(theme)
+    .filter(([s]) => !META_SECTIONS.has(s) && !SCHEME_SECTIONS.includes(s))
     .flatMap(([s, scale]) => Object.entries(scale).map(([k, v]) => `  ${GENERIC_PREFIX[s] ?? `--${s}-`}${k}: ${v};`));
-  return lines.length ? `:root {\n${lines.join('\n')}\n}\n` : '';
+  const out: string[] = [];
+  const defaultMode = theme.scheme?.mode ?? 'dark';
+  const rootLines = [...sharedLines, ...schemeLines(defaultMode)]; // default scheme inlined on :root
+  if (rootLines.length) out.push(`:root {\n${rootLines.join('\n')}\n}`);
+  for (const mode of SCHEME_SECTIONS) { // explicit per-scheme override blocks, toggled via [data-theme]
+    const sl = schemeLines(mode);
+    if (sl.length) out.push(`[data-theme="${mode}"] {\n${sl.join('\n')}\n}`);
+  }
+  return out.length ? out.join('\n\n') + '\n' : '';
 }

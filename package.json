@@ -1,6 +1,6 @@
 {
   "name": "@muten/core",
-  "version": "0.0.27",
+  "version": "0.0.28",
   "description": "AI-first frontend framework — compiles .muten files to vanilla JS + signals.",
   "repository": {
     "type": "git",
@@ -16,6 +16,7 @@
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
+    "./browser.js": "./dist/browser.js",
     "./vite-plugin-muten.js": "./dist/vite-plugin-muten.js"
   },
   "imports": {
@@ -44,20 +45,20 @@
     "prepare": "npm run build",
     "build": "tsc && node --experimental-strip-types esbuild.ts && node scripts/gen-gbnf.mjs",
     "gbnf": "node scripts/gen-gbnf.mjs",
-    "test": "npm run build && node --experimental-strip-types test/parse.ts && node --experimental-strip-types test/expr.ts && node --experimental-strip-types test/parts.ts && node --experimental-strip-types test/diagnostics.ts && node --experimental-strip-types test/routes.ts && node --experimental-strip-types test/params.ts && node --experimental-strip-types test/ssr.ts && node --experimental-strip-types test/writes.ts && node --experimental-strip-types test/dynamics.ts && node --experimental-strip-types test/runtime.ts && node --experimental-strip-types test/lang.ts && node --experimental-strip-types test/forms.ts && node --experimental-strip-types test/theme.ts && node --experimental-strip-types test/smoke.ts && node --experimental-strip-types test/realapp.ts && node --experimental-strip-types test/print.ts && node --experimental-strip-types test/externs.ts && node test/gbnf.mjs"
+    "test": "npm run build && node --experimental-strip-types test/parse.ts && node --experimental-strip-types test/expr.ts && node --experimental-strip-types test/parts.ts && node --experimental-strip-types test/diagnostics.ts && node --experimental-strip-types test/routes.ts && node --experimental-strip-types test/params.ts && node --experimental-strip-types test/ssr.ts && node --experimental-strip-types test/writes.ts && node --experimental-strip-types test/dynamics.ts && node --experimental-strip-types test/runtime.ts && node --experimental-strip-types test/hmr.ts && node --experimental-strip-types test/lang.ts && node --experimental-strip-types test/forms.ts && node --experimental-strip-types test/theme.ts && node --experimental-strip-types test/smoke.ts && node --experimental-strip-types test/realapp.ts && node --experimental-strip-types test/print.ts && node --experimental-strip-types test/externs.ts && node --experimental-strip-types test/config.ts && node test/gbnf.mjs"
   },
   "optionalDependencies": {
     "sass": "^1.101.0"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
-    "esbuild": "^0.28.1",
     "gbnf": "^0.1.41",
     "typescript": "^6.0.3",
     "vite": "^8.0.16",
     "@iconify/types": "^2.0.0"
   },
   "dependencies": {
-    "@iconify/utils": "^2.1.0"
+    "@iconify/utils": "^2.1.0",
+    "esbuild": "^0.28.1"
   }
 }

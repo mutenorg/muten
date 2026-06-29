@@ -6,9 +6,11 @@
 export { buildApp } from './build.js';
 export { lintApp } from './lint.js';
 
-// pure compiler pipeline (advanced / embedding use)
+// pure compiler pipeline (advanced / embedding use — e.g. an in-browser playground)
 export { parse } from '#engine/lang/parse.js';
 export { toDoc } from '#engine/ir/flatten.js';
+export { compose, composeDoc } from '#engine/ir/compose.js';
 export { validate } from '#engine/ir/validate.js';
-export { compile } from '#engine/compile/compile.js';
+export { compile, compileModule, compileStore } from '#engine/compile/compile.js';
+export { Fmt } from '#engine/shared/vocab.js';
 export { load, loadAllParts } from '#engine/project/load.js';

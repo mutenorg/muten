@@ -2,9 +2,10 @@
 // "muten map" runs cold (parse + flatten only, no build/SSR) so an AI reads one file to know the whole app.
 // routeEntry is shared with build.ts to keep the shape consistent. Consumed by the CLI map command.
 
-import { relative } from 'node:path';
+import { relative, join } from 'node:path';
 import { readRoutes } from '#engine/project/routes.js';
-import { load, loadAllParts } from '#engine/project/load.js';
+import { load, loadAllParts, findStores } from '#engine/project/load.js';
+import { storeContext } from '#engine/project/context.js';
 import { sourceRequest } from '#engine/shared/source.js';
 import type { AppMap, Doc, Value } from '#engine/shared/types.js';
 
@@ -22,7 +23,8 @@ export function routeEntry(file: string, doc: Doc, sources: { [name: string]: Va
 export async function mapApp(appRoot: string): Promise<AppMap> {
   const parts = await loadAllParts(appRoot);
   const pages = readRoutes(appRoot);
-  const map: AppMap = { app: appRoot.split(/[\\/]/).pop() || '', parts: Object.keys(parts), routes: {} };
+  const { storesMeta } = storeContext(findStores(join(appRoot, 'src'))); // domain -> {state, gets, actions}
+  const map: AppMap = { app: appRoot.split(/[\\/]/).pop() || '', parts: Object.keys(parts), stores: storesMeta, routes: {} };
   for (const page of pages) {
     const { doc, sources } = await load(page.screenPath, parts);
     map.routes['/' + page.route] = routeEntry(relative(appRoot, page.screenPath), doc, sources);

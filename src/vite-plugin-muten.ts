@@ -9,14 +9,17 @@ import { dirname, join } from 'node:path';
 import type { Plugin, ResolvedConfig, HmrContext, ViteDevServer } from 'vite';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
-import { load, loadAllParts, findStores, storeListEntities } from '#engine/project/load.js';
+import { load, loadAllParts, findStores } from '#engine/project/load.js';
+import { storeContext, type StoreContext } from '#engine/project/context.js';
+import { getIconChecker } from '#engine/project/icon-check.js';
 import { apiClientNames } from '#engine/project/routes.js';
 import { validate } from '#engine/ir/validate.js';
 import { compileModule, compileStore } from '#engine/compile/compile.js';
 import { emitTheme } from '#engine/style/tokens.js';
+import { readMutenConfig, configThemeAdapter, configClasses } from '#engine/project/config.js';
 import { makeIconResolver } from './icons.js';
 import { Nt } from '#engine/shared/vocab.js';
-import type { IR, ThemeRaw, ClassValidator, MutenOptions, StoreSlice, PartDef } from '#engine/shared/types.js';
+import type { IR, ThemeRaw, ThemeAdapter, ClassValidator, MutenOptions, PartDef } from '#engine/shared/types.js';
 
 // virtual module IDs this plugin owns (leading \0 prevents Vite from resolving them to disk).
 const RID = 'virtual:muten/runtime';
@@ -33,17 +36,23 @@ export default function muten(options: MutenOptions = {}): Plugin {
   let appRoot = process.cwd();
   let parts: { [name: string]: PartDef } = {};
   let slices: { [domain: string]: IR } = {};
-  const storesMeta: { [domain: string]: StoreSlice } = {}; // members each store exposes, needed for ref resolution in validate + codegen
+  let storeCtx: StoreContext = storeContext({}); // store facts (members/entities/selfMut/meta), assembled once per loadProject — shared with check + build
+  let iconExists: ReturnType<typeof getIconChecker>; // `Icon "set:name"` existence, the same check `check`/`build` run
   let appIr: IR | undefined;                      // parsed app.muten (shell + routes)
   let stylesHref: string | null = null;           // project stylesheet (/src/styles.css|scss), injected by the boot module
+  let configTheme: ThemeAdapter | undefined;      // styling adapter from muten.config (the build config, in muten); overrides the JS option
+  let configCls: { [slot: string]: string } | undefined; // Form class map from muten.config styling.classes
 
   // Generates the self-booting entry module. index.html imports /src/app.muten; the transform hook
   // rewrites it to this: imports the shell + route map (with guards) + stylesheet, then mounts onto
   // #app. The app needs no hand-written main.js.
   const buildBoot = (): string => {
     const guardDomains = new Set<string>();
+    const seen = new Set<string>();
     const routes = (appIr?.routes || []).map((r) => {
       const path = JSON.stringify('/' + r.url.replace(/^\//, ''));
+      if (seen.has(path)) throw new Error(`[muten] duplicate route ${path} in app.muten`); // parity with check/build (readRoutes)
+      seen.add(path);
       const imp = `() => import(${JSON.stringify('/src/pages/' + r.page + '/' + r.page + '.muten')})`;
       if (r.guard) {
         const [domain, field] = r.guard.split('.');
@@ -72,17 +81,18 @@ if (root) {
   // graph), so without a rescan a newly added/edited part would wrongly report "not a known part".
   const loadProject = async (): Promise<void> => {
     parts = await loadAllParts(appRoot);
-    for (const k of Object.keys(storesMeta)) delete storesMeta[k]; // clear stale metadata before repopulating
-    if (storeEnabled) {
-      slices = findStores(join(appRoot, 'src'));
-      for (const [domain, ir] of Object.entries(slices)) {
-        storesMeta[domain] = { state: Object.keys(ir.state || {}), gets: Object.keys(ir.gets || {}), actions: Object.keys(ir.actions || {}) };
-      }
-    }
+    slices = storeEnabled ? findStores(join(appRoot, 'src')) : {};
+    storeCtx = storeContext(slices); // ONE store-facts assembly (members/entities/selfMut/meta), shared with check + build
+    iconExists = getIconChecker(appRoot);
     const rootFile = join(appRoot, 'src', 'app.muten');
     appIr = existsSync(rootFile) ? parse(readFileSync(rootFile, 'utf8')) : undefined;
     const themeFile = join(appRoot, 'theme.muten');
     themeRaw = existsSync(themeFile) ? (parse(readFileSync(themeFile, 'utf8')).theme || {}) : (options.theme || {});
+    // muten.config (muten syntax) is the build config; its `styling {}` block IS the theme adapter + Form class
+    // map. ONE reader shared with `muten build` (config.ts), so dev / bundle / SSG never emit different theme.
+    const cfg = readMutenConfig(appRoot);
+    configTheme = configThemeAdapter(cfg);
+    configCls = configClasses(cfg);
     stylesHref = null;
     let stylesPath: string | null = null;
     for (const name of ['styles.css', 'styles.scss']) {
@@ -150,7 +160,7 @@ if (root) {
         const doc = toDoc({ ...(appIr || {}), screen: 'shell', entities: {}, state: {}, actions: {}, tree }); // spread appIr so shell `imports` survive; chrome stays state/action-free
         // shell + pages emit only their token CSS; reset/base lives in the project stylesheet
         // loaded once via main, so there's no duplicate .stack fighting the cascade.
-        return compileModule(doc, {}, '', {}, {}, { stores: storesMeta, storeEntities: storeListEntities(slices), iconResolver: makeIconResolver(appRoot), classes: options.styling?.classes });
+        return compileModule(doc, {}, '', {}, {}, { stores: storeCtx.storesMeta, storeEntities: storeCtx.storeEntities, iconResolver: makeIconResolver(appRoot), classes: configCls ?? options.styling?.classes });
       }
 
     },
@@ -161,18 +171,15 @@ if (root) {
       // `muten({ styling: { theme } })` — pure data in the user's config; the engine knows no library.
       const sheet = id.replace(/\\/g, '/').split('?')[0];
       if (sheet.endsWith('/styles.css') || sheet.endsWith('/styles.scss')) {
-        const block = emitTheme(themeRaw, options.styling?.theme);
+        const block = emitTheme(themeRaw, configTheme ?? options.styling?.theme);
         return block ? { code: code + '\n\n/* muten: generated from theme.muten */\n' + block, map: null } : null;
       }
       if (!id.endsWith('.muten')) return null;
       if (id.replace(/\\/g, '/').endsWith('/src/app.muten')) return { code: buildBoot(), map: null }; // app root is the boot entry
       const loaded = await load(id, parts); // engine load() with parts gathered up front, not the Vite hook above
-      // storeMembers (domain -> state/get/action names) lets validate allow `cart.count` refs and
-      // page-to-store action composition. Without it, both are wrongly rejected.
-      const storeMembers: { [d: string]: string[] } = {};
-      for (const [d, m] of Object.entries(storesMeta)) storeMembers[d] = [...(m.state || []), ...(m.gets || []), ...(m.actions || [])];
-      const storeEntities = storeListEntities(slices); // element entity of each store list, so cross-store aggregates resolve
-      const { ok, diagnostics } = validate(loaded.doc, { parts: loaded.partNames, stores: Object.keys(storesMeta), storeMembers, storeEntities, classValidator, apiClients: apiClientNames(appIr?.api || {}) });
+      // store facts (members/entities/selfMut) + icon existence come from storeContext — the SAME context
+      // `check`/`build` use, so the dev overlay no longer skips the effect-loop guard or the bad-icon check.
+      const { ok, diagnostics } = validate(loaded.doc, { parts: loaded.partNames, stores: storeCtx.stores, storeMembers: storeCtx.storeMembers, storeEntities: storeCtx.storeEntities, storeSelfMut: storeCtx.storeSelfMut, iconExists, classValidator, apiClients: apiClientNames(appIr?.api || {}) });
       if (!ok) {
         // A TRACKABLE live error: point at the exact .muten line with a code frame + the "did you mean",
         // not a flat join of messages. The dev-server overlay then reads like a TypeScript error.
@@ -201,7 +208,7 @@ if (root) {
       }
 
       // sources live in app.muten (next to `api`), so a page's `query x` resolves against the APP's sources; a page-local `sources` block still overrides.
-      return { code: compileModule(loaded.doc, loaded.data, loaded.styles.css, components, { ...(appIr?.sources || {}), ...loaded.sources }, { stores: storesMeta, storeEntities, api: appIr?.api || {}, iconResolver: makeIconResolver(appRoot), classes: options.styling?.classes }), map: null };
+      return { code: compileModule(loaded.doc, loaded.data, loaded.styles.css, components, { ...(appIr?.sources || {}), ...loaded.sources }, { stores: storeCtx.storesMeta, storeEntities: storeCtx.storeEntities, api: appIr?.api || {}, iconResolver: makeIconResolver(appRoot), classes: configCls ?? options.styling?.classes }), map: null };
     },
 
     handleHotUpdate(ctx: HmrContext) {
@@ -216,7 +223,7 @@ if (root) {
       const onFile = (f: string): void => {
         const p = f.replace(/\\/g, '/');
         // covers .muten/.store/styles and Custom component JS (pages inline these too)
-        if (p.endsWith('.muten') || p.endsWith('.store') || p.endsWith('/styles.css') || p.endsWith('/styles.scss')
+        if (p.endsWith('.muten') || p.endsWith('.store') || p.endsWith('/muten.config') || p.endsWith('/styles.css') || p.endsWith('/styles.scss')
           || (p.includes('/components/') && p.endsWith('.js'))) reload(server);
       };
       server.watcher.on('add', onFile);

@@ -58,7 +58,7 @@ export enum Nt {
 }
 
 /** Compile output format. */
-export enum Fmt { Module = 'module', Store = 'store', Html = 'html', Ssr = 'ssr' }
+export enum Fmt { Module = 'module', Store = 'store', Html = 'html', Ssr = 'ssr', Patch = 'patch' }
 
 /** Editable form-field kinds (how a Form renders an entity field). */
 export enum Fk { Text = 'text', Email = 'email', Number = 'number', Bool = 'bool', Enum = 'enum', Date = 'date', Password = 'password', Textarea = 'textarea' }

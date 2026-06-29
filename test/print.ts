@@ -67,6 +67,17 @@ routes {
   "/product/:id" -> product
 }`);
 
+// primitives whose positional value isn't `value`: Icon's `name`, Image's `src`+`alt`, Custom's bare-ident
+// `component` (a missing case here once let print silently DROP Icon names + Custom names — file-corrupting).
+roundtrips('primitives: icon+image+custom', `screen s
+Page {
+  Icon "lucide:home" class("text-base")
+  Image "/logo.svg" alt("the logo") class("w-8")
+  Custom FrameworkCompare class("mt-4") {
+    Link -> "/" class("x") { Icon "lucide:arrow-left"  Span "Home" }
+  }
+}`);
+
 roundtrips('exprs+control', `screen s
 state { open = false : bool }
 action toggle mutates open <- x { open.set(not open) }

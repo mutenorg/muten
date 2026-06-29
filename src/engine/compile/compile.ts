@@ -1,6 +1,14 @@
 // compile.ts: IR -> runnable code. The DOM half of the compiler.
 // Walks the flat node tree and emits imperative DOM construction + fine-grained effects (text
 // interpolation, when/each, DataTable, Form). No virtual DOM: the abstraction compiles away.
+//
+// DELIBERATELY REGULAR. Every node emits the SAME shape: createElement -> attributes -> effects -> append.
+// The output is repetitive on purpose. The goal is not the smallest JS — it's the most PREDICTABLE JS:
+// gzip already crushes the repetition (raw is large, shipped is tiny), and a single, uniform pattern is
+// AI-locatable, trivially debuggable, and easy to optimize later if ever needed. Do NOT trade that
+// regularity for bytes: no static-subtree template cloning, no effect fusion, no DocumentFragment batching,
+// no event delegation — those split the codegen into many special-case strategies to save a few hundred
+// bytes that gzip would have removed anyway. One node, one pattern. (See memory: muten-codegen-regularity.)
 // Behaviour (expressions, action statements, state/action/effect decls) lives in logic.ts;
 // output templates (HTML/module/store wrappers) live in emit.ts. compile() orchestrates all three.
 // Static filters (role == admin) are pushed to the query; dynamic ones (name contains @q) stay
@@ -8,7 +16,8 @@
 
 import { Nt, Ek, Fmt, Fk } from '#engine/shared/vocab.js';
 import { customValue, CONTAINERS, parseClause, editableFields } from '#engine/compile/helpers.js';
-import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml } from '#engine/compile/emit.js';
+import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, emitPatch } from '#engine/compile/emit.js';
+import { inlineSourceMap } from '#engine/compile/sourcemap.js';
 import { Logic } from '#engine/compile/logic.js';
 import type {
   Doc, NodeProps, Scope, Interp, StringPropValue, Value,
@@ -19,6 +28,12 @@ import type {
 // opts.stores lets the page reference app-global store domains.
 export function compileModule(doc: Doc, data: { [name: string]: Value } = {}, projectCss = '', components: { [name: string]: string } = {}, sources: { [name: string]: Value } = {}, opts: CompileOpts = {}): string {
   return compile(doc, data, projectCss, components, sources, { ...opts, format: Fmt.Module });
+}
+
+// HMR: emit ONE node's subtree as a `(ctx, nodes, parent, __rt) => element` builder — refs go through the live
+// `ctx` so a re-built node binds to the SAME signals. The dev server sends this; the runtime applies it by id.
+export function compileNodePatch(doc: Doc, nodeId: string, opts: CompileOpts = {}): string {
+  return compile(doc, {}, '', {}, {}, { ...opts, format: Fmt.Patch, patchRoot: nodeId, ctxRefs: true });
 }
 
 // Emit one .store domain slice (state + get + actions + effects) as a shared ESM module.
@@ -60,7 +75,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const usedStores = new Set<string>();
   const ctx: CompileCtx = {
     state, entities, actions: doc.actions, consts: doc.consts || {}, gets: doc.gets || {}, effects: doc.effects || [],
-    stateKeys, queryStates, stores: opts.stores || {}, usedStores, params: new Set(doc.params || []), storeEntities: opts.storeEntities, persistScope: opts.persistScope ?? screen, format: opts.format,
+    stateKeys, queryStates, stores: opts.stores || {}, usedStores, params: new Set(doc.params || []), storeEntities: opts.storeEntities, persistScope: opts.persistScope ?? screen, format: opts.format, ctxRefs: opts.ctxRefs,
   };
   const logic = new Logic(ctx);
   const pageScope: Scope = { locals: new Set() }; // page-level scope for interpolation, when/each
@@ -104,6 +119,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   };
 
   const genChildren = (id: string, parentVar: string): void => {
+    if (opts.format === Fmt.Patch) return; // HMR patch: emit the node's OWN element only; patchNode re-parents the live children
     for (const childId of nodes[id].children) genNode(childId, parentVar);
   };
 
@@ -111,10 +127,23 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const interpConcat = (value: Interp): string =>
     value.parts.map((part) => typeof part === 'string' ? JSON.stringify(part) : `String(${logic.compileExpr(part, pageScope)} ?? '')`).join(' + ');
 
+  // The regular node shape's bookends, emitted once instead of retyped in every case: declare the element +
+  // set its class, then (after attributes/effects) attach it to its parent. Identical lines to before — this
+  // factors the COMPILER's repetition, not the OUTPUT's: every node still emits create -> class -> … -> append.
+  const declEl = (id: string, tag: string, cls: string): void => {
+    lines.push(`const el_${id} = document.createElement('${tag}');`);
+    lines.push(`el_${id}.className = ${JSON.stringify(cls)};`);
+  };
+  // appendEl is the uniform "attach element to parent" — so registering the node for HMR here covers every
+  // element primitive at once (no per-type code). Dev/patch only; prod bundles + SSR/static/store omit it (dead there).
+  const appendEl = (id: string, parentVar: string): void => {
+    lines.push(`${parentVar}.appendChild(el_${id});`);
+    if (opts.dev || opts.format === Fmt.Patch) lines.push(`__nodes[${JSON.stringify(id)}] = { el: el_${id}, parent: ${parentVar} };`);
+  };
+
   // text-bearing primitives (Text/Span/Title): plain string or a (possibly reactive) interpolation.
   function genTextEl(id: string, tag: string, className: string, value: StringPropValue | undefined, parentVar: string): void {
-    lines.push(`const el_${id} = document.createElement('${tag}');`);
-    lines.push(`el_${id}.className = ${JSON.stringify(className)};`);
+    declEl(id, tag, className);
     if (typeof value === 'string') {
       lines.push(`el_${id}.textContent = ${JSON.stringify(value)};`);
     } else if (value && 'kind' in value) {
@@ -122,7 +151,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       const reactive = value.parts.some((part) => typeof part !== 'string'); // an embedded {expr} -> wrap in an effect
       lines.push(reactive ? `effect(() => { el_${id}.textContent = ${concat}; });` : `el_${id}.textContent = ${concat};`);
     }
-    lines.push(`${parentVar}.appendChild(el_${id});`);
+    appendEl(id, parentVar);
   }
 
   // set an attribute from a plain string or a (possibly reactive) interpolation (Image src/alt, labels)
@@ -144,14 +173,13 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     const cont = CONTAINERS[n.type]; // regions (Header/Nav/...) + Stack: [tag, baseClass]
     if (cont) {
       const [tag, base] = cont;
-      lines.push(`const el_${id} = document.createElement('${tag}');`);
-      lines.push(`el_${id}.className = ${JSON.stringify(classFor(base, p))};`);
+      declEl(id, tag, classFor(base, p));
       if (n.type === Nt.Nav && typeof p.label === 'string') lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(p.label)});`);
       // a11y by default (compiler-emitted): <main> is the focus target on navigation + the skip-link anchor.
       if (n.type === Nt.Page) lines.push(`el_${id}.id = 'mu-main'; el_${id}.tabIndex = -1;`);
       // a11y by default: a keyboard skip-link as the shell's first child, so Tab jumps past the chrome to content.
       if (n.type === Nt.Shell) lines.push(`{ const sk = document.createElement('a'); sk.href = '#mu-main'; sk.className = 'mu-skip-link'; sk.textContent = 'Skip to content'; el_${id}.appendChild(sk); }`);
-      lines.push(`${parentVar}.appendChild(el_${id});`);
+      appendEl(id, parentVar);
       genDynamics(id, p);
       genChildren(id, `el_${id}`);
       return;
@@ -168,7 +196,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`effect(() => { if (el_${id}.value !== ${sig}.get()) el_${id}.value = ${sig}.get(); });`); // two-way: state->input so `.reset()` clears the box; guarded to avoid yanking the caret
         lines.push(`el_${id}.addEventListener('input', (e) => ${sig}.set(e.target.value));`);
         genDynamics(id, p); // wire on(enter: send) / on(...) + conditional class on the input
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        appendEl(id, parentVar);
         break;
       }
 
@@ -181,15 +209,14 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const dynExpr = clauses.filter((c) => c.dynamic).map((c) => `.filter((row) => ${c.expr})`).join('');      // applied reactively (@state RHS)
         const rowActions = n.children.map((cid) => nodes[cid]).filter((c) => c.type === Nt.RowAction);
 
-        lines.push(`const el_${id} = document.createElement('table');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('datatable', p))};`);
+        declEl(id, 'table', classFor('datatable', p));
         lines.push(`const head_${id} = el_${id}.createTHead().insertRow();`);
         for (const col of columns) {
           lines.push(`{ const th = document.createElement('th'); th.scope = 'col'; th.textContent = ${JSON.stringify(col)}; head_${id}.appendChild(th); }`); // a11y: scope ties data cells to their column header
         }
         if (rowActions.length) lines.push(`{ const th = document.createElement('th'); th.scope = 'col'; head_${id}.appendChild(th); }`);
         lines.push(`const body_${id} = el_${id}.createTBody();`);
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        appendEl(id, parentVar);
 
         // one row -> a <tr>; `row` is the row signal, so each cell reacts to its data (granular:
         // a changed field rewrites only its <td>). RowAction args read the current row (`row.get()`).
@@ -213,20 +240,20 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`const anchor_${id} = document.createComment('/rows');`);
         lines.push(`body_${id}.appendChild(start_${id}); body_${id}.appendChild(anchor_${id});`);
         lines.push(`const map_${id} = new Map();`);
-        lines.push(`onCleanup(() => { for (const __e of map_${id}.values()) __e.dispose(); map_${id}.clear(); });   // parent unmount: tear down every row`);
+        lines.push(`onCleanup(() => { for (const __e of map_${id}.values()) __e.dispose(); map_${id}.clear(); });`);
         lines.push(`let order_${id} = [];`);
         lines.push(`effect(() => {`);
         lines.push(`  const __rows = base_${id}()${dynExpr};`);
         lines.push(`  const __seen = new Set(); const __next = [];`);
         lines.push(`  for (const __row of __rows) {`);
-        lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);   // key by id (entities) or the value itself (scalars), never index`);
+        lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
         lines.push(`    let __e = map_${id}.get(__k);`);
         lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
         lines.push(`    else { const __sig = signal(__row); const __r = root(() => [renderRow_${id}(__sig)]); __e = { sig: __sig, nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
         lines.push(`    __next.push(__e);`);
         lines.push(`  }`);
         lines.push(`  for (const [__k, __e] of map_${id}) if (!__seen.has(__k)) { __e.dispose(); for (const __n of __e.nodes) __n.remove(); map_${id}.delete(__k); }`);
-        lines.push(`  __order(anchor_${id}.parentNode, anchor_${id}, __next, order_${id}); order_${id} = __next;   // minimal DOM moves via LIS`);
+        lines.push(`  __order(anchor_${id}.parentNode, anchor_${id}, __next, order_${id}); order_${id} = __next;`);
         lines.push(`});`);
         break;
       }
@@ -238,8 +265,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const fields = editableFields(entities[entityName]);
         const fc = (doc.constraints || {})[entityName] || {}; // per-field validation constraints from the entity schema
 
-        lines.push(`const el_${id} = document.createElement('form');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('form', p))};`);
+        declEl(id, 'form', classFor('form', p));
         lines.push(`{ const t = document.createElement('div'); t.className = ${JSON.stringify(slot('form-title', 'mu-form-title'))}; t.textContent = ${JSON.stringify('New ' + entityName)}; el_${id}.appendChild(t); }`);
 
         const fieldVars: Array<EditableField & { var: string; c?: FieldConstraint }> = [];
@@ -328,7 +354,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
           lines.push(`  { const v = __d[${JSON.stringify(fv.name)}] ?? ${def}; if (${fv.var}.value !== v) ${fv.var}.value = v; }`);
         }
         lines.push(`});`);
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        appendEl(id, parentVar);
         break;
       }
 
@@ -337,31 +363,28 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Title: genTextEl(id, p.level || 'h1', classFor('title', p), p.value, parentVar); genDynamics(id, p); break; // level from keyword; <h1> default
 
       case Nt.Image: {
-        lines.push(`const el_${id} = document.createElement('img');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('image', p))};`);
+        declEl(id, 'img', classFor('image', p));
         genInterpAttr(id, 'src', p.src);
         genInterpAttr(id, 'alt', p.alt ?? ''); // alt required by the manifest; "" = decorative
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        appendEl(id, parentVar);
         break;
       }
 
       case Nt.Icon: { // `Icon "set:name"` -> inline SVG resolved at build (Iconify); static name, no JS shipped
         const ref = typeof p.name === 'string' ? p.name : '';
-        lines.push(`const el_${id} = document.createElement('span');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('icon', p))};`);
+        declEl(id, 'span', classFor('icon', p));
         lines.push(`el_${id}.setAttribute('aria-hidden', 'true');`); // a11y: icons are decorative by default; meaning lives in adjacent text
         lines.push(`el_${id}.innerHTML = ${JSON.stringify(opts.iconResolver ? opts.iconResolver(ref) : '')};`);
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        appendEl(id, parentVar);
         genDynamics(id, p);
         break;
       }
 
       case Nt.Video: {
-        lines.push(`const el_${id} = document.createElement('video');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('video', p))};`);
+        declEl(id, 'video', classFor('video', p));
         genInterpAttr(id, 'src', p.src);
         for (const f of p.flags || []) lines.push(`el_${id}.${f === 'playsinline' ? 'playsInline' : f} = true;`);
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        appendEl(id, parentVar);
         genDynamics(id, p);
         break;
       }
@@ -377,8 +400,8 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`}`);
         lines.push(`const anchor_${id} = document.createComment('when');`);
         lines.push(`${parentVar}.appendChild(anchor_${id});`);
-        lines.push(`let shown_${id} = null;   // { value: nodes, dispose } while mounted, else null: dispose kills block effects on unmount`);
-        lines.push(`onCleanup(() => { if (shown_${id}) shown_${id}.dispose(); });   // parent unmount: tear down the mounted block too`);
+        lines.push(`let shown_${id} = null;`);
+        lines.push(`onCleanup(() => { if (shown_${id}) shown_${id}.dispose(); });`);
         lines.push(`effect(() => {`);
         lines.push(`  if (${condJS}) {`);
         lines.push(`    if (!shown_${id}) { const __r = root(() => { const __f = document.createDocumentFragment(); build_${id}(__f); return [...__f.childNodes]; }); for (const __n of __r.value) anchor_${id}.parentNode.insertBefore(__n, anchor_${id}); shown_${id} = __r; }`);
@@ -406,30 +429,29 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`const start_${id} = document.createComment('each');`);
         lines.push(`const anchor_${id} = document.createComment('/each');`);
         lines.push(`${parentVar}.appendChild(start_${id}); ${parentVar}.appendChild(anchor_${id});`);
-        lines.push(`const map_${id} = new Map();   // row id -> { sig, nodes, dispose, data }`);
-        lines.push(`onCleanup(() => { for (const __e of map_${id}.values()) __e.dispose(); map_${id}.clear(); });   // parent unmount: tear down every row (no leaked effects)`);
+        lines.push(`const map_${id} = new Map();`);
+        lines.push(`onCleanup(() => { for (const __e of map_${id}.values()) __e.dispose(); map_${id}.clear(); });`);
         lines.push(`let order_${id} = [];`);
         lines.push(`effect(() => {`);
         lines.push(`  const __l = ${listJS}; const __rows = (Array.isArray(__l) ? __l : [])${filterJS ? `.filter((${p.as}) => ${filterJS})` : ''};`);   // fail-closed: a non-array never crashes the loop (renders empty)
         lines.push(`  const __seen = new Set(); const __next = [];`);
         lines.push(`  for (const __row of __rows) {`);
-        lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);   // key by id (entities) or the value itself (scalars), never index`);
+        lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
         lines.push(`    let __e = map_${id}.get(__k);`);
-        lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }   // same row, changed data: granular update`);
-        lines.push(`    else { const __sig = signal(__row); const __r = root(() => { const __f = document.createDocumentFragment(); buildItem_${id}(__f, __sig); return [...__f.childNodes]; }); __e = { sig: __sig, nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }   // new row`);
+        lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
+        lines.push(`    else { const __sig = signal(__row); const __r = root(() => { const __f = document.createDocumentFragment(); buildItem_${id}(__f, __sig); return [...__f.childNodes]; }); __e = { sig: __sig, nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
         lines.push(`    __next.push(__e);`);
         lines.push(`  }`);
-        lines.push(`  for (const [__k, __e] of map_${id}) if (!__seen.has(__k)) { __e.dispose(); for (const __n of __e.nodes) __n.remove(); map_${id}.delete(__k); }   // gone: dispose effects + remove nodes`);
-        lines.push(`  __order(anchor_${id}.parentNode, anchor_${id}, __next, order_${id}); order_${id} = __next;   // fewest DOM moves via LIS (a swap moves 2 nodes, not O(n))`);
+        lines.push(`  for (const [__k, __e] of map_${id}) if (!__seen.has(__k)) { __e.dispose(); for (const __n of __e.nodes) __n.remove(); map_${id}.delete(__k); }`);
+        lines.push(`  __order(anchor_${id}.parentNode, anchor_${id}, __next, order_${id}); order_${id} = __next;`);
         lines.push(`});`);
         break;
       }
 
       case Nt.Custom: {
         // escape hatch: mounts a host-written component (opaque to the IR), wired via inputs/on.
-        lines.push(`const el_${id} = document.createElement('div');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('custom', p))};`);
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        declEl(id, 'div', classFor('custom', p));
+        appendEl(id, parentVar);
         const ins = Object.entries(p.inputs || {}).map(([k, v]) => `${JSON.stringify(k)}: ${customValue(v)}`).join(', ');
         const ons = Object.entries(p.on || {}).map(([ev, act]) => `${JSON.stringify(ev)}: (...__a) => ${logic.actionRef(typeof act === 'string' ? act : '')}(...__a)`).join(', ');
         // reactive inputs: if mount returns an updater fn, re-call it whenever a bound @state changes (the
@@ -440,8 +462,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       }
 
       case Nt.Button: {
-        lines.push(`const el_${id} = document.createElement('button');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('button', p))};`);
+        declEl(id, 'button', classFor('button', p));
         if (n.children && n.children.length) genChildren(id, `el_${id}`);          // children -> clickable card
         else if (p.label !== undefined) genInterpAttr(id, 'textContent', p.label); // else static or interpolated label
         if (p.action) {
@@ -449,18 +470,17 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
           lines.push(`el_${id}.addEventListener('click', () => ${logic.actionRef(p.action)}(${arg}));`);
         }
         genDynamics(id, p);
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        appendEl(id, parentVar);
         break;
       }
 
       case Nt.Link: { // client-side navigation -> <a href="/route"> intercepted by the history router
-        lines.push(`const el_${id} = document.createElement('a');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('link', p))};`);
+        declEl(id, 'a', classFor('link', p));
         genInterpAttr(id, 'href', p.to ?? '/');  // static path or interpolated (/product/{p.id})
         if (n.children && n.children.length) genChildren(id, `el_${id}`);          // children -> clickable card that navigates
         else if (p.label !== undefined) genInterpAttr(id, 'textContent', p.label);
         genDynamics(id, p);
-        lines.push(`${parentVar}.appendChild(el_${id});`);
+        appendEl(id, parentVar);
         break;
       }
 
@@ -521,7 +541,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   }
 
   // ── orchestrate: compile every piece, then hand to the right emit target ─────────────────
-  const staticPage = opts.format === Fmt.Ssr ? false : isStatic(); // SSR always renders the tree (genNode) to serialize it
+  const staticPage = (opts.format === Fmt.Ssr || opts.format === Fmt.Patch) ? false : isStatic(); // SSR/Patch always render the tree (genNode)
   // route params -> local string consts read from the mount() argument (set by the router on match).
   const paramDecls = (doc.params || []).map((p) => `const ${p} = (__params || {})[${JSON.stringify(p)}] ?? '';`).join('\n  ');
   const stateDecls = logic.genState();
@@ -533,8 +553,13 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
 
   let staticHtml: string | null = null;
   if (staticPage) staticHtml = rootId ? renderStatic(rootId) : '';            // populates usedTokens via classFor
+  else if (opts.format === Fmt.Patch && opts.patchRoot) genNode(opts.patchRoot, 'parent'); // HMR: just this node's subtree, into the `parent` arg
   else if (opts.format !== Fmt.Store && rootId) genNode(rootId, 'app');        // store has no DOM, only state + actions
-  const renderBody = lines.join('\n  ');
+  // __nodes: the HMR node registry (id -> { el, parent }), built by appendEl. Dev only (Patch supplies its own).
+  const renderBody = (opts.dev && rootId ? 'const __nodes = {};\n  ' : '') + lines.join('\n  ');
+  // names a HMR patch builder reaches state/actions/gets/params through (the live ctx) — so a rebuilt node
+  // reads the SAME signals. Stashed on the mounted element as `el.__muten.ctx`.
+  const ctxNames = [...Object.keys(state), ...Object.keys(doc.actions || {}), ...Object.keys(doc.gets || {}), ...(doc.params || [])];
 
   // uuid fields to auto-fill per query, so mock/source rows don't need to carry ids.
   const queryUuids: { [query: string]: string[] } = {};
@@ -567,11 +592,16 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const parts: EmitParts = {
     screen, projectCss, data, sources, api: opts.api || {}, meta, queryUuids,
     stateDecls, paramDecls, actionDecls, getDecls, effectDecls, componentDecls, storeImports, storeDecls: opts.storeCode || '', externImports,
-    renderBody, staticHtml: staticHtml ?? '', hasSlot,
+    renderBody, staticHtml: staticHtml ?? '', hasSlot, ctxNames, dev: !!opts.dev,
   };
-  if (opts.format === Fmt.Store) return emitStore(parts);
-  if (opts.format === Fmt.Ssr) return emitSsr(parts); // build-time pre-render factory (runs against a fake DOM)
-  if (staticPage) return opts.format === Fmt.Module ? emitStatic(parts) : emitStaticHtml(parts);
-  if (opts.format === Fmt.Module) return emitModule(parts);
-  return emitHtml(parts);
+  const out = opts.format === Fmt.Patch ? emitPatch(parts, opts.patchRoot ?? '')   // HMR: one node's subtree as a (ctx, nodes, parent) builder
+    : opts.format === Fmt.Store ? emitStore(parts)
+    : opts.format === Fmt.Ssr ? emitSsr(parts)                                  // build-time pre-render factory (runs against a fake DOM)
+    : staticPage ? (opts.format === Fmt.Module ? emitStatic(parts) : emitStaticHtml(parts))
+    : opts.format === Fmt.Module ? emitModule(parts)
+    : emitHtml(parts);
+  // collapse the blank-line gaps an empty section (`${parts.getDecls}`, the prelude, …) leaves when interpolated.
+  const final = out.replace(/\n[ \t]*\n([ \t]*\n)+/g, '\n\n');
+  // append the source map (scanned from the FINAL text) so runtime errors point at the .muten line, not the JS.
+  return opts.sourceMap ? final + inlineSourceMap(final, doc, opts.sourceMap.file, opts.sourceMap.source) : final;
 }

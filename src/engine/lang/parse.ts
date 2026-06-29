@@ -390,7 +390,7 @@ export class Parser extends Grammar {
 
   // `part Name(p: type, ...) { <tree> }`: reusable composition, inlined at build by `compose`.
   private parsePart(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Part);
+    const start = this.eat(Tk.Ident, Kw.Part);
     const name = this.eat(Tk.Ident).v;
     this.eat(Tk.Punct, Pn.ParenL);
     const params: PartParam[] = [];
@@ -404,7 +404,11 @@ export class Parser extends Grammar {
     const nodes = this.parseChildren();
     ir.parts = ir.parts || {};
     // One root, or several nodes auto-wrapped in a Stack (a part always expands to a single subtree).
-    ir.parts[name] = { params, tree: nodes.length === 1 ? nodes[0] : { type: Nt.Stack, props: {}, children: nodes } };
+    const tree = nodes.length === 1 ? nodes[0] : { type: Nt.Stack, props: {}, children: nodes };
+    // A part takes a single `slot` (the caller's children inline there). >1 would inject the same content twice.
+    const slots = (nd: IRNode): number => (nd.type === Nt.Slot ? 1 : 0) + (nd.children || []).reduce((s, c) => s + slots(c), 0);
+    if (slots(tree) > 1) throw new ParseError(`part "${name}" has more than one \`slot\` — a part takes a single slot, where the caller's children inline.`, this.locOf(start.pos));
+    ir.parts[name] = { params, tree };
   }
 
   // ── the node tree ──────────────────────────────────────────────────────────
@@ -435,9 +439,11 @@ export class Parser extends Grammar {
     const head = this.eat(Tk.Ident);
     const type = head.v;
     const loc = this.locOf(head.pos);
-    if (this.at(Tk.Punct, Pn.ParenL)) { // part instance: `Name(arg: value)`
+    if (this.at(Tk.Punct, Pn.ParenL)) { // part instance: `Name(arg: value)`, with optional `{ … }` slot content
       const args = this.parseArgs();
-      return { type, args, loc };
+      const node: IRNode = { type, args, loc };
+      if (this.at(Tk.Punct, Pn.BraceL)) node.children = this.parseChildren();
+      return node;
     }
 
     const props: NodeProps = {};

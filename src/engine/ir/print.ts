@@ -90,8 +90,11 @@ function printNode(n: IRNode, ind: string): string {
   else if (n.type === Nt.Each) head = `each ${printExpr(p.list as Expr)} as ${p.as}`;
   else {
     head = n.type;
-    const pos = p.value ?? p.label ?? p.src ?? p.placeholder ?? p.submitLabel;
-    if (pos !== undefined) head += ` ${printStringProp(pos)}`;
+    if (n.type === Nt.Custom && p.component) head += ` ${p.component}`; // Custom's component is a BARE ident (Custom Foo), not a quoted string
+    else {
+      const pos = p.value ?? p.label ?? p.src ?? p.name ?? p.placeholder ?? p.submitLabel; // `name` = Icon's set:name
+      if (pos !== undefined) head += ` ${printStringProp(pos)}`;
+    }
     if (p.to !== undefined) head += ` -> ${printPath(p.to)}`;
     else if (p.action) head += ` -> ${p.action}${p.arg !== undefined ? `(${[p.arg, ...(p.argRest || [])].map(printExpr).join(', ')})` : ''}`;
     if (p.data) head += ` @${p.data}`;
@@ -152,6 +155,7 @@ export function print(ir: IR): string {
   if (ir.entities) for (const [n, e] of Object.entries(ir.entities)) push(printEntity(n, e, ir.constraints?.[n]));
   if (ir.state && Object.keys(ir.state).length) push(block('state', Object.entries(ir.state).map(([n, s]) => IND + printState(n, s)).join('\n')));
   if (ir.store && Object.keys(ir.store).length) push(block('store', Object.entries(ir.store).map(([n, s]) => IND + printState(n, s)).join('\n')));
+  if (ir.theme && Object.keys(ir.theme).length) push(`theme {\n${Object.entries(ir.theme).map(([section, scale]) => `${IND}${section} {\n${Object.entries(scale).map(([k, v]) => `${IND}${IND}${k} ${JSON.stringify(v)}`).join('\n')}\n${IND}}`).join('\n')}\n}`);
   if (ir.gets) for (const [n, e] of Object.entries(ir.gets)) push(`get ${n} = ${printExpr(e)}`);
   if (ir.sources) push(kvBlock('sources', Object.entries(ir.sources), ':'));
   if (ir.mock) push(kvBlock('mock', Object.entries(ir.mock), ':'));

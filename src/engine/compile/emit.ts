@@ -7,10 +7,9 @@ import type { EmitParts } from '#engine/shared/types.js';
 import { sourceRequest, sourceRows } from '#engine/shared/source.js';
 
 // Fine-grained signals runtime, inlined into the standalone HTML format (no bundler there).
-export const RUNTIME = `// ── fine-grained signals runtime (~18 lines, no dependencies) ──
-  let __current = null;   // the effect currently tracking signal reads
-  let __owner = null;     // collects effects created in a scope so a keyed-list item can dispose its effects together
-  let __pending = null; function __flush() { const r = __pending; __pending = null; if (r) for (const run of r) run(); } function __schedule(run) { if (!__pending) { __pending = new Set(); queueMicrotask(__flush); } __pending.add(run); } // batch render effects → one run per tick
+export const RUNTIME = `let __current = null;
+  let __owner = null;
+  let __pending = null; function __flush() { const r = __pending; __pending = null; if (r) for (const run of r) run(); } function __schedule(run) { if (!__pending) { __pending = new Set(); queueMicrotask(__flush); } __pending.add(run); }
   function signal(value) {
     const subs = new Set();
     return {
@@ -20,19 +19,19 @@ export const RUNTIME = `// ── fine-grained signals runtime (~18 lines, no de
   }
   function effect(fn, sync) {
     const run = () => { for (const d of run.deps) d.delete(run); run.deps.clear(); const prev = __current; __current = run; try { fn(); } finally { __current = prev; } };
-    run.deps = new Set(); run.sync = sync; // sync effects (computed) run immediately on a set; render effects batch into a microtask
+    run.deps = new Set(); run.sync = sync;
     const dispose = () => { for (const d of run.deps) d.delete(run); run.deps.clear(); };
-    if (__owner) __owner.push(dispose);   // owned by the current scope → torn down with it
+    if (__owner) __owner.push(dispose);
     run();
     return dispose;
   }
-  function root(fn) {                       // an ownership scope: collects disposers (effects + child onCleanups); dispose() tears them ALL down (hierarchical)
+  function root(fn) {
     const prev = __owner, owned = []; __owner = owned;
     try { return { value: fn(), dispose() { for (const d of owned) d(); owned.length = 0; } }; }
     finally { __owner = prev; }
   }
-  function onCleanup(fn) { if (__owner) __owner.push(fn); }   // register a teardown with the current owner (a keyed list disposes all its rows; a when disposes its block)
-  function computed(fn) { const s = signal(fn()); effect(() => s.set(fn()), true); return s; } // derived signal (store \`get\`) — sync so reads never go stale
+  function onCleanup(fn) { if (__owner) __owner.push(fn); }
+  function computed(fn) { const s = signal(fn()); effect(() => s.set(fn()), true); return s; }
   function __has(a, b) { return Array.isArray(a) ? a.includes(b) : String(a ?? '').toLowerCase().includes(String(b ?? '').toLowerCase()); }
   function __eq(a, b) { if (a === b) return true; if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false; const __ka = Object.keys(a), __kb = Object.keys(b); if (__ka.length !== __kb.length) return false; for (const __k of __ka) if (a[__k] !== b[__k]) return false; return true; }
   function __lisSet(arr) { const p = arr.slice(); const result = [0]; let i, j, u, v, c; const len = arr.length; for (i = 0; i < len; i++) { const a = arr[i]; if (a !== 0) { j = result[result.length - 1]; if (arr[j] < a) { p[i] = j; result.push(i); continue; } u = 0; v = result.length - 1; while (u < v) { c = (u + v) >> 1; if (arr[result[c]] < a) u = c + 1; else v = c; } if (a < arr[result[u]]) { if (u > 0) p[i] = result[u - 1]; result[u] = i; } } } u = result.length; v = result[u - 1]; while (u-- > 0) { result[u] = v; v = p[v]; } return new Set(result); }
@@ -65,31 +64,73 @@ export const BUILTINS_JS = `function upper(s) { return String(s == null ? '' : s
   function dayKey(iso) { const d = new Date(iso); if (isNaN(d.getTime())) return String(iso == null ? '' : iso); const p = (n) => (n < 10 ? '0' : '') + n; return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
   function addDays(iso, n) { const d = new Date(iso); if (isNaN(d.getTime())) return String(iso == null ? '' : iso); d.setDate(d.getDate() + (Number(n) || 0)); return d.toISOString(); }`;
 
-function dataLayer(parts: EmitParts): string {
-  return `${BUILTINS_JS}
-  const __DATA = ${JSON.stringify(parts.data)};
+function sourceLayer(parts: EmitParts): string {
+  return `const __DATA = ${JSON.stringify(parts.data)};
   const __SOURCES = ${JSON.stringify(parts.sources)};
   const __API = ${JSON.stringify(parts.api)};
   const __UUIDS = ${JSON.stringify(parts.queryUuids)};
   const __DELAY = 450;
-  const __loadLocal = (k, fb) => { try { const v = localStorage.getItem(k); return v === null ? fb : JSON.parse(v); } catch (e) { return fb; } };
-  const __saveLocal = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
   const __req = ${sourceRequest.toString()};
   const __rows = ${sourceRows.toString()};
   const __fill = (name, rows) => { const ids = __UUIDS[name] || []; return rows.map((r) => { const o = { ...r }; for (const f of ids) if (o[f] === null || o[f] === undefined) o[f] = __id(); return o; }); };
   function __fetch(name) { const s = __SOURCES[name]; if (s) { const q = __req(s, __API); const init = { method: q.method, headers: { ...q.headers } }; if (q.body != null) { init.body = q.body; if (!init.headers['content-type'] && !init.headers['Content-Type']) init.headers['content-type'] = 'application/json'; } return fetch(q.url, init).then((r) => r.json()).then((j) => __fill(name, __rows(j, q.at))); } return new Promise((res) => setTimeout(() => res(__fill(name, __DATA[name] ?? [])), __DELAY)); }
   function __write(name, method, id, body) { const s = __SOURCES[name]; const q = __req(s, __API); let url = q.url; if (id != null) { url = (url.charAt(url.length - 1) === '/' ? url.slice(0, -1) : url) + '/' + encodeURIComponent(id); } const init = { method: method, headers: { ...q.headers } }; if (body != null) { init.body = JSON.stringify(body); if (!init.headers['content-type'] && !init.headers['Content-Type']) init.headers['content-type'] = 'application/json'; } return fetch(url, init).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return method === 'DELETE' ? null : r.json(); }); }
-  function __refetch(name, params, sig) { const q = __req(__SOURCES[name], __API); let url = q.url; const rest = {}; for (const k in params) { const tok = '{' + k + '}'; if (url.indexOf(tok) >= 0) url = url.split(tok).join(encodeURIComponent(params[k])); else rest[k] = params[k]; } const qs = Object.keys(rest).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(rest[k])).join('&'); url = qs ? url + (url.indexOf('?') >= 0 ? '&' : '?') + qs : url; sig.set({ ...sig.get(), loading: true, error: null }); fetch(url, { method: q.method, headers: { ...q.headers } }).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then((j) => sig.set({ data: __fill(name, __rows(j, q.at)), loading: false, error: null })).catch((e) => sig.set({ ...sig.get(), loading: false, error: String(e) })); }   /* a {key} in the source url is filled from refetch params; the rest become the query string */
+  function __refetch(name, params, sig) { const q = __req(__SOURCES[name], __API); let url = q.url; const rest = {}; for (const k in params) { const tok = '{' + k + '}'; if (url.indexOf(tok) >= 0) url = url.split(tok).join(encodeURIComponent(params[k])); else rest[k] = params[k]; } const qs = Object.keys(rest).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(rest[k])).join('&'); url = qs ? url + (url.indexOf('?') >= 0 ? '&' : '?') + qs : url; sig.set({ ...sig.get(), loading: true, error: null }); fetch(url, { method: q.method, headers: { ...q.headers } }).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then((j) => sig.set({ data: __fill(name, __rows(j, q.at)), loading: false, error: null })).catch((e) => sig.set({ ...sig.get(), loading: false, error: String(e) })); }
   function __send(url, method, body) { let d = { url: url, method: method }; const ci = url.indexOf(':'); if (ci > 0 && __API[url.slice(0, ci)]) d = { api: url.slice(0, ci), url: url.slice(ci + 1), method: method }; const q = __req(d, __API); const init = { method: q.method, headers: { ...q.headers } }; if (body != null) { init.body = JSON.stringify(body); if (!init.headers['content-type'] && !init.headers['Content-Type']) init.headers['content-type'] = 'application/json'; } return fetch(q.url, init).then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.status === 204 ? null : r.json().catch(() => null); }); }
-  function query(name, live) { const sig = signal({ data: [], loading: true, error: null }); if (live) { let ws, tries = 0, dead = false; const open = () => { if (dead) return; const q = __req(__SOURCES[name], __API); ws = new WebSocket(q.url); ws.onopen = () => { tries = 0; }; ws.onmessage = (e) => { try { sig.set({ data: __fill(name, __rows(JSON.parse(e.data), q.at)), loading: false, error: null }); } catch { /* ignore a malformed frame */ } }; ws.onerror = () => { sig.set({ ...sig.get(), error: 'socket error' }); }; ws.onclose = () => { if (dead) return; sig.set({ ...sig.get(), loading: false }); setTimeout(open, Math.min(1000 * 2 ** tries++, 15000)); }; }; open(); onCleanup(() => { dead = true; if (ws) ws.close(); }); } else { __fetch(name).then((d) => sig.set({ data: d, loading: false, error: null })).catch((e) => sig.set({ data: [], loading: false, error: String(e) })); } return sig; }`;
+  function query(name, live) { const sig = signal({ data: [], loading: true, error: null }); if (live) { let ws, tries = 0, dead = false; const open = () => { if (dead) return; const q = __req(__SOURCES[name], __API); ws = new WebSocket(q.url); ws.onopen = () => { tries = 0; }; ws.onmessage = (e) => { try { sig.set({ data: __fill(name, __rows(JSON.parse(e.data), q.at)), loading: false, error: null }); } catch {} }; ws.onerror = () => { sig.set({ ...sig.get(), error: 'socket error' }); }; ws.onclose = () => { if (dead) return; sig.set({ ...sig.get(), loading: false }); setTimeout(open, Math.min(1000 * 2 ** tries++, 15000)); }; }; open(); onCleanup(() => { dead = true; if (ws) ws.close(); }); } else { __fetch(name).then((d) => sig.set({ data: d, loading: false, error: null })).catch((e) => sig.set({ data: [], loading: false, error: String(e) })); } return sig; }`;
+}
+
+// ── usage-based emission ─────────────────────────────────────────────────────────────────────────────────
+// A page/store emits ONLY the runtime it actually uses: the builtins it calls, the source/persist layer if it
+// reads/writes/persists, and an import naming just the runtime symbols it references. A counter (signal + effect)
+// gets none of the rest. On the vite path the bundler would prune it anyway; the standalone-HTML / SSG path has
+// no bundler, so this is what keeps a built static page from carrying the whole data layer it never touches.
+
+// builtin name -> source, derived from BUILTINS_JS (one `function NAME(...) {…}` per line); plus the only
+// inter-builtin dependency (calendar calls time + date), so a page emits the closure of what it calls.
+const BUILTIN_SRC: { readonly [name: string]: string } = Object.fromEntries(
+  BUILTINS_JS.split('\n').map((l) => l.trim()).filter(Boolean).map((src) => [src.slice(9, src.indexOf('(')), src]),
+);
+const BUILTIN_DEPS: { readonly [name: string]: readonly string[] } = { calendar: ['time', 'date'] };
+
+function usedBuiltins(body: string): string {
+  const want = new Set<string>();
+  const add = (n: string): void => { if (want.has(n) || !BUILTIN_SRC[n]) return; want.add(n); (BUILTIN_DEPS[n] || []).forEach(add); };
+  for (const n in BUILTIN_SRC) if (new RegExp(`\\b${n}\\(`).test(body)) add(n);
+  return Object.keys(BUILTIN_SRC).filter((n) => want.has(n)).map((n) => BUILTIN_SRC[n]).join('\n  ');
+}
+
+// localStorage helpers — emitted only for a page with `persist` state.
+const PERSIST_JS = `const __loadLocal = (k, fb) => { try { const v = localStorage.getItem(k); return v === null ? fb : JSON.parse(v); } catch (e) { return fb; } };
+  const __saveLocal = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };`;
+
+// the runtime prelude a body needs: builtins called + persist (if it persists) + the source layer (if it
+// reads/writes/sends). Detection scans the COMPILED body for the helper-call patterns the emitter produces.
+function prelude(parts: EmitParts, body: string): string {
+  const out: string[] = [];
+  const b = usedBuiltins(body);
+  if (b) out.push(b);
+  if (/\b__loadLocal\(|\b__saveLocal\(/.test(body)) out.push(PERSIST_JS);
+  if (/\bquery\(|\b__fetch\(|\b__write\(|\b__refetch\(|\b__send\(/.test(body)) out.push(sourceLayer(parts));
+  return out.join('\n  ');
+}
+
+// only the runtime symbols the emitted code references — `signal, effect` for a counter, not all nine. A stray
+// match merely imports an unused symbol (the bundler drops it); a miss can't happen (the emitter always writes
+// these as `name(` calls / `__sym` references that `\bname\b` catches).
+const RUNTIME_SYMBOLS = ['signal', 'computed', 'effect', 'root', 'onCleanup', '__eq', '__id', '__has', '__order'] as const;
+function runtimeImport(code: string): string {
+  const used = RUNTIME_SYMBOLS.filter((s) => new RegExp(`\\b${s}\\b`).test(code));
+  return used.length ? `import { ${used.join(', ')} } from 'virtual:muten/runtime';\n` : '';
 }
 
 // One .store domain slice -> shared ESM module (state + get + actions, no DOM).
 export function emitStore(parts: EmitParts): string {
-  return `import { signal, computed, effect, root, onCleanup, __eq, __id, __has, __order } from 'virtual:muten/runtime';
-${parts.externImports}
+  const body = [parts.stateDecls, parts.getDecls, parts.actionDecls, parts.effectDecls].join('\n');
+  const pre = prelude(parts, body);
+  return `${runtimeImport(pre + body)}${parts.externImports}
 
-  ${dataLayer(parts)}
+  ${pre}
 
 ${parts.stateDecls}
 
@@ -114,14 +155,17 @@ export function mount(app) { app.innerHTML = ${JSON.stringify(parts.staticHtml)}
 // (mock rows, no fetch/delay) and builds into the `app` passed in instead of getElementById, so
 // the build can run it against a fake DOM (see project/ssr.ts) and serialize real markup.
 export function emitSsr(parts: EmitParts): string {
+  const body = [parts.storeDecls, parts.paramDecls, parts.stateDecls, parts.getDecls, parts.actionDecls, parts.componentDecls, parts.renderBody].join('\n');
+  const needsData = /\bquery\(/.test(body);
+  const needsId = needsData || /\b__id\(/.test(body);
   return `${RUNTIME}
-  ${BUILTINS_JS}
-  let __seq = 0;
-  function __id() { return 'id-' + (++__seq); }
-  const __DATA = ${JSON.stringify(parts.data)};
+  ${usedBuiltins(body)}
+  ${needsId ? `let __seq = 0;
+  function __id() { return 'id-' + (++__seq); }` : ''}
+  ${needsData ? `const __DATA = ${JSON.stringify(parts.data)};
   const __UUIDS = ${JSON.stringify(parts.queryUuids)};
   const __fill = (name, rows) => { const ids = __UUIDS[name] || []; return rows.map((r) => { const o = { ...r }; for (const f of ids) if (o[f] === null || o[f] === undefined) o[f] = __id(); return o; }); };
-  function query(name) { return signal({ data: __fill(name, __DATA[name] ?? []), loading: false, error: null }); }
+  function query(name) { return signal({ data: __fill(name, __DATA[name] ?? []), loading: false, error: null }); }` : ''}
 
   ${parts.storeDecls}
 
@@ -161,7 +205,6 @@ export function emitStaticHtml(parts: EmitParts): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 ${metaTags(parts.meta, parts.screen)}
 <style>
-  /* project: bring-your-own-theme (Tailwind / your CSS + theme.muten vars) */
   ${parts.projectCss}
 </style>
 </head>
@@ -174,15 +217,16 @@ ${parts.staticHtml}
 
 // ESM page module Vite bundles (npm imports, HMR, SPA).
 export function emitModule(parts: EmitParts): string {
-  return `import { signal, computed, effect, root, onCleanup, __eq, __id, __has, __order } from 'virtual:muten/runtime';
-${parts.storeImports}
+  const body = [parts.paramDecls, parts.stateDecls, parts.getDecls, parts.actionDecls, parts.componentDecls, parts.renderBody, parts.effectDecls].join('\n');
+  const pre = prelude(parts, body);
+  return `${runtimeImport(pre + body)}${parts.storeImports}
 ${parts.externImports}
 export const screen = ${JSON.stringify(parts.screen)};
 export const css = ${JSON.stringify(parts.projectCss)};
 export const meta = ${JSON.stringify(parts.meta)};
 
 export function mount(app, __params) {
-  ${dataLayer(parts)}
+  ${pre}
 
   ${parts.paramDecls}
 
@@ -197,13 +241,31 @@ export function mount(app, __params) {
   ${parts.renderBody}
 
   ${parts.effectDecls}
-  return ${parts.hasSlot ? '__outlet' : 'app'};
+  ${parts.dev
+    ? `const __el = ${parts.hasSlot ? '__outlet' : 'app'};\n  __el.__muten = { el: __el, ctx: { ${parts.ctxNames.join(', ')} }, nodes: __nodes };  // live HMR handle: ctx + node registry\n  return __el;`
+    : `return ${parts.hasSlot ? '__outlet' : 'app'};`}
 }
 `;
 }
 
+// HMR patch builder: ONE node's subtree as a function, rebuilt against the LIVE `ctx` (state/actions/gets/params
+// as addressable data) + the live node registry. The dev server compiles + sends this on a local edit; the
+// client evals it and hands it to patchNode by id, so only that node re-renders while all state survives.
+export function emitPatch(parts: EmitParts, rootId: string): string {
+  return `(ctx, nodes, parent, __rt) => {
+  const { signal, computed, effect, root, onCleanup, __eq, __order, __has, __id } = __rt;
+  const __nodes = nodes;
+  ${parts.renderBody}
+  return el_${rootId};
+}`;
+}
+
 // Self-contained HTML document: runtime inlined, browser runs it directly.
 export function emitHtml(parts: EmitParts): string {
+  const body = [parts.storeDecls, parts.stateDecls, parts.getDecls, parts.actionDecls, parts.componentDecls, parts.renderBody].join('\n');
+  const pre = prelude(parts, body);
+  const idDecl = /\b__id\(/.test(pre + body) ? `let __seq = 0;
+  function __id() { return (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'id-' + (++__seq); }` : '';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -211,7 +273,6 @@ export function emitHtml(parts: EmitParts): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 ${metaTags(parts.meta, parts.screen)}
 <style>
-  /* project: bring-your-own-theme (Tailwind / your CSS + theme.muten vars) */
   ${parts.projectCss}
 </style>
 </head>
@@ -220,30 +281,22 @@ ${metaTags(parts.meta, parts.screen)}
 <script type="module">
   ${RUNTIME}
 
-  // ── dynamic ids (nothing hardcoded) ──
-  let __seq = 0;
-  function __id() { return (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'id-' + (++__seq); }
+  ${idDecl}
 
-  ${dataLayer(parts)}
+  ${pre}
 
-  // ── app-global stores, inlined (the CLI build has no virtual modules) ──
   ${parts.storeDecls}
 
-  // ── declared state (state from the IR) ──
   ${parts.stateDecls}
 
-  // ── page-level derived values (get → computed) ──
   ${parts.getDecls}
 
-  // ── actions (actions from the IR) ──
   ${parts.actionDecls}
 
-  // ── custom components (host-written, opaque to the IR) ──
   ${parts.componentDecls}
 
-  // ── render: imperative DOM + fine-grained effects ──
   const app = document.getElementById('app');
-  app.replaceChildren(); // clear any SSR-prerendered markup before the live render takes over
+  app.replaceChildren();
   ${parts.renderBody}
 </script>
 </body>

@@ -3,14 +3,14 @@
 // (code, loc, suggestion) in milliseconds. Returns problem count; CLI exits non-zero if > 0.
 
 import { join, relative } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, watch } from 'node:fs';
 import { readRoutes, readApi, apiClientNames } from '#engine/project/routes.js';
-import { load, loadParts, findStores, storeListEntities } from '#engine/project/load.js';
+import { load, loadParts, findStores } from '#engine/project/load.js';
+import { storeContext } from '#engine/project/context.js';
 import { validateStoresAndGuards } from '#engine/project/check-app.js';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { validate } from '#engine/ir/validate.js';
-import { selfUpdateTargets } from '#engine/ir/refs.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { formatDiagnostic, ParseError } from '#engine/shared/diagnostics.js';
 import type { Diagnostic } from '#engine/shared/types.js';
@@ -20,12 +20,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
   const iconExists = getIconChecker(appRoot);                    // `Icon "set:name"` existence, so a typo'd icon fails `check` instead of only the build
   const sharedParts = await loadParts(join(appRoot, 'src', 'parts'));
   const storeIRs = findStores(join(appRoot, 'src'));             // store domains + members needed to validate cross-page refs like cart.add / cart.count
-  const stores = Object.keys(storeIRs);
-  const storeMembers: { [d: string]: string[] } = {};
-  for (const [d, ir] of Object.entries(storeIRs)) storeMembers[d] = [...Object.keys(ir.state || {}), ...Object.keys(ir.gets || {}), ...Object.keys(ir.actions || {})];
-  const storeSelfMut = new Set<string>();                       // "domain.action" of store actions that self-update -> an `effect { domain.action() }` would loop forever
-  for (const [d, ir] of Object.entries(storeIRs)) for (const [an, a] of Object.entries(ir.actions || {})) if (selfUpdateTargets(a.body || []).length) storeSelfMut.add(`${d}.${an}`);
-  const storeEntities = storeListEntities(storeIRs);            // element entity of each store list -> a page can aggregate over a store list
+  const { stores, storeMembers, storeSelfMut, storeEntities } = storeContext(storeIRs); // ONE assembly, shared with build + plugin (no drift)
   const apiClients = apiClientNames(readApi(appRoot));           // the app's named api clients, so a `post "client:/x"` prefix is checked
   const pages = readRoutes(appRoot);
 
@@ -67,4 +62,19 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
   if (json) console.log(JSON.stringify(found, null, 2));
   else console.log(found.length ? `\n✖ ${found.length} problem(s)` : '✓ no problems');
   return found.length;
+}
+
+// `muten check --watch`: the oracle as a standing gate (CI, agents) without the dev server. Re-lints the whole
+// app on any .muten/.store/theme/muten.config change, debounced, clearing the screen each pass.
+export async function lintWatch(appRoot: string, json: boolean): Promise<void> {
+  const run = async (): Promise<void> => {
+    if (!json) console.clear();
+    await lintApp(appRoot, json);
+    if (!json) console.log('\n  watching for changes — Ctrl+C to stop');
+  };
+  await run();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const onChange = (): void => { if (timer) clearTimeout(timer); timer = setTimeout(run, 100); };
+  watch(join(appRoot, 'src'), { recursive: true }, onChange);
+  for (const f of ['theme.muten', 'muten.config']) { const p = join(appRoot, f); if (existsSync(p)) watch(p, onChange); }
 }

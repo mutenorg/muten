@@ -7,18 +7,19 @@ import { Nt, Fmt } from '#engine/shared/vocab.js';
 import { readRoutes, readApi, readSources } from '#engine/project/routes.js';
 import { renderSsrBody, fetchSources } from '#engine/project/ssr.js';
 import { routeEntry } from '#engine/project/map.js';
-import { load, loadAllParts, findStores, storeListEntities } from '#engine/project/load.js';
+import { load, loadAllParts, findStores } from '#engine/project/load.js';
+import { storeContext } from '#engine/project/context.js';
+import { readMutenConfig, configThemeAdapter, configClasses } from '#engine/project/config.js';
 import { resolveStyles } from '#engine/project/styles.js';
 import { emitTheme } from '#engine/style/tokens.js';
 import { parse } from '#engine/lang/parse.js';
 import { validateStoresAndGuards } from '#engine/project/check-app.js';
 import { validate } from '#engine/ir/validate.js';
-import { selfUpdateTargets } from '#engine/ir/refs.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { compile, compileStore } from '#engine/compile/compile.js';
 import { makeIconResolver } from './icons.js';
 import { formatDiagnostic, ParseError } from '#engine/shared/diagnostics.js';
-import type { Diagnostic, AppMap, StoreSlice } from '#engine/shared/types.js';
+import type { Diagnostic, AppMap } from '#engine/shared/types.js';
 
 export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), baseUrl = ''): Promise<{ routes: string[]; outDir: string }> {
   const rel = (p: string) => relative(appRoot, p);
@@ -31,19 +32,11 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   // Validate cross-page store refs (e.g. cart.count, auth.loggedIn) the same way `check` does,
   // so build and check never disagree. Without this, build rejected pages that check passed.
   const storeIRs = findStores(join(appRoot, 'src'));
-  const stores = Object.keys(storeIRs);
-  const storeMembers: { [d: string]: string[] } = {};
-  for (const [d, ir] of Object.entries(storeIRs)) storeMembers[d] = [...Object.keys(ir.state || {}), ...Object.keys(ir.gets || {}), ...Object.keys(ir.actions || {})];
-  // storesMeta: same shape passed to compile() by the Vite plugin; without it codegen emits
-  // store refs as bare undefined identifiers (missing `import * as __store_...`) -> runtime ReferenceError.
-  const storesMeta: { [d: string]: StoreSlice } = {};
-  for (const [d, ir] of Object.entries(storeIRs)) storesMeta[d] = { state: Object.keys(ir.state || {}), gets: Object.keys(ir.gets || {}), actions: Object.keys(ir.actions || {}) };
-  // the SAME validate context `check` (lint.ts) builds, so `build` never disagrees with `check`: cross-store
-  // element entities, icon existence, and the effect→store loop guard. (Was missing -> a page using a
-  // cross-store aggregate / a bad icon passed `check` but failed or shipped broken from `build`.)
-  const storeEntities = storeListEntities(storeIRs);
-  const storeSelfMut = new Set<string>();
-  for (const [d, ir] of Object.entries(storeIRs)) for (const [an, a] of Object.entries(ir.actions || {})) if (selfUpdateTargets(a.body || []).length) storeSelfMut.add(`${d}.${an}`);
+  // ONE assembly of the store facts validate + compile need — shared with `check` (lint.ts) and the Vite
+  // plugin, so they never disagree: storeMembers (cross-store refs like cart.count), storesMeta (so codegen
+  // emits `import * as __store_...`, not a bare undefined ref), storeEntities (cross-store aggregates),
+  // storeSelfMut (the effect->store loop guard). All four used to be re-derived here and drifted.
+  const { stores, storeMembers, storeSelfMut, storeEntities, storesMeta } = storeContext(storeIRs);
   const iconExists = getIconChecker(appRoot);
   const iconResolver = makeIconResolver(appRoot); // so `Icon "set:name"` renders real SVG in the static HTML (was empty)
 
@@ -68,7 +61,11 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   const themeFile = join(appRoot, 'theme.muten');
   const themeRaw = existsSync(themeFile) ? (parse(readFileSync(themeFile, 'utf8')).theme || {}) : {};
   const projectStyles = (await resolveStyles(join(appRoot, 'src', 'styles.muten'))).css; // resolves src/styles.css|scss
-  const appCss = emitTheme(themeRaw) + '\n' + projectStyles;
+  // muten.config drives the theme adapter (e.g. Tailwind @theme blocks) + the Form class map — the SAME as dev
+  // and `muten bundle`. Without this, the SSG emitted generic :root vars and ignored muten.config entirely.
+  const cfg = readMutenConfig(appRoot);
+  const classes = configClasses(cfg);
+  const appCss = emitTheme(themeRaw, configThemeAdapter(cfg)) + '\n' + projectStyles;
 
   const pages = readRoutes(appRoot); // throws on missing/duplicate/dangling routes
   const api = readApi(appRoot);      // app-wide backend config (base + headers) for source fetches
@@ -78,7 +75,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
 
   const built: string[] = [];
   // app.map.json: the AI-readable index of the whole app, derived from the build.
-  const appMap: AppMap = { app: appRoot.split(/[\\/]/).pop() || '', parts: Object.keys(sharedParts), routes: {} };
+  const appMap: AppMap = { app: appRoot.split(/[\\/]/).pop() || '', parts: Object.keys(sharedParts), stores: storesMeta, routes: {} };
 
   for (const page of pages) {
     if (page.route.includes(':')) { console.log(`• /${page.route} — skipped (route params run in the SPA runtime, not the static build)`); continue; }
@@ -116,13 +113,13 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
     // pre-render by executing against the build-time DOM so crawlers and first-paint get real markup.
     // On any SSR failure (stores, exotic Custom), fall back to the CSR shell.
     const pageCss = appCss + '\n' + styles.css; // theme + project stylesheet + this page's colocated styles
-    const csr = compile(doc, data, pageCss, components, sources, { api, stores: storesMeta, storeCode, storeEntities, iconResolver });
+    const csr = compile(doc, data, pageCss, components, sources, { api, stores: storesMeta, storeCode, storeEntities, iconResolver, classes });
     let html = csr, ssrd = false;
     if (csr.includes('<div id="app"></div>')) {
       try {
         // fetch remote sources at build time so source-backed lists pre-render with real data, not just mock
         const ssrData = Object.keys(sources).length ? { ...data, ...await fetchSources(sources, api) } : data;
-        const body = renderSsrBody(compile(doc, ssrData, pageCss, components, sources, { format: Fmt.Ssr, api, stores: storesMeta, storeCode, storeEntities, iconResolver }));
+        const body = renderSsrBody(compile(doc, ssrData, pageCss, components, sources, { format: Fmt.Ssr, api, stores: storesMeta, storeCode, storeEntities, iconResolver, classes }));
         html = csr.replace('<div id="app"></div>', `<div id="app">${body}</div>`);
         ssrd = true;
       } catch { /* keep the CSR shell — the client renders it */ }

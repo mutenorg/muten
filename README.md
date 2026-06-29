@@ -81,7 +81,7 @@ only wins on its own terms:
 | **Language surface** | small - the whole thing fits in an AI's context | large (hooks, lifecycle, reactivity rules) |
 | **Catches mistakes** | `muten check` - at **compile time**, in milliseconds, no browser | at runtime / in tests |
 | **A typical change** | a few lines in one file | ripples across components |
-| **Ships to the browser** | ~2.8 KB gzip for a todo app - a static page ships **zero** | 14-59 KB of runtime + your app |
+| **Ships to the browser** | ~3.7 KB gzip for a todo app (a ~2 KB signals runtime + your page) - a static page ships **zero** | 14-59 KB of runtime + your app |
 | **Ecosystem / maturity** | young · one maintainer · **pre-1.0** | mature · huge |
 
 The single biggest reason AI-written muten works on the *first* try more often is that middle row: **a compiler that
@@ -134,18 +134,18 @@ Almost every "hard widget" lands at **tier 2**. The language stays small by desi
 crossing into a `Custom`, and the call site of a `use` function (an undeclared one is a `check` error). So
 coupling in chart.js or zod never costs you the oracle on the muten side.
 
-**Deploy - the honest caveat.** `muten build` (the CLI SSG) now **inlines the theme + project `styles.css`**
-and **pre-renders (SSR) your stores/`query` data**, so each route ships fully styled with real content. The two
-things a no-bundler static export can't do: bundle `use` functions (it **warns** and you switch to `vite build`),
-and persist store state across full-page navigations. For a styled, **stateful** app use `vite build`;
-`npm run dev` runs every tier regardless — these caveats only affect the production *static* build.
+**Deploy - the honest caveat.** Two production paths, both muten's own runner. `muten build` (the CLI SSG)
+**inlines the theme + project `styles.css`** and **pre-renders (SSR) your stores/`query` data**, so each route
+ships fully styled with real content as zero-JS HTML. The two things a static export can't do: bundle `use`
+functions and persist store state across full-page navigations — for those, `muten bundle` produces a CSR
+build (per-route chunks + source maps + a ship-size report). `npm run dev` runs every tier regardless.
 
 | Your app uses... | Deploy with |
 |---|---|
-| Pure muten, static/content pages (styled, with data) | `muten build` (zero-JS HTML) or `vite build` |
-| `use` JS functions, `Custom`, or a shared store across pages | **`vite build`** (bundles `use` + keeps state across navigations) |
+| Pure muten, static/content pages (styled, with data) | `muten build` (zero-JS HTML) or `muten bundle` |
+| `use` JS functions, `Custom`, or a shared store across pages | **`muten bundle`** (bundles `use` + keeps state across navigations) |
 
-**Most real apps use `vite build`.**
+**Most real apps use `muten bundle`.**
 
 ## The app, by convention
 
@@ -173,29 +173,42 @@ routes {
 ## CLI
 
 ```sh
-muten build [dir]            # compile → ./dist/<route>/index.html (+ app.map.json)
-muten check [dir] [--json]   # parse + validate every page, no compile - the deterministic ORACLE
+muten dev    [dir]           # dev server — esbuild, in-memory, SURGICAL HMR + the oracle on every save
+muten bundle [dir]           # production build → ./dist (per-route chunks + source maps + ship-size report)
+muten build  [dir]           # SSG: pre-render every route to zero-JS HTML (+ app.map.json)
+muten check  [dir] [--json]  # parse + validate every page, no compile - the deterministic ORACLE
                              #   --json → structured diagnostics (code + loc + "did you mean…?") in ms, no browser
-muten map   [dir] [--json]   # emit app.map.json COLD (no build) - the app graph an AI reads FIRST
+muten map    [dir] [--json]  # emit app.map.json COLD (no build) - the app graph an AI reads FIRST
 ```
 
 `check` and `map` are the AI-first feedback loop: an agent asks the compiler "is this valid, and what
 did I mean?" (`check --json`) and "what's the whole app?" (`map`) without running a browser. `lint` is an
 alias of `check`.
 
-`build`/`lint` default to the current directory; pass a path to target another. The `muten` bin ships
-with the app (it's a dependency). To scaffold a *new* app, use `npm create muten@latest` (the separate
+All commands default to the current directory; pass a path to target another. The `muten` bin ships with
+the app (it's a dependency). To scaffold a *new* app, use `npm create muten@latest` (the separate
 [`create-muten`](https://www.npmjs.com/package/create-muten) scaffolder).
 
-## Dev server (Vite)
+## Dev server & bundler - the muten runner
 
-The Vite plugin gives a Muten app a dev server + HMR + client-side routing while authoring stays the
-DSL. `npm create muten` wires it up; `npm run dev` runs it.
+muten ships **its own runner** (esbuild, embedded - no Vite to configure). `npm create muten` wires the
+scripts; `npm run dev` / `npm run build` run them:
 
-```js
-// vite.config.mjs
-import muten from '@muten/core/vite-plugin-muten.js';
-export default { plugins: [muten()] };  // theme.muten is auto-loaded
+- **`muten dev`** - an **in-memory** dev server (no `.muten-dev/` folder) with **surgical HMR**: edit a node's
+  text or class and *only that node* re-renders - your counters, inputs and list selection survive, no full
+  reload, no flash. Compile/runtime errors surface Vite-quality (file:line:col + a code frame + "did you
+  mean…?"), in the terminal and as a browser overlay. The oracle runs on every save.
+- **`muten bundle`** - the production CSR build: per-route chunks, content-hashed CSS, **source maps that
+  point at your `.muten` lines** (a runtime error shows `page.muten:18`, not `boot-x.js:441`), and a per-route
+  **ship-size report** so "minimum by construction" is visible.
+
+The build is configured in **`muten.config`** - written in muten syntax, not JS (it carries the dev port and,
+for Tailwind/DaisyUI, the theme adapter + component classes). A `--vite` flag on `dev`/`bundle` falls back to
+the legacy Vite plugin for an app that needs a custom Vite/PostCSS plugin:
+
+```
+# muten.config
+dev { port 5173 }
 ```
 
 ## Programmatic API
@@ -226,8 +239,8 @@ The source is TypeScript under `src/`, organized by **domain**: each has its own
 | [`src/engine/style`](src/engine/style/README.md) | the styling token vocabulary (the engine ships no values) |
 | [`src/engine/project`](src/engine/project/README.md) | filesystem + whole-app awareness (load · analyze · routes · styles) |
 
-The runtime (the only thing shipped to the browser), the Vite plugin, the CLI and the build/lint
-orchestration also live in `src/`. See [`src/engine/README.md`](src/engine/README.md) for the
+The runtime (the only thing shipped to the browser), the runner (`esbuild-muten.ts` - dev + bundle), the
+legacy Vite plugin, the CLI and the build/lint orchestration also live in `src/`. See [`src/engine/README.md`](src/engine/README.md) for the
 file-level conventions (≤500 lines, honest types, data-table dispatch, no magic strings).
 
 ## Build
@@ -251,8 +264,9 @@ initials). For behavior the primitives can't express, drop to a `Custom` compone
 **Pre-1.0 - the core is solid, the edges are young.** Build real apps with it; don't bet a critical
 production system on it yet (small ecosystem, one maintainer, not yet battle-tested).
 
-**Solid today:** the language + compiler, the `check` / `build` / `map` CLI + oracle, the Vite plugin + dev
-server + HMR, the VS Code extension (live-lint + autocomplete).
+**Solid today:** the language + compiler, the `dev` / `bundle` / `build` / `check` / `map` CLI + oracle, the
+native runner (embedded esbuild) with **surgical HMR** + Vite-quality errors + source maps, the VS Code
+extension (live-lint + autocomplete).
 The bounded list toolkit - inline objects, `patch`, `each...where`, aggregates (`sum`/`count`/`avg`/`min`/`max`),
 `sort`/`sortDesc`, and page->store action composition, so a real CRUD/dashboard app is pure muten, no JS escape.
 `Form` fields cover `text` · `number` (coerced) · `email` · `bool` (checkbox) · `enum` (select) · `date` · `password` · `textarea`, with validation.
@@ -260,10 +274,10 @@ Reactivity is keyed and batched: `each`/`DataTable` reconcile rows by `id` with 
 streams real-time updates over a WebSocket (only changed rows re-render).
 
 **Next, toward 1.0:**
-- a `date`/`textarea` `Form` field type; number formatting (`round` / currency) in expressions.
+- a `round` formatter for numeric rounding in expressions (currency is already built in via `money`).
 - built-in virtualization for huge lists (today you render only visible rows yourself).
-- richer SSG for stateful multi-page apps (today a shared `.store` across pages deploys via `vite build`, not the
-  static `muten build`).
+- richer SSG for stateful multi-page apps (today a shared `.store` across pages deploys via `muten bundle`, not
+  the static `muten build`).
 
 **By design (the moat, not a bug):** muten is declarative + bounded. The list toolkit (`patch` · `sort` · the
 aggregates · `each...where`) gives the *common* list jobs without exposing raw `map`/`reduce` - anything past that
@@ -275,7 +289,7 @@ what keeps it small and analyzable; closing it would just make another general-p
 These are honest gaps found during stress-testing. They are known and tracked; none are design mistakes, just things not built yet.
 
 **Build tooling**
-- `muten build` (CLI SSG) inlines the theme + project `styles.css` and SSRs your store/`query` data, but a no-bundler static export still can't bundle `use` functions (it warns) or persist store state across full-page navigations. Use `npm run dev` for development and `vite build` for a stateful production app.
+- `muten build` (CLI SSG) inlines the theme + project `styles.css` and SSRs your store/`query` data, but a no-bundler static export still can't bundle `use` functions or persist store state across full-page navigations. Use `npm run dev` for development and `muten bundle` for a stateful production app.
 
 **Language features not yet available**
 - `query x live` (WebSocket) requires the server to send an `id` per row for keyed diffing; without it, reconciliation falls back to full re-render.
@@ -294,7 +308,7 @@ These are honest gaps found during stress-testing. They are known and tracked; n
 - No standalone `Select` primitive. A `Form` auto-generates one for enum fields; outside a `Form`, build a button group with `each` + `on(click:)`.
 
 **Custom inputs**
-- A `Custom` component receives a snapshot of state at mount. To keep it reactive, pass state references with `@` props and manage updates inside the component.
+- A `Custom` receives a snapshot of state at mount by default; for reactivity, its `mount` **returns an updater function** that muten re-runs whenever the bound `@` state changes.
 
-**No design-system escape hatch yet**
-- `class()` passes through arbitrary CSS class names, but there is no component-level slot system for composing muten primitives inside a `Custom`.
+**Composition**
+- `slot` composes muten primitives inside reusable **`parts`** and the **`shell`** (a Container/Presentational split). There is no `slot` *inside a `Custom`* (it's vanilla JS, outside muten's type system) - compose with a part, or do DOM composition in the Custom.

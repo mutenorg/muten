@@ -99,3 +99,33 @@ ecosystem wins. So:
 > beat React-for-AI not with more libraries, but because the AI writes correct Muten first-try (small +
 > analyzable + context ships with the app). Add capability only as declarative primitives; the day a
 > common need works *only* through `Custom`, that ground is ceded back to React.
+
+## Compiler cleanliness — unconditional dead-code emission (noted 2026-06-29, via the playground JS tab)
+
+A counter that uses only `signal` + `effect` compiles to a ~10 KB module dragging in code it never references.
+The emitter ships a FIXED payload regardless of what the page uses. Three spots, all in `compile/emit.ts`:
+
+1. **All 24 builtins, always.** `dataLayer()` (emit.ts:68) prepends the full `BUILTINS_JS`
+   (`upper/lower/initial/truncate/money/ago/date/time/now/before/after/datetime/weekday/calendar/isToday/isPast/isFuture/daysUntil/dayKey/addDays`).
+   The counter uses **zero**.
+2. **The whole data layer, always.** `dataLayer()` also emits
+   `__DATA/__SOURCES/__API/__UUIDS/__DELAY/__loadLocal/__saveLocal/__req/__rows/__fill/__fetch/__write/__refetch/__send/query`
+   even when the page has **no** sources, queries, writes, or persisted state.
+3. **All 9 runtime imports, always.** `emitModule`/`emitStore`/`emitHtml` hardcode
+   `import { signal, computed, effect, root, onCleanup, __eq, __id, __has, __order }`. The counter uses `signal` + `effect`; the other 7 never.
+
+**Impact.** The **vite/module** path is fine: esbuild/rollup tree-shake the dead locals + unused imports, so shipped
+bundles stay ~2.5 KB (the headline number holds). BUT:
+- The **standalone HTML / SSG** path (`emitHtml`, also the playground Result iframe) has **no bundler** → all of it
+  **ships** in every static page. Real bloat for `muten build` zero-JS pages.
+- The **playground JS tab** shows the raw, dirty module — a bad look for the language's own showcase.
+
+**Fix — usage-based emission.** Make the three payloads conditional on what the doc actually references:
+1. Walk the doc's exprs for called builtin names (incl. transitive deps: `calendar→time/date`) → emit only those.
+2. Emit the data layer only if the doc has `sources` / `query` state / writes / `persist`; split it so a fetch-only
+   page doesn't also get `__send` / live-`query` / etc.
+3. Compute the runtime import set from the emitted body (`signal`/`effect` near-always; `computed` only with `get`,
+   `onCleanup` only with live `query`, `__order`/`__has`/`__eq`/`__id` only where used).
+
+NOT a correctness bug (bundled output is already pruned) — it's a cleanliness + standalone-size bug. `BUILTINS_JS`
+being "inlined in every JS path" is currently deliberate (emit.ts:44-46); this revisits that for the no-bundler paths.

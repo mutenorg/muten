@@ -372,6 +372,10 @@ export interface CompileOpts {
   storeEntities?: { [domainDotMember: string]: Entity };  // element entity of each store list, so a page aggregate over a store list emits the right item fields
   persistScope?: string;            // namespaces `persist` keys (a store's domain / a page's screen) so two scopes' same-named state don't share one localStorage key
   classes?: { [slot: string]: string };  // styling-plugin class map: a primitive's internal parts (Form's input/label/submit/…) emit these instead of the default `mu-*` — so a library (DaisyUI) restyles the auto-generated bits with NO bridge CSS, while the engine stays agnostic (ships only the `mu-*` defaults)
+  sourceMap?: { file: string; source: string };  // emit an inline source map (compiled JS -> this .muten file), so runtime errors map back to the source line
+  ctxRefs?: boolean;     // Fmt.Patch: refs go through the live `ctx` (HMR patch builder rebuilds a node against the SAME signals)
+  patchRoot?: string;    // Fmt.Patch: the node id whose subtree to emit as a `(ctx, nodes, parent) => el` builder
+  dev?: boolean;         // dev server only: emit the HMR node registry + `el.__muten` handle (omitted in prod bundles — dead there)
 }
 
 /** One screen's resolved compile context shared by compile.ts (DOM) and logic.ts.
@@ -391,6 +395,7 @@ export interface CompileCtx {
   storeEntities?: { [domainDotMember: string]: Entity };  // element entity of each store list, so a cross-store aggregate emits __it.<field>
   persistScope: string;             // namespace for `persist` localStorage keys (store domain / page screen)
   format?: Fmt;
+  ctxRefs?: boolean;                // HMR patch builders: read state/actions/gets/params via the live `ctx` object
 }
 
 /** An editable Form field derived from an entity (excludes the auto uuid id). */
@@ -430,6 +435,8 @@ export interface EmitParts {
   renderBody: string;
   staticHtml: string;
   hasSlot: boolean;
+  ctxNames: string[];      // state/action/get/param names exposed as `el.__muten.ctx` for surgical HMR (dev only)
+  dev: boolean;            // dev build: emit the HMR node registry + `el.__muten` stash (off in prod bundles)
 }
 
 /** The kind of file being analyzed (drives which top-level blocks are allowed). */
@@ -505,8 +512,16 @@ export interface CompletionResult {
 export interface Signal<T> { get(): T; set(next: T): void; }
 /** An effect's run function, carrying its current dependency set + a disposed flag. */
 export interface EffectRun { (): void; deps: Set<Set<EffectRun>>; disposed: boolean; sync?: boolean; }
-/** A compiled page/shell module: its scoped CSS + a mount() that builds it into a root element. */
-export interface PageModule { css: string; mount(root: Element, params?: { [key: string]: string }): Element; meta?: { [key: string]: string }; }
+/** One mounted node, addressable by id for surgical HMR: its element and the parent it lives under (so a patch
+ *  can rebuild + swap it in place). `dispose` is set only by a prior patch — the initial mount's per-node effects
+ *  live in the page scope (cleaned on navigation), so a first patch just leaves them on the detached old node. */
+export interface MountedNode { el: Element; parent: Element; dispose?: () => void; }
+export type NodeRegistry = { [id: string]: MountedNode };
+/** The live HMR handle stashed on a mounted page's root element (`el.__muten`): the reactive context (state/
+ *  actions as addressable data, so a patch can rebuild a node against the SAME signals) + the node registry. */
+export interface PageInstance { el: Element; ctx: { [name: string]: unknown }; nodes: NodeRegistry; }
+/** A compiled page/shell module: its scoped CSS + a mount() that builds it into a root element (returning it). */
+export interface PageModule { css: string; mount(root: Element, params?: { [key: string]: string }): Element; meta?: { [key: string]: string }; screen?: string; }
 /** One route's lazy loader + optional guard/redirect (the hash router consumes a map of these). */
 export interface RouteDef { load(): Promise<PageModule>; guard?: () => boolean; redirect?: string; }
 
@@ -520,10 +535,11 @@ export type ClassValidatorLoader = (cssPath: string, base: string, themeRaw: The
 export interface StylingPlugin { theme?: ThemeAdapter; validate?: ClassValidatorLoader; classes?: { [slot: string]: string }; }
 export interface MutenOptions { store?: boolean; theme?: { [scale: string]: ThemeScale }; styling?: StylingPlugin; }
 
-/** The app graph the build emits to app.map.json: the root the AI reads for context. */
+/** The app graph the build emits to app.map.json (+ serves live at /_muten/graph): the root the AI reads. */
 export interface AppMap {
   app: string;
   parts: string[];
+  stores: { [domain: string]: StoreSlice };
   routes: { [url: string]: { file: string; models: string[]; state: { [name: string]: Value }; sources: { [name: string]: string } } };
 }
 
