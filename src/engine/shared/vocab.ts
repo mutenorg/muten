@@ -38,7 +38,7 @@ export enum Kw {
   Mock = 'mock', Sources = 'sources', Routes = 'routes', Shell = 'shell',
   Part = 'part', Const = 'const', Theme = 'theme', Query = 'query', Every = 'every', Live = 'live', Persist = 'persist', Param = 'param', Api = 'api', Body = 'body', Into = 'into', Meta = 'meta',
   Use = 'use', From = 'from',
-  When = 'when', Each = 'each', Match = 'match', As = 'as', Where = 'where', By = 'by', With = 'with', If = 'if', Else = 'else',
+  When = 'when', Each = 'each', Match = 'match', As = 'as', Where = 'where', By = 'by', With = 'with', If = 'if', Else = 'else', Ordered = 'ordered',
   Guard = 'guard', Not = 'not', And = 'and', Or = 'or', Contains = 'contains',
   Required = 'required', Min = 'min', Max = 'max', Pattern = 'pattern',
   True = 'true', False = 'false', Null = 'null',
@@ -48,6 +48,7 @@ export enum Kw {
 export enum Nt {
   // containers (semantic landmarks + layout)
   Shell = 'Shell', Header = 'Header', Nav = 'Nav', Sidebar = 'Sidebar', Footer = 'Footer', Page = 'Page', Stack = 'Stack',
+  Section = 'Section', Article = 'Article', List = 'List',
   // content
   Text = 'Text', Title = 'Title', Span = 'Span', Image = 'Image', Icon = 'Icon', Video = 'Video',
   // interactive

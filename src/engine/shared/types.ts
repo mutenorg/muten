@@ -236,6 +236,7 @@ export interface NodeProps {
   alt?: StringPropValue;
   name?: StringPropValue;   // Icon "set:name" (a static Iconify ref)
   flags?: string[];         // Video boolean attrs: controls / autoplay / loop / muted / playsinline
+  ordered?: boolean;        // List `ordered` -> <ol> instead of <ul>
   placeholder?: StringPropValue;
   submitLabel?: StringPropValue;
   // structure & wiring

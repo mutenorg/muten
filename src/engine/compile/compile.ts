@@ -165,6 +165,10 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     }
   }
 
+  // each-ids that are a direct child of a List: their rows render as <li> (the List supplies the <ul>/<ol>).
+  const listItemEach = new Set<string>();
+  for (const lid of Object.keys(nodes)) if (nodes[lid].type === Nt.List) for (const cid of nodes[lid].children || []) if (nodes[cid].type === Nt.Each) listItemEach.add(cid);
+
   // Emit one node + its subtree into `parentVar`. Semantic containers share one generic path;
   // every other primitive has a case below. Logic (refs, exprs, actions) is delegated to `logic`.
   function genNode(id: string, parentVar: string): void {
@@ -185,6 +189,17 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       return;
     }
     switch (n.type) {
+
+      case Nt.List: { // semantic list: <ul> (or <ol> with `ordered`); every direct child becomes an <li>
+        declEl(id, p.ordered ? 'ol' : 'ul', classFor('list', p));
+        appendEl(id, parentVar);
+        genDynamics(id, p);
+        for (const childId of nodes[id].children || []) {
+          if (nodes[childId].type === Nt.Each) genNode(childId, `el_${id}`);       // each row wraps itself in <li> (listItemEach)
+          else { lines.push(`const li_${childId} = document.createElement('li');`); genNode(childId, `li_${childId}`); lines.push(`el_${id}.appendChild(li_${childId});`); }
+        }
+        break;
+      }
 
       case Nt.SearchField: {
         const sig = logic.bindSig(p.bind);
@@ -416,6 +431,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         // Rows are matched by `id` (never index, that bleeds state), reused/moved in place, and
         // disposed (effects too) when they leave. Focus/scroll/inputs survive live updates.
         if (!p.list || !p.as) throw new Error('each without a list or item variable');
+        const wrapLi = listItemEach.has(id); // a direct child of a List: each row is its own <li>
         const listJS = logic.compileExpr(p.list, pageScope);
         const filterJS = p.filter ? logic.compileExpr(p.filter, pageScope) : ''; // `where cond`: item var bare inside .filter
         // the body reads the row through its signal: compile refs as `<as>.get()` (restore scope after)
@@ -439,7 +455,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
         lines.push(`    let __e = map_${id}.get(__k);`);
         lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
-        lines.push(`    else { const __sig = signal(__row); const __r = root(() => { const __f = document.createDocumentFragment(); buildItem_${id}(__f, __sig); return [...__f.childNodes]; }); __e = { sig: __sig, nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
+        lines.push(`    else { const __sig = signal(__row); const __r = root(() => { const __c = ${wrapLi ? "document.createElement('li')" : 'document.createDocumentFragment()'}; buildItem_${id}(__c, __sig); return ${wrapLi ? '[__c]' : '[...__c.childNodes]'}; }); __e = { sig: __sig, nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
         lines.push(`    __next.push(__e);`);
         lines.push(`  }`);
         lines.push(`  for (const [__k, __e] of map_${id}) if (!__seen.has(__k)) { __e.dispose(); for (const __n of __e.nodes) __n.remove(); map_${id}.delete(__k); }`);
@@ -536,6 +552,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Video: return `<video${cls('video')} src="${escAttr(strOf(p.src))}"${(p.flags || []).map((f) => ` ${f}`).join('')}></video>`;
       case Nt.Link: return `<a${cls('link')} href="${escAttr(strOf(p.to) || '/')}">${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</a>`;
       case Nt.Button: return `<button${cls('button')}>${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</button>`;
+      case Nt.List: { const tag = p.ordered ? 'ol' : 'ul'; return `<${tag}${cls('list')}>${(nodes[id].children || []).map((cid) => `<li>${renderStatic(cid)}</li>`).join('')}</${tag}>`; }
       default: return '';
     }
   }

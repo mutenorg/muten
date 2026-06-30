@@ -16,6 +16,7 @@ export const CONTAINERS: { [type: string]: [string, string] } = {
   [Nt.Shell]: ['div', 'shell'], [Nt.Header]: ['header', 'header'], [Nt.Nav]: ['nav', 'nav'],
   [Nt.Sidebar]: ['aside', 'sidebar'], [Nt.Footer]: ['footer', 'footer'],
   [Nt.Page]: ['main', 'page'], [Nt.Stack]: ['div', 'stack'], // Page maps to <main>, the content landmark
+  [Nt.Section]: ['section', 'section'], [Nt.Article]: ['article', 'article'], // sectioning content (List is its own case: <ul>/<ol> + <li> children)
 };
 
 // Muten binary op -> JS operator. `contains` is special-cased to __has and omitted here.

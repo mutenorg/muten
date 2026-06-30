@@ -43,7 +43,7 @@ linknode   ::= "Link" (sp (commonpart | "->" ws string))* (ws block)?
 actionnode ::= ("RowAction" | "Button") (sp (commonpart | actionarrow))* (ws block)?
 actionarrow ::= "->" ws dotted (ws "(" ws expr? ws ")")?
 customnode ::= "Custom" sp ident (sp modifier)*
-plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Text" | "Title" | "Span" | "Image" | "Icon" | "Video" | "SearchField" | "DataTable" | "Form" | "slot") (sp commonpart)* (ws block)?
+plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Section" | "Article" | "List" | "Text" | "Title" | "Span" | "Image" | "Icon" | "Video" | "SearchField" | "DataTable" | "Form" | "slot") (sp commonpart)* (ws block)?
 commonpart ::= string | ref | level | modifier
 level      ::= "h" [1-6]
 

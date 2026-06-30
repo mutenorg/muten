@@ -37,6 +37,21 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     doc: 'The page content root (<main>) — one per route, mounts into the shell’s `slot`. No imposed look; lay it out with class().',
     snippet: 'Page {\n\t$0\n}',
   },
+  Section: {
+    props: {}, children: true,
+    doc: 'A thematic section of a page (<section>) - a band/region that usually has its own heading (give it a Title). Use it to structure a landing or a long page; lay it out with class(). Prefer Section over a plain Stack when the group is a distinct part of the document.',
+    snippet: 'Section class("py-16") {\n\t$0\n}',
+  },
+  Article: {
+    props: {}, children: true,
+    doc: 'Self-contained content (<article>) - a blog post, a product card, a comment, a notification: anything that would still make sense pulled out on its own. Use it for repeated content items; lay it out with class().',
+    snippet: 'Article class("flex flex-col gap-2") {\n\t$0\n}',
+  },
+  List: {
+    props: {}, children: true,
+    doc: 'A semantic list (<ul>; add the `ordered` keyword for <ol>). Its direct children render as <li> - usually one `each`. Use it for ANY real list (menus, feeds, results, steps) so screen readers announce "list, N items"; reach for a plain Stack only when the group is not a list. `List class("flex flex-col gap-2") { each todos as t { Span "{t.title}" } }` · ordered: `List ordered { each steps as s { Text "{s}" } }`. Style the <li> via the child you put inside; bullets are off when you use flex/grid (add list-disc to keep them).',
+    snippet: 'List class("flex flex-col gap-2") {\n\teach ${1:items} as ${2:item} {\n\t\t$0\n\t}\n}',
+  },
   Text: {
     string: 'value', props: { value: 'text' }, children: false, interp: true,
     doc: 'Paragraph text (<p>). Interpolates state reactively: `Text "Hi, {user.name}"`.',
