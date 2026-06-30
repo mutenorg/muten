@@ -5,7 +5,9 @@
 
 import fs from 'node:fs';
 import { dirname, join } from 'node:path';
+import { createRequire } from 'node:module';
 import { parse } from '#engine/lang/parse.js';
+import { readMutenConfig } from '#engine/project/config.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { validate } from '#engine/ir/validate.js';
 import { closest, diag, ParseError } from '#engine/shared/diagnostics.js';
@@ -29,6 +31,31 @@ function loadPartsLite(dir: string): Parts {
     try { ir = parse(fs.readFileSync(join(dir, f), 'utf8')); } catch { continue; }
     for (const [name, def] of Object.entries(ir.parts || {})) {
       parts[name] = { ...def, state: ir.state || {}, entities: ir.entities || {} };
+    }
+  }
+  return parts;
+}
+
+// Loads the parts a muten.config `plugins {}` imports (@muten/<name>), so the linter knows them like local parts.
+// Mirrors loadPluginParts (load.ts) but sync + style-free (the linter needs only the part shapes). Custom-component
+// entries are skipped - those ship a .js and are `muten add`-only.
+function loadPluginPartsLite(appRoot: string): Parts {
+  const parts: Parts = {};
+  const plugins = readMutenConfig(appRoot).plugins;
+  if (typeof plugins !== 'object' || plugins === null || Array.isArray(plugins)) return parts;
+  let req: NodeRequire;
+  try { req = createRequire(join(appRoot, 'package.json')); } catch { return parts; }
+  for (const name of Object.keys(plugins)) {
+    let registryPath: string;
+    try { registryPath = req.resolve(`@muten/${name}/registry.json`); } catch { continue; }
+    let registry: { components?: Array<{ file: string; component?: string }> };
+    try { registry = JSON.parse(fs.readFileSync(registryPath, 'utf8')); } catch { continue; }
+    const base = dirname(registryPath);
+    for (const entry of registry.components || []) {
+      if (entry.component) continue;
+      let ir;
+      try { ir = parse(fs.readFileSync(join(base, entry.file), 'utf8')); } catch { continue; }
+      for (const [pname, def] of Object.entries(ir.parts || {})) parts[pname] = { ...def, state: ir.state || {}, entities: ir.entities || {} };
     }
   }
   return parts;
@@ -132,6 +159,7 @@ export function projectParts(filePath: string): Parts {
   const appRoot = findAppRoot(filePath);
   if (!appRoot) return loadPartsLite(join(dirname(filePath), 'parts'));
   const parts: Parts = {};
+  Object.assign(parts, loadPluginPartsLite(appRoot));                        // plugin parts (overridable by local)
   for (const d of allPartsDirs(appRoot)) Object.assign(parts, loadPartsLite(d));
   return parts;
 }
