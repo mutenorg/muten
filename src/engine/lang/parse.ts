@@ -392,6 +392,9 @@ export class Parser extends Grammar {
   private parsePart(ir: IR): void {
     const start = this.eat(Tk.Ident, Kw.Part);
     const name = this.eat(Tk.Ident).v;
+    // A part must NOT shadow a built-in primitive: naming one `Sidebar`/`Button`/… makes the primitive unreachable
+    // and gives callers cryptic "unknown ref" errors from the part's own body. Fail here, clearly, with a location.
+    if (name in PRIMITIVES) throw new ParseError(`part "${name}" shadows the built-in ${name} primitive — rename it (e.g. App${name}) so the primitive stays reachable.`, this.locOf(start.pos));
     this.eat(Tk.Punct, Pn.ParenL);
     const params: PartParam[] = [];
     while (!this.at(Tk.Punct, Pn.ParenR)) {

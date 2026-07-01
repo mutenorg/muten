@@ -178,7 +178,12 @@ async function runTailwind(css: string, root: string): Promise<string> {
     { base: root, pattern: '**/*.muten', negated: false },
     { base: join(root, 'src'), pattern: '**/*.{js,ts,jsx,tsx}', negated: false },
   ];
-  return compiler.build(new oxide.Scanner({ sources }).scan());
+  // Sanitize the scanned candidates: a stray glob-like token (e.g. `row-span-*` written in a CSS comment or a
+  // doc string) is NOT a real utility, and Tailwind's build throws on it - dropping the ENTIRE stylesheet and
+  // flashing the app unstyled. A `*` that survives stripping every `[…]` arbitrary group can never be a class,
+  // so drop those candidates and keep the build alive.
+  const candidates = new oxide.Scanner({ sources }).scan().filter((c) => !c.replace(/\[[^\]]*\]/g, '').includes('*'));
+  return compiler.build(candidates);
 }
 
 // Last successful Tailwind output, kept across rebuilds: a transient Tailwind failure (e.g. a file caught
