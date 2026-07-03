@@ -29,9 +29,9 @@ try {
     if (json) console.log(JSON.stringify(map, null, 2));
     else { writeFileSync(join(root, 'app.map.json'), JSON.stringify(map, null, 2)); console.log('✓ app.map.json → the app graph (read this first)'); }
   }
-  else if (cmd === 'add') { // copy component source from an installed registry (e.g. @muten/shadcn) into src/parts/
+  else if (cmd === 'add') { // add a plugin (lowercase -> install + enable) or eject a registry component (PascalCase)
     const names = args.slice(1).filter((a) => !a.startsWith('-'));
-    if (!names.length) { console.error('usage: muten add <component...>   (from an installed registry, e.g. @muten/shadcn)'); process.exit(1); }
+    if (!names.length) { console.error('usage: muten add <name...>\n  lowercase  -> a plugin: install @muten/<name> + enable it in muten.config   (e.g. muten add devtools)\n  PascalCase -> a component: copy its source into src/parts/                      (e.g. muten add Button)'); process.exit(1); }
     addComponents(process.cwd(), names);
   } else {
     console.error('usage: muten <dev|bundle|build|check|map|lint|add> [dir] [--json]\nto create an app:  npm create muten@latest <dir>');

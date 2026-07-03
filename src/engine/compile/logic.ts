@@ -317,9 +317,13 @@ export class Logic {
         ? { locals: new Set(action.params!.map((p) => p.name)) }
         : { locals: new Set(), input: action.input, inputIsState };
       const param = hasParams ? action.params!.map((p) => p.name).join(', ') : inputIsState ? '' : action.input;
+      // dev: announce the action to the DevTools so the History labels it by NAME (app-fired actions can't be
+      // intercepted post-mount — handlers call this local fn, not ctx[name] — so the compiler emits the hook).
+      const announce = this.ctx.dev ? `if (typeof window !== 'undefined' && window.__muten_rt && window.__muten_rt.__dispatch) window.__muten_rt.__dispatch(${JSON.stringify(name)});` : '';
       if (this.writeActions().has(name)) { // backend write -> async, with live .pending / .error
         decls.push(`${exp}const __pending_${name} = signal(false);`, `${exp}const __error_${name} = signal(null);`);
         out.push(`${exp}async function ${name}(${param}) {`);
+        if (announce) out.push('  ' + announce);
         out.push(`  __pending_${name}.set(true); __error_${name}.set(null);`);
         out.push('  try {');
         for (const st of action.body || []) for (const l of this.stmtLines(st, scope, true)) out.push('    ' + l);
@@ -328,6 +332,7 @@ export class Logic {
         out.push('}');
       } else {
         out.push(`${exp}function ${name}(${param}) {`);
+        if (announce) out.push('  ' + announce);
         for (const st of action.body || []) for (const l of this.stmtLines(st, scope)) out.push('  ' + l);
         out.push('}');
       }

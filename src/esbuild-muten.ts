@@ -9,6 +9,7 @@
 import * as esbuild from 'esbuild';
 import { readFileSync, existsSync, mkdirSync, writeFileSync, cpSync, rmSync, readdirSync, statSync, watch } from 'node:fs';
 import { createServer, type ServerResponse } from 'node:http';
+import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
@@ -72,7 +73,7 @@ export async function loadModel(root: string): Promise<Model> {
 // The self-booting entry: shell + route map -> mount. The stylesheet is NOT imported here — CSS is built as a
 // separate artifact (buildCss) so a new class() in a .muten always re-runs Tailwind, instead of esbuild caching
 // an unchanged styles.css and missing it.
-function buildBoot(model: Model): string {
+function buildBoot(model: Model, root: string, dev: boolean): string {
   const { appIr } = model;
   const guardDomains = new Set<string>();
   const seen = new Set<string>();
@@ -89,9 +90,13 @@ function buildBoot(model: Model): string {
     return `  ${path}: { load: ${imp} },`;
   }).join('\n');
   const guardImports = [...guardDomains].map((d) => `import * as __store_${d} from '${STORE_PREFIX}${d}';`).join('\n');
-  return `import * as __shell from '${SHELL}';
+  // dev-only: auto-mount any enabled plugin that declares a `muten.devBoot` export (e.g. @muten/devtools). The
+  // import hoists; the call runs after the app mounts. Never emitted by `muten bundle` -> zero production cost.
+  const devPlugins = dev ? devBootPlugins(root) : [];
+  const bootCode = `import * as __shell from '${SHELL}';
 import { route, injectCss } from '${RID}';
 ${guardImports}
+${devPlugins.map((p) => `import { ${p.fn} as __devboot_${p.name} } from '@muten/${p.name}';`).join('\n')}
 const routes = {
 ${routes}
 };
@@ -100,7 +105,25 @@ if (root) {
   injectCss(__shell.css);
   const outlet = __shell.mount(root);
   route(outlet, routes);
-}`;
+}
+${devPlugins.map((p) => `try { __devboot_${p.name}(); } catch (__e) { console.warn('[muten] dev plugin @muten/${p.name} failed to mount', __e); }`).join('\n')}`;
+  return bootCode;
+}
+
+// installed+enabled plugins (from muten.config `plugins {}`) whose package.json declares `muten.devBoot: "<export>"`.
+function devBootPlugins(root: string): { name: string; fn: string }[] {
+  const plugins = readMutenConfig(root).plugins;
+  if (typeof plugins !== 'object' || plugins === null || Array.isArray(plugins)) return [];
+  const req = createRequire(join(root, 'package.json'));
+  const out: { name: string; fn: string }[] = [];
+  for (const name of Object.keys(plugins)) {
+    try {
+      const pkg = JSON.parse(readFileSync(req.resolve(`@muten/${name}/package.json`), 'utf8'));
+      const fn = pkg && pkg.muten && pkg.muten.devBoot;
+      if (typeof fn === 'string') out.push({ name, fn });
+    } catch { /* not installed / no devBoot */ }
+  }
+  return out;
 }
 
 // An oracle/syntax diagnostic as an esbuild message — `location` carries file:line:col + the source line, so
@@ -238,13 +261,13 @@ export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.P
           const ir = model.slices[domain];
           if (!ir) return { errors: [{ text: `unknown store: ${domain}` }] };
           const imports = (ir.imports || []).map((im) => im.from.startsWith('.') ? { ...im, from: '/' + join('src', im.from).replace(/\\/g, '/') } : im);
-          return { contents: compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports, domain }, ir.mock || {}, ir.sources || {}), loader: 'js', resolveDir: join(root, 'src') };
+          return { contents: compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports, domain, dev }, ir.mock || {}, ir.sources || {}), loader: 'js', resolveDir: join(root, 'src') };
         }
         return { errors: [{ text: `unknown virtual module: ${args.path}` }] };
       });
 
       build.onLoad({ filter: /\.muten$/ }, async (args) => {
-        if (args.path.replace(/\\/g, '/').endsWith('/src/app.muten')) return { contents: buildBoot(model), loader: 'js', resolveDir: join(root, 'src') };
+        if (args.path.replace(/\\/g, '/').endsWith('/src/app.muten')) return { contents: buildBoot(model, root, dev), loader: 'js', resolveDir: join(root, 'src') };
         const out = await compilePage(root, args.path, model, dev);
         return out.errors ? { errors: out.errors } : { contents: out.contents, loader: 'js', resolveDir: dirname(args.path) };
       });
@@ -433,6 +456,16 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
       res.setHeader('Content-Type', 'application/json');
       try { res.end(JSON.stringify(await mapApp(root), null, 2)); }
       catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) })); }
+      return;
+    }
+    if (url === '/__muten_open') { // dev-only: open a .muten file at a line in the user's editor (DevTools "open in editor")
+      const qs = new URLSearchParams((req.url || '').split('?')[1] || '');
+      const rel = qs.get('file') || '', line = qs.get('line') || '1', abs = join(root, rel);
+      res.setHeader('Content-Type', 'application/json');
+      if (rel && !rel.includes('..') && existsSync(abs)) {
+        try { spawn(process.env.MUTEN_EDITOR || 'code', ['-g', `${abs}:${line}`], { shell: true, stdio: 'ignore', detached: true }).unref(); res.end('{"ok":true}'); }
+        catch { res.statusCode = 500; res.end('{"ok":false,"error":"spawn failed"}'); }
+      } else { res.statusCode = 404; res.end('{"ok":false,"error":"not found"}'); }
       return;
     }
     if (lastError) { res.setHeader('Content-Type', 'text/html'); res.end(overlay()); return; }

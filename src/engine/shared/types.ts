@@ -273,6 +273,8 @@ export interface IRNode {
   children?: IRNode[];
   args?: ArgMap;   // unresolved part instance args: Name(arg: value)
   loc?: Loc;
+  fromPart?: string;   // dev: the part this node's subtree was inlined from (DevTools component tree)
+  partArgs?: { [name: string]: string };  // dev: the args the part was called with (Name(a: v)) — DevTools "props"
 }
 
 /** The nested IR the parser produces. Optional members are populated as the grammar encounters them. */
@@ -309,6 +311,8 @@ export interface FlatNode {
   props: NodeProps;
   children: string[];
   loc?: Loc;
+  fromPart?: string;   // dev: source part (DevTools component tree)
+  partArgs?: { [name: string]: string };  // dev: readable part-call args -> DevTools "props"
   args?: ArgMap;  // unresolved part instance args (live-lint path, before compose)
 }
 
@@ -399,6 +403,7 @@ export interface CompileCtx {
   persistScope: string;             // namespace for `persist` localStorage keys (store domain / page screen)
   format?: Fmt;
   ctxRefs?: boolean;                // HMR patch builders: read state/actions/gets/params via the live `ctx` object
+  dev?: boolean;                    // dev builds: actions announce themselves to the DevTools (window.__muten_rt.__dispatch)
 }
 
 /** An editable Form field derived from an entity (excludes the auto uuid id). */
@@ -415,6 +420,7 @@ export interface StoreInput {
   entities?: { [name: string]: Entity };
   imports?: ImportDef[];                          // `use fmt from "./lib.ts"` -> without this, use'd calls in a store have no import (ReferenceError)
   domain?: string;                                // the store's domain (filename) -> namespaces its `persist` localStorage keys so two stores' same-named state don't collide
+  dev?: boolean;                                  // dev build: self-register the store on window.__muten_stores for the DevTools
 }
 
 /** The pre-computed pieces an emit target assembles into the final output (HTML/module/store). */
@@ -440,6 +446,7 @@ export interface EmitParts {
   hasSlot: boolean;
   ctxNames: string[];      // state/action/get/param names exposed as `el.__muten.ctx` for surgical HMR (dev only)
   dev: boolean;            // dev build: emit the HMR node registry + `el.__muten` stash (off in prod bundles)
+  storeDomain?: string;    // for a .store module: its domain, so dev can self-register it on window.__muten_stores
 }
 
 /** The kind of file being analyzed (drives which top-level blocks are allowed). */
@@ -518,7 +525,7 @@ export interface EffectRun { (): void; deps: Set<Set<EffectRun>>; disposed: bool
 /** One mounted node, addressable by id for surgical HMR: its element and the parent it lives under (so a patch
  *  can rebuild + swap it in place). `dispose` is set only by a prior patch — the initial mount's per-node effects
  *  live in the page scope (cleaned on navigation), so a first patch just leaves them on the detached old node. */
-export interface MountedNode { el: Element; parent: Element; dispose?: () => void; }
+export interface MountedNode { el: Element; parent: Element; dispose?: () => void; type?: string; part?: string; partArgs?: { [name: string]: string }; loc?: { line: number; col: number }; }
 export type NodeRegistry = { [id: string]: MountedNode };
 /** The live HMR handle stashed on a mounted page's root element (`el.__muten`): the reactive context (state/
  *  actions as addressable data, so a patch can rebuild a node against the SAME signals) + the node registry. */

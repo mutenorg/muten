@@ -179,7 +179,8 @@ muten build  [dir]           # SSG: pre-render every route to zero-JS HTML (+ ap
 muten check  [dir] [--json]  # parse + validate every page, no compile - the deterministic ORACLE
                              #   --json → structured diagnostics (code + loc + "did you mean…?") in ms, no browser
 muten map    [dir] [--json]  # emit app.map.json COLD (no build) - the app graph an AI reads FIRST
-muten add    <component...>  # copy components from an installed registry plugin (e.g. @muten/shadcn) into src/parts/
+muten add    <name...>       # a PLUGIN (lowercase, e.g. `devtools`) → install @muten/<name> + enable it in muten.config;
+                             #   a COMPONENT (PascalCase, e.g. `Card`) → copy its source from a registry into src/parts/
 ```
 
 `check` and `map` are the AI-first feedback loop: an agent asks the compiler "is this valid, and what
@@ -217,12 +218,20 @@ plugins { shadcn {} }
 
 ## Plugins & component libraries
 
-The core ships **no component library** (the styling core is agnostic). Components come from **plugins**: npm
-packages with a `registry.json` of muten parts. Install one (e.g. `npm i @muten/shadcn`), then either **import**
-its parts via `plugins { shadcn {} }` in `muten.config`, or **eject** them with `muten add <component>` (copies
-the source into `src/parts/`, the shadcn "own the source" model). Custom-backed widgets (sliders, calendars,
-charts) are `muten add`-only, since their host `.js` must live in your `src/components/`. The registry seam is
-part of `@muten/core`; the flagship plugin is [`@muten/shadcn`](https://www.npmjs.com/package/@muten/shadcn).
+The core ships **no component library and no devtools** — both come from **plugins** (npm packages enabled in
+`muten.config`'s `plugins {}` block). There are two kinds, and `muten add` picks the right flow by the name's case:
+
+- **Component registries** (a `registry.json` of muten parts) — e.g. [`@muten/shadcn`](https://www.npmjs.com/package/@muten/shadcn).
+  Either **import** parts as-is (`plugins { shadcn {} }`) or **eject** them with `muten add Card Dialog …` (PascalCase),
+  which copies the source into `src/parts/` (the "own the source" model). Custom-backed widgets (sliders, charts) are
+  `muten add`-only, since their host `.js` lives in your `src/components/`.
+- **Dev-boot plugins** (a `muten.devBoot` export in `package.json`) — e.g.
+  [`@muten/devtools`](https://www.npmjs.com/package/@muten/devtools). `muten dev` **auto-mounts** them (imports the
+  export into the boot); `muten bundle`/`build` never do, so there's **zero production cost**. Add one with
+  `muten add devtools` (lowercase) — it installs the package and enables it in `muten.config` for you.
+
+Both seams are part of `@muten/core`; a plugin is any npm package whose `package.json` declares a registry and/or
+a `muten.devBoot` hook.
 
 ## Programmatic API
 

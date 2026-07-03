@@ -139,6 +139,7 @@ ${parts.getDecls}
 ${parts.actionDecls}
 
 ${parts.effectDecls}
+${parts.dev && parts.storeDomain ? `\nif (typeof window !== 'undefined') (window.__muten_stores = window.__muten_stores || {})[${JSON.stringify(parts.storeDomain)}] = { ${parts.ctxNames.join(', ')} };  // dev: expose this store slice for the DevTools` : ''}
 `;
 }
 

@@ -9,6 +9,14 @@ import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap,
 
 type Parts = { [name: string]: PartDef };
 
+// a readable form of a part-call arg value, for the DevTools "props" view (bare ref / number / "literal" / $param).
+function argToStr(v: ArgValue): string {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number') return String(v);
+  if ('$lit' in v) return JSON.stringify(v.$lit);
+  return '$' + v.$param;
+}
+
 export function compose(tree: IRNode | null, parts: Parts): { tree: IRNode | null; used: string[] } {
   const used = new Set<string>();                      // which parts were instantiated (to hoist their data)
   const out = tree ? composeNode(tree, parts, used) : tree;
@@ -41,7 +49,10 @@ function composeNode(node: IRNode, parts: Parts, used: Set<string>, chain: Set<s
     used.add(node.type);
     const kids = (node.children || []).flatMap((c) => composeChild(c, parts, used, chain, slot)); // the call's children become this part's slot content (forwarding any enclosing slot)
     const inlined = substitute(part.tree, node.args || {});
-    return composeNode(inlined, parts, used, new Set([...chain, node.type]), kids);   // resolve nested parts; the part's `slot` fills with kids
+    const composed = composeNode(inlined, parts, used, new Set([...chain, node.type]), kids);   // resolve nested parts; the part's `slot` fills with kids
+    composed.fromPart = node.type;   // dev: tag the part instance's root so the DevTools tree shows the part name
+    if (node.args && Object.keys(node.args).length) composed.partArgs = Object.fromEntries(Object.entries(node.args).map(([k, v]) => [k, argToStr(v)])); // dev: the "props" the part was called with
+    return composed;
   }
   const out: IRNode = { type: node.type };
   if (node.loc) out.loc = node.loc;   // page's own nodes keep their source position

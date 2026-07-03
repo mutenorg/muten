@@ -14,6 +14,8 @@ function flatten(tree: IRNode): { rootId: string; nodes: { [id: string]: FlatNod
     const id = 'n' + (++counter);
     const entry: FlatNode = { id, type: node.type, props: node.props || {}, children: [] };
     if (node.loc) entry.loc = node.loc;   // source position (needed for inline diagnostics)
+    if (node.fromPart) entry.fromPart = node.fromPart;   // dev: source part for the DevTools tree
+    if (node.partArgs) entry.partArgs = node.partArgs;   // dev: the part-call args -> DevTools "props"
     if (node.args) entry.args = node.args; // unresolved part instance: lets the editor lint before compose
     nodes[id] = entry;                    // parent inserted before children so the map reads top-down
     entry.children = (node.children || []).map(visit);

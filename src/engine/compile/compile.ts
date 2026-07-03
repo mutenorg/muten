@@ -39,7 +39,7 @@ export function compileNodePatch(doc: Doc, nodeId: string, opts: CompileOpts = {
 // Emit one .store domain slice (state + get + actions + effects) as a shared ESM module.
 export function compileStore(input: StoreInput = {}, data: { [name: string]: Value } = {}, sources: { [name: string]: Value } = {}): string {
   const { state = {}, gets = {}, actions = {}, effects = [], entities = {}, imports = [] } = input;
-  return compile({ screen: 'store', entities, state, actions, gets, effects, imports, consts: {}, constraints: {}, rootId: undefined, nodes: {} }, data, '', {}, sources, { format: Fmt.Store, persistScope: input.domain });
+  return compile({ screen: 'store', entities, state, actions, gets, effects, imports, consts: {}, constraints: {}, rootId: undefined, nodes: {} }, data, '', {}, sources, { format: Fmt.Store, persistScope: input.domain, dev: input.dev });
 }
 
 export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectCss = '', components: { [name: string]: string } = {}, sources: { [name: string]: Value } = {}, opts: CompileOpts = {}): string {
@@ -75,7 +75,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const usedStores = new Set<string>();
   const ctx: CompileCtx = {
     state, entities, actions: doc.actions, consts: doc.consts || {}, gets: doc.gets || {}, effects: doc.effects || [],
-    stateKeys, queryStates, stores: opts.stores || {}, usedStores, params: new Set(doc.params || []), storeEntities: opts.storeEntities, persistScope: opts.persistScope ?? screen, format: opts.format, ctxRefs: opts.ctxRefs,
+    stateKeys, queryStates, stores: opts.stores || {}, usedStores, params: new Set(doc.params || []), storeEntities: opts.storeEntities, persistScope: opts.persistScope ?? screen, format: opts.format, ctxRefs: opts.ctxRefs, dev: !!opts.dev,
   };
   const logic = new Logic(ctx);
   const pageScope: Scope = { locals: new Set() }; // page-level scope for interpolation, when/each
@@ -138,7 +138,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   // element primitive at once (no per-type code). Dev/patch only; prod bundles + SSR/static/store omit it (dead there).
   const appendEl = (id: string, parentVar: string): void => {
     lines.push(`${parentVar}.appendChild(el_${id});`);
-    if (opts.dev || opts.format === Fmt.Patch) lines.push(`__nodes[${JSON.stringify(id)}] = { el: el_${id}, parent: ${parentVar} };`);
+    if (opts.dev || opts.format === Fmt.Patch) { const ty = nodes[id]?.type, fp = nodes[id]?.fromPart, pa = nodes[id]?.partArgs, lc = nodes[id]?.loc; lines.push(`__nodes[${JSON.stringify(id)}] = { el: el_${id}, parent: ${parentVar}${ty ? `, type: ${JSON.stringify(ty)}` : ''}${fp ? `, part: ${JSON.stringify(fp)}` : ''}${pa ? `, partArgs: ${JSON.stringify(pa)}` : ''}${lc ? `, loc: ${JSON.stringify({ line: lc.line, col: lc.col })}` : ''} };`); }
   };
 
   // text-bearing primitives (Text/Span/Title): plain string or a (possibly reactive) interpolation.
@@ -621,6 +621,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     screen, projectCss, data, sources, api: opts.api || {}, meta, queryUuids,
     stateDecls, paramDecls, actionDecls, getDecls, effectDecls, componentDecls, storeImports, storeDecls: opts.storeCode || '', externImports,
     renderBody, staticHtml: staticHtml ?? '', hasSlot, ctxNames, dev: !!opts.dev,
+    storeDomain: opts.format === Fmt.Store ? opts.persistScope : undefined,
   };
   const out = opts.format === Fmt.Patch ? emitPatch(parts, opts.patchRoot ?? '')   // HMR: one node's subtree as a (ctx, nodes, parent) builder
     : opts.format === Fmt.Store ? emitStore(parts)
