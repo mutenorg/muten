@@ -23,7 +23,7 @@ export type Source = string | { url: string; method?: string; headers?: { [k: st
 /** A manifest prop's type hint (`"?"` marks optional) — the vocabulary the linter shows. */
 export type PropHint =
   | 'text' | 'text?' | 'state' | 'action' | 'action?' | 'expr' | 'expr?'
-  | 'fields' | 'route' | 'name' | 'map?' | 'clauses?' | 'ident';
+  | 'fields' | 'route' | 'name' | 'map?' | 'clauses?' | 'ident' | 'ident?' | 'idents';
 
 /** A primitive's manifest entry: its vocabulary + docs (the single source the linter reads).
  *  `string` = positional prop; `props` = each prop's type hint; `children` = accepts `{ }`;
@@ -75,7 +75,7 @@ export interface TernExpr { kind: Ek.Tern; cond: Expr; then: Expr; else: Expr; }
 /** A call to a `use`'d JS function: `fmt(date, "…")`. `fn` is the imported name; never a muten primitive. */
 export interface CallExpr { kind: Ek.Call; fn: string; args: Expr[]; }
 export interface ObjExpr { kind: Ek.Obj; fields: Array<{ key: string; value: Expr }>; } // inline object literal, e.g. `{ title: @draft.title, qty: 1 }`
-export interface AggExpr { kind: Ek.Agg; op: string; list: string; body: Expr; } // e.g. `lines.sum by price * qty` (item-implicit: fields read bare off the row)
+export interface AggExpr { kind: Ek.Agg; op: string; list: string; body: Expr; member?: string; } // e.g. `lines.sum by price * qty` (item-implicit). `member` = the field read off an `at(n)` element (`matches.at(hi).name`).
 export interface FilterExpr { kind: Ek.Filter; list: string; cond: Expr; } // derived list, e.g. `tasks where status == "todo"` (item-implicit)
 export type Expr = LitExpr | RefExpr | UnExpr | BinExpr | TernExpr | CallExpr | ObjExpr | AggExpr | FilterExpr;
 
@@ -254,15 +254,30 @@ export interface NodeProps {
   // modifiers
   where?: string[];
   columns?: string[];
+  options?: string[];   // Select options(a, b, c) — the fixed value list of a standalone dropdown
+  kind?: string;        // Chart mark: bar | line | area | point
+  color?: string;       // Chart color/series encoding — a field to split series by (optional)
+  // geometry: x/y are SHARED — a Chart reads them as field refs (bare ref → field name); an SVG mark as
+  // coordinate EXPRESSIONS (reactive). The rest are SVG-mark-only. All numeric attrs are `Expr`.
+  x?: Expr; y?: Expr; w?: Expr; h?: Expr; cx?: Expr; cy?: Expr; r?: Expr; x1?: Expr; y1?: Expr; x2?: Expr; y2?: Expr; rx?: Expr;
+  start?: Expr; end?: Expr; inner?: Expr;   // Arc: sweep start→end (degrees), inner radius (donut)
+  viewBox?: string;              // Svg viewBox ("0 0 W H")
+  d?: string | Interp;           // Path data ("M{x},{y} L…") — interpolated
+  transform?: string | Interp;   // Group / mark transform
   class?: Array<string | ClassCond | ClassInterp>;   // static classes, reactive toggles (`active when isOpen`), interpolated tokens (`status-{x}`)
   inputs?: ArgMap;
   on?: ArgMap;
   aria?: { [key: string]: Expr };   // aria(label: "Close", expanded: isOpen) → aria-*/role attrs; reactive when the value reads state
   styleVars?: { [name: string]: string | Interp };   // style(w: "{pct}%") → sets CSS custom property `--w` (reactive when interpolated); CSS reads it via var(--w)
+  disabled?: Expr;   // `disabled when <cond>` → reactive `el.disabled` on Button/inputs (bare `disabled` = always). A literal is set once; a state-reading cond is wrapped in an effect.
+  draggable?: Expr;  // `draggable(item.id)` → el.draggable + dragstart carrying the id (HTML5 DnD); the drop target reads it
+  dropGroup?: string; // `droptarget("done")` → a drop zone; `on(drop: move)` fires move(draggedId, "done")
   // control flow (When/Each)
   cond?: Expr;
   list?: Expr;
   as?: string;
+  min?: Expr; max?: Expr; step?: Expr;  // Number/Range numeric bounds + increment (each one number expression, static or a state)
+  index?: string;  // `each x as item, i` -> `i` is the item's 0-based position (a reactive number, updates on reorder)
   filter?: Expr;  // `each x as i where <cond>` -> render only matching items (avoids the each+when nesting leak)
 }
 
@@ -375,7 +390,7 @@ export interface CompileOpts {
   stores?: { [domain: string]: StoreSlice };
   storeCode?: string;                // standalone build only: `.store` slices inlined (CLI SSG has no virtual modules -> `muten build` bakes them into the page)
   api?: { [name: string]: Value };   // app-wide backend config (base + default headers) applied to `sources`
-  iconResolver?: (ref: string) => string;  // `Icon "set:name"` -> inline SVG, resolved at build (Iconify). Provided by the vite plugin; absent in unit/SSG -> Icon renders empty.
+  iconResolver?: (ref: string) => string;  // `Icon "set:name"` -> inline SVG, resolved at build (Iconify). Provided by the runner; absent in unit/SSG -> Icon renders empty.
   storeEntities?: { [domainDotMember: string]: Entity };  // element entity of each store list, so a page aggregate over a store list emits the right item fields
   persistScope?: string;            // namespaces `persist` keys (a store's domain / a page's screen) so two scopes' same-named state don't share one localStorage key
   classes?: { [slot: string]: string };  // styling-plugin class map: a primitive's internal parts (Form's input/label/submit/…) emit these instead of the default `mu-*` — so a library (DaisyUI) restyles the auto-generated bits with NO bridge CSS, while the engine stays agnostic (ships only the `mu-*` defaults)
@@ -475,6 +490,7 @@ export interface ValidateCtx {
 export interface Scope {
   locals: Set<string>;
   sigLocals?: Set<string>;   // keyed-each row vars backed by a per-row signal -> refs compile to `<v>.get()` so bindings stay live
+  itemBinds?: { [rowVar: string]: string };   // each row var -> the settable source list state, so `bind(row.field)` writes back a patch (inline-editable list items)
   input?: string;
   inputIsState?: boolean;
   item?: { var: string; fields: Set<string> };  // `<list> where <cond>` filter: bare field refs resolve to `<var>.<field>` (item-implicit)
@@ -537,13 +553,11 @@ export interface RouteDef { load(): Promise<PageModule>; guard?: () => boolean; 
 
 // ── 14. Build / plugin shapes ────────────────────────────────────────────────
 
-/** Options for the Vite plugin: store auto-detection on/off + an optional inline theme. */
-/** A muten STYLING PLUGIN, connected via `muten({ styling })` — the seam for library-specific behavior.
+/** A muten STYLING PLUGIN (the seam for library-specific behavior), configured via muten.config `styling`.
  *  The engine ships NONE and expects no library; a plugin provides how to emit the theme (a ThemeAdapter,
  *  data) and optionally how to validate class() (e.g. via that library's own tooling). */
 export type ClassValidatorLoader = (cssPath: string, base: string, themeRaw: ThemeRaw) => Promise<ClassValidator>;
 export interface StylingPlugin { theme?: ThemeAdapter; validate?: ClassValidatorLoader; classes?: { [slot: string]: string }; }
-export interface MutenOptions { store?: boolean; theme?: { [scale: string]: ThemeScale }; styling?: StylingPlugin; }
 
 /** The app graph the build emits to app.map.json (+ serves live at /_muten/graph): the root the AI reads. */
 export interface AppMap {

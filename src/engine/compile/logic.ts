@@ -36,10 +36,40 @@ export class Logic {
   // validate has already guaranteed the bind exists.
   bindSig(ref: string | undefined): string {
     if (typeof ref !== 'string') return '';
-    if (ref.startsWith('@')) return ref.slice(1);
-    const [domain, field] = ref.split('.');
-    if (field && this.ctx.stores[domain]) { this.ctx.usedStores.add(domain); return `__store_${domain}.${field}`; }
-    return ref;
+    const bare = ref.startsWith('@') ? ref.slice(1) : ref; // `@rows` and `rows` bind the same signal
+    const [domain, field] = bare.split('.');
+    if (field && this.ctx.stores[domain]) { this.ctx.usedStores.add(domain); return `__store_${domain}.${field}`; } // `@orders.items` / `orders.items` -> the store's exported signal
+    return bare;
+  }
+
+  // `bind(row.field)` where `row` is a keyed-each row var: the input two-way-binds to a list element.
+  // Reads the row signal; writes by patching the source list state (inline-editable list items / dynamic
+  // forms). null for a normal state/store bind. `src` is undefined when the each iterates a non-settable
+  // list (a query / derived list) -> the binding is read-only (no write-back).
+  private itemBind(ref: string | undefined, scope: Scope): { row: string; field: string; src?: string } | null {
+    if (typeof ref !== 'string' || !scope.sigLocals) return null;
+    const [row, field] = ref.replace(/^@/, '').split('.');
+    if (!field || !scope.sigLocals.has(row)) return null;
+    return { row, field, src: scope.itemBinds?.[row] };
+  }
+
+  // JS expression reading the current bound value (state / store field / each-item field).
+  bindRead(ref: string | undefined, scope: Scope): string {
+    const it = this.itemBind(ref, scope);
+    if (it) return `${it.row}.get()[${JSON.stringify(it.field)}]`;
+    return `${this.bindSig(ref)}.get()`;
+  }
+
+  // JS statement persisting `valJs` to the bound target. '' when the bind is read-only (each-item over a
+  // non-settable list) — the caller then marks the control read-only rather than wiring a dead listener.
+  bindWrite(ref: string | undefined, scope: Scope, valJs: string): string {
+    const it = this.itemBind(ref, scope);
+    if (it) {
+      if (!it.src) return '';
+      const s = this.cx(it.src);   // patch the matching element immutably so the keyed `each` reconciles just that row
+      return `${s}.set((${s}.get() || []).map((__r) => __r && __r.id === ${it.row}.get().id ? { ...__r, [${JSON.stringify(it.field)}]: ${valJs} } : __r))`;
+    }
+    return `${this.bindSig(ref)}.set(${valJs})`;
   }
 
   // uuid fields of an entity: auto-filled whenever an item is pushed onto a list<Entity>.
@@ -92,6 +122,9 @@ export class Logic {
       const member = rest[0];
       const more = rest.length > 1 ? '.' + rest.slice(1).join('.') : '';
       if (this.inStore(head, member, 'state') || this.inStore(head, member, 'gets')) { this.ctx.usedStores.add(head); return `__store_${head}.${member}.get()${more}`; }
+      // a store WRITE action's live status: `orders.place.pending` / `.error` -> the store's exported __pending_/__error_
+      // signal. Without this the ref fell through to a bare `orders` (undefined at runtime — a documented-but-crashing pattern).
+      if ((rest[1] === 'pending' || rest[1] === 'error') && this.inStore(head, member, 'actions')) { this.ctx.usedStores.add(head); return `__store_${head}.${rest[1] === 'pending' ? '__pending_' : '__error_'}${member}.get()`; }
     }
     if (this.ctx.consts[head] !== undefined) return JSON.stringify(rest.length ? null : this.ctx.consts[head]); // scalar const: inlined
     if (this.writeActions().has(head) && (rest[0] === 'pending' || rest[0] === 'error')) { // write action's live status
@@ -111,6 +144,7 @@ export class Logic {
     if (node.kind === Ek.Agg) { // `list.sum by expr` / `list.count where cond` -> reduce/filter; item fields read bare off `__it`
       const list = `(${this.resolveRef(node.list, scope)} ?? [])`;
       if (node.op === 'take') return `[...${list}].slice(0, ${this.compileExpr(node.body, scope)})`; // `list.take(n)` -> first n items (the count reads no item fields)
+      if (node.op === 'at') return `(${list}).at(${this.compileExpr(node.body, scope)})${node.member ? '?.' + node.member : ''}`; // `list.at(n)[.field]` -> the element at n (out of range -> undefined; `?.` keeps a field read safe)
       const body = this.compileExpr(node.body, { ...scope, item: { var: '__it', fields: this.itemFields(node.list) } });
       if (node.op === 'sort' || node.op === 'sortDesc') { // sort a copy by projected key (no mutation of the source signal)
         const dir = node.op === 'sortDesc' ? -1 : 1;

@@ -172,6 +172,16 @@ export class Grammar {
       this.eat(Tk.Punct, Pn.ParenR);
       return { kind: Ek.Agg, op: 'take', list: name.slice(0, dot), body: n };
     }
+    // `list.at(n)` -> the element at position n (the dual of `each … , i`): read the highlighted/selected item
+    // out of a list by index. Negative indexes count from the end (`.at(-1)` = last); out of range = null.
+    if (op === 'at' && this.at(Tk.Punct, Pn.ParenL)) {
+      this.next();
+      const n = this.parseExpr();
+      this.eat(Tk.Punct, Pn.ParenR);
+      let member = ''; // a field read off the element: `matches.at(hi).name` -> member = "name" (dotted for nesting)
+      while (this.at(Tk.Punct, Pn.Dot)) { this.next(); member += (member ? '.' : '') + this.eat(Tk.Ident).v; }
+      return { kind: Ek.Agg, op: 'at', list: name.slice(0, dot), body: n, member: member || undefined };
+    }
     // Lambda-free aggregate: `lines.sum by price * qty` (projection) or
     // `tasks.count where not done` (predicate). Item fields are read bare (item-implicit).
     if (isAgg && (this.at(Tk.Ident, Kw.By) || this.at(Tk.Ident, Kw.Where))) {

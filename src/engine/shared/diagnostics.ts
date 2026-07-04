@@ -1,7 +1,7 @@
 // diagnostics: structured error/suggestion types for the compile pipeline.
 // Knows the whole vocabulary (types, tokens, state, ops), so errors are specific and
 // propose the closest candidate. Shaped for editors (squiggles) and AI (auto-fix).
-// Consumed by validate, the linter, `muten lint`, and Vite.
+// Consumed by validate, the linter, `muten lint`, and the runner.
 
 import type { Loc, Diagnostic, DiagOpts } from '#engine/shared/types.js';
 

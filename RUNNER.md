@@ -4,9 +4,10 @@
 > the oracle). What's left is the generic web plumbing - and we don't reinvent that, we **embed esbuild** and
 > add the muten intelligence on top. This doc maps what it entails, the problems, and a plan.
 >
-> **Shipped - Phase 1 done (2026-06-29):** Vite is replaced by **esbuild as a library** (`engine`-driven, in
-> `src/esbuild-muten.ts`). `muten dev` (own HTTP server + esbuild incremental + SSE full-reload) and
-> `muten bundle` (esbuild build → per-route chunks + CSS) are the **default**; `--vite` is the legacy fallback.
+> **Shipped - Phase 1 done (2026-06-29); Vite fully removed (2026-07-03):** Vite is replaced by **esbuild as a
+> library** (`engine`-driven, in `src/esbuild-muten.ts`) — now the ONLY runner. `muten dev` (own HTTP server +
+> esbuild incremental + surgical HMR) and `muten bundle` (esbuild build → per-route chunks + CSS). The Vite
+> plugin, the `--vite` fallback, the `vite` dep and the `./vite-plugin-muten.js` export are all deleted.
 > The muten plugin logic (compile + oracle + virtual modules + `~/`/`/src/` roots + theme + Tailwind) is wired
 > to esbuild's `onResolve`/`onLoad`; the TS compiler stays the single source of truth. **Tailwind v4** runs
 > in-process via `@tailwindcss/node` + `@tailwindcss/oxide` (resolved from the app, scanning `.muten` for
@@ -16,8 +17,8 @@
 > CSS is built as its own artifact (sass → theme → Tailwind), outside esbuild's graph, so a new `class()` in a
 > `.muten` always re-runs Tailwind's scan in dev. **CSS, SCSS (via `sass`), and Tailwind v4 all work**; bundle
 > emits per-route chunks + source maps + content-hashed CSS. Verified end-to-end (headless render) on plain
-> CSS, SCSS, and the Tailwind site, dev + bundle. `--vite` remains only for custom Vite/PostCSS plugins. The
-> esbuild bundle is CSR (the zero-JS SSR/prerender path stays in `muten build`, the SSG - unchanged).
+> CSS, SCSS, and the Tailwind site, dev + bundle. The esbuild bundle is CSR (the zero-JS SSR/prerender path
+> stays in `muten build`, the SSG - unchanged).
 >
 > Before this: the config moved to `muten.config` (muten syntax; `styling {}` = the theme adapter) and the app
 > stopped shipping `vite.config`.

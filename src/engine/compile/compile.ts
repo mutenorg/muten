@@ -20,7 +20,7 @@ import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, e
 import { inlineSourceMap } from '#engine/compile/sourcemap.js';
 import { Logic } from '#engine/compile/logic.js';
 import type {
-  Doc, NodeProps, Scope, Interp, StringPropValue, Value,
+  Doc, NodeProps, Scope, Interp, StringPropValue, Value, Expr,
   CompileOpts, CompileCtx, EditableField, FieldConstraint, StoreInput, EmitParts,
 } from '#engine/shared/types.js';
 
@@ -95,11 +95,20 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       const toggles = c.name.trim().split(/\s+/).map((t) => `el_${id}.classList.toggle(${JSON.stringify(t)}, __on);`).join(' ');
       lines.push(`effect(() => { const __on = !!(${logic.compileExpr(c.cond, pageScope)}); ${toggles} });`);
     }
+    // on(event: action): table-driven event PAYLOAD → the natural scalar flows to the action (value / key). An
+    // action that takes no arg simply ignores it. `drop` is the drag-pack target (fires action(draggedId, group)).
+    const EVENT_ARG: { readonly [event: string]: string } = { input: 'e.target.value', change: 'e.target.value', keydown: 'e.key', keyup: 'e.key', keypress: 'e.key' };
     for (const [event, act] of Object.entries(p.on || {})) {
       if (typeof act !== 'string') continue;
       if (event === 'enter') lines.push(`el_${id}.addEventListener('keydown', (e) => { if (e.key === 'Enter') ${logic.actionRef(act)}(); });`); // synthetic: Enter key only
-      else lines.push(`el_${id}.addEventListener(${JSON.stringify(event)}, () => ${logic.actionRef(act)}());`);
+      else if (event === 'drop') { // register a pointer-DnD drop zone (innermost-wins collision → nested-safe)
+        const grp = typeof p.dropGroup === 'string' ? ', ' + JSON.stringify(p.dropGroup) : '';
+        lines.push(`__drop(el_${id}, ${JSON.stringify(p.dropGroup || '')}, (__dragId) => ${logic.actionRef(act)}(__dragId${grp}));`);
+      }
+      else lines.push(`el_${id}.addEventListener(${JSON.stringify(event)}, (e) => ${logic.actionRef(act)}(${EVENT_ARG[event] || ''}));`);
     }
+    // draggable(<id>): a pointer-DnD source — a styled clone tracks the pointer; the id is read live at grab time.
+    if (p.draggable !== undefined) lines.push(`__drag(el_${id}, () => String(${logic.compileExpr(p.draggable, pageScope)}));`);
     // aria(...) — author-expressed accessibility: `key` → `aria-<key>` (`role` → `role`). A literal value is a
     // static attribute; a value that reads state is wrapped in an effect, so e.g. `aria(expanded: open)` stays in sync.
     for (const [key, expr] of Object.entries(p.aria || {})) {
@@ -107,6 +116,13 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       const val = logic.compileExpr(expr, pageScope);
       if (expr.kind === Ek.Lit) lines.push(`el_${id}.setAttribute(${JSON.stringify(attr)}, String(${val}));`);
       else lines.push(`effect(() => el_${id}.setAttribute(${JSON.stringify(attr)}, String(${val})));`);
+    }
+    // disabled: `disabled when <cond>` → `el.disabled`. A literal (bare `disabled`) sets it once; a cond that
+    // reads state is wrapped in an effect so the control enables/disables live (the "disable until valid" gate).
+    if (p.disabled !== undefined) {
+      const js = logic.compileExpr(p.disabled, pageScope);
+      if (p.disabled.kind === Ek.Lit) lines.push(`el_${id}.disabled = ${js};`);
+      else lines.push(`effect(() => { el_${id}.disabled = !!(${js}); });`);
     }
     // style(name: "..") → CSS custom property `--name`, reactive when the value interpolates state. Bounded to
     // CSS variables only (muten prepends `--`), so it never competes with class()/Tailwind; CSS reads var(--name).
@@ -153,6 +169,19 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     }
     appendEl(id, parentVar);
   }
+
+  // SVG geometry: set a numeric attribute from an expression. Reactive (an effect) unless it's a literal.
+  const genGeo = (id: string, attr: string, expr: Expr | undefined): void => {
+    if (expr === undefined) return;
+    const js = logic.compileExpr(expr, pageScope);
+    lines.push(expr.kind === Ek.Lit ? `el_${id}.setAttribute(${JSON.stringify(attr)}, ${js});` : `effect(() => el_${id}.setAttribute(${JSON.stringify(attr)}, ${js}));`);
+  };
+  // SVG string attribute (viewBox / d / transform) from a plain or interpolated string, via setAttribute.
+  const genSvgStr = (id: string, attr: string, value: StringPropValue | undefined): void => {
+    if (value === undefined) return;
+    if (typeof value === 'string') { lines.push(`el_${id}.setAttribute(${JSON.stringify(attr)}, ${JSON.stringify(value)});`); return; }
+    if ('kind' in value) { const concat = interpConcat(value); const reactive = value.parts.some((part) => typeof part !== 'string'); lines.push(reactive ? `effect(() => el_${id}.setAttribute(${JSON.stringify(attr)}, ${concat}));` : `el_${id}.setAttribute(${JSON.stringify(attr)}, ${concat});`); }
+  };
 
   // set an attribute from a plain string or a (possibly reactive) interpolation (Image src/alt, labels)
   function genInterpAttr(id: string, attr: string, value: StringPropValue | undefined): void {
@@ -212,16 +241,169 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       }
 
       case Nt.SearchField: {
-        const sig = logic.bindSig(p.bind);
+        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
         lines.push(`const el_${id} = document.createElement('input');`);
         lines.push(`el_${id}.type = 'search';`);
         lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Search')});`); // a11y: an accessible name (a placeholder is not one)
         lines.push(`el_${id}.className = ${JSON.stringify(classFor('search', p))};`);
         genInterpAttr(id, 'placeholder', p.placeholder); // static OR interpolated ("Message #{channel}" stays reactive)
-        lines.push(`effect(() => { if (el_${id}.value !== ${sig}.get()) el_${id}.value = ${sig}.get(); });`); // two-way: state->input so `.reset()` clears the box; guarded to avoid yanking the caret
-        lines.push(`el_${id}.addEventListener('input', (e) => ${sig}.set(e.target.value));`);
+        lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // two-way: state->input so `.reset()` clears the box; guarded to avoid yanking the caret
+        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
         genDynamics(id, p); // wire on(enter: send) / on(...) + conditional class on the input
         appendEl(id, parentVar);
+        break;
+      }
+
+      case Nt.Password: { // standalone masked input, two-way bound to a text state (same wiring as SearchField, type=password)
+        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
+        lines.push(`const el_${id} = document.createElement('input');`);
+        lines.push(`el_${id}.type = 'password';`);
+        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Password')});`); // a11y: an accessible name (a placeholder is not one)
+        lines.push(`el_${id}.className = ${JSON.stringify(classFor('password', p))};`);
+        genInterpAttr(id, 'placeholder', p.placeholder);
+        lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // state -> input (so .reset() clears), caret-safe
+        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
+        genDynamics(id, p);
+        appendEl(id, parentVar);
+        break;
+      }
+
+      case Nt.Select: { // standalone dropdown, two-way bound to a text state; options() is the fixed value list
+        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
+        lines.push(`const el_${id} = document.createElement('select');`);
+        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Select')});`);
+        lines.push(`el_${id}.className = ${JSON.stringify(classFor('select', p))};`);
+        if (typeof p.placeholder === 'string' && p.placeholder) lines.push(`{ const o = document.createElement('option'); o.value = ''; o.textContent = ${JSON.stringify(p.placeholder)}; o.disabled = true; el_${id}.appendChild(o); }`); // non-selectable prompt while empty
+        for (const opt of p.options || []) lines.push(`{ const o = document.createElement('option'); o.value = ${JSON.stringify(opt)}; o.textContent = ${JSON.stringify(opt)}; el_${id}.appendChild(o); }`);
+        lines.push(`effect(() => { const __v = ${readJS}; if (el_${id}.value !== __v) el_${id}.value = __v; });`);
+        if (writeJS) lines.push(`el_${id}.addEventListener('change', (e) => ${writeJS});`); else lines.push(`el_${id}.disabled = true;`);
+        genDynamics(id, p);
+        appendEl(id, parentVar);
+        break;
+      }
+
+      case Nt.Checkbox: { // bool-bound checkbox wrapped in a <label> (clickable text + a11y). `disabled` targets the inner input.
+        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.checked');
+        lines.push(`const el_${id} = document.createElement('label');`);
+        lines.push(`el_${id}.className = ${JSON.stringify(classFor('checkbox', p))};`);
+        lines.push(`const cb_${id} = document.createElement('input'); cb_${id}.type = 'checkbox';`);
+        lines.push(`effect(() => { cb_${id}.checked = !!${readJS}; });`);
+        if (writeJS) lines.push(`cb_${id}.addEventListener('change', (e) => ${writeJS});`); else lines.push(`cb_${id}.disabled = true;`);
+        lines.push(`el_${id}.appendChild(cb_${id});`);
+        if (p.label !== undefined) genTextEl(id + 'l', 'span', 'mu-checkbox-label', p.label, `el_${id}`);
+        if (p.disabled !== undefined) { // the <label> can't be disabled — target the control
+          const js = logic.compileExpr(p.disabled, pageScope);
+          lines.push(p.disabled.kind === Ek.Lit ? `cb_${id}.disabled = ${js};` : `effect(() => { cb_${id}.disabled = !!(${js}); });`);
+        }
+        genDynamics(id, { ...p, disabled: undefined }); // class/aria/on on the label; disabled handled above
+        appendEl(id, parentVar);
+        break;
+      }
+
+      case Nt.Date: { // native date picker (<input type=date>), two-way bound to a date/text state (ISO string)
+        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
+        lines.push(`const el_${id} = document.createElement('input');`);
+        lines.push(`el_${id}.type = 'date';`);
+        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Date')});`);
+        lines.push(`el_${id}.className = ${JSON.stringify(classFor('date', p))};`);
+        lines.push(`effect(() => { const __v = String(${readJS} ?? ''); if (el_${id}.value !== __v) el_${id}.value = __v; });`);
+        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
+        genDynamics(id, p);
+        appendEl(id, parentVar);
+        break;
+      }
+
+      case Nt.Number:
+      case Nt.Range: { // numeric input two-way bound to a NUMBER state; Range = a slider. Value coerced with Number().
+        const isRange = nodes[id].type === Nt.Range;
+        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'Number(e.target.value)');
+        lines.push(`const el_${id} = document.createElement('input');`);
+        lines.push(`el_${id}.type = ${JSON.stringify(isRange ? 'range' : 'number')};`);
+        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : (isRange ? 'Range' : 'Number'))});`);
+        lines.push(`el_${id}.className = ${JSON.stringify(classFor(isRange ? 'range' : 'number', p))};`);
+        if (!isRange) genInterpAttr(id, 'placeholder', p.placeholder);
+        for (const [attr, ex] of [['min', p.min], ['max', p.max], ['step', p.step]] as const) { // static literal OR reactive (a state-driven bound)
+          if (ex === undefined) continue;
+          const js = logic.compileExpr(ex, pageScope);
+          lines.push(ex.kind === Ek.Lit ? `el_${id}.setAttribute(${JSON.stringify(attr)}, ${js});` : `effect(() => { el_${id}.setAttribute(${JSON.stringify(attr)}, ${js}); });`);
+        }
+        lines.push(`effect(() => { const __v = String(${readJS} ?? ''); if (el_${id}.value !== __v) el_${id}.value = __v; });`); // state -> input, caret-safe
+        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
+        genDynamics(id, p); // class/aria/on + disabled
+        appendEl(id, parentVar);
+        break;
+      }
+
+      case Nt.Chart: { // native dataviz -> a <figure> wrapping a <svg> (+ optional title/legend), redrawn by __chart. No JS, no VDOM.
+        const dataSig = logic.bindSig(p.data);
+        const dataExpr = queryStates.has(dataSig) ? `${dataSig}.get().data` : `${dataSig}.get()`;
+        declEl(id, 'figure', classFor('chart-wrap', p)); // the wrapper carries class() + sizing; mu-chart-wrap base
+        if (p.label !== undefined) genTextEl(id + 't', 'figcaption', 'mu-chart-title', p.label, `el_${id}`); // optional title (static or interpolated)
+        lines.push(`const svg_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'svg');`);
+        lines.push(`svg_${id}.setAttribute('viewBox', '0 0 320 200'); svg_${id}.setAttribute('class', 'mu-chart'); svg_${id}.setAttribute('role', 'img'); el_${id}.appendChild(svg_${id});`);
+        let legendArg = 'null';
+        if (p.color || p.kind === 'pie' || p.kind === 'donut') { lines.push(`const leg_${id} = document.createElement('ul'); leg_${id}.className = 'mu-chart-legend'; el_${id}.appendChild(leg_${id});`); legendArg = `leg_${id}`; } // color(field) or a pie/donut -> a reactive legend
+        appendEl(id, parentVar);
+        const xf = p.x && p.x.kind === Ek.Ref ? p.x.name : '', yf = p.y && p.y.kind === Ek.Ref ? p.y.name : ''; // Chart reads x/y as FIELD refs
+        const enc = `{ x: ${JSON.stringify(xf)}, y: ${JSON.stringify(yf)}, kind: ${JSON.stringify(p.kind || 'bar')}, color: ${JSON.stringify(p.color || '')} }`;
+        lines.push(`effect(() => { __chart(svg_${id}, ${dataExpr}, ${enc}, ${legendArg}); });`); // reactive: redraws marks + legend when the data changes
+        genDynamics(id, p);
+        break;
+      }
+
+      // ── native vector layer: SVG marks. Created via createElementNS; geometry from number expressions
+      // (the `map` built-in scales data → coordinates). Style with class() + CSS. The escape UNDER Chart.
+      case Nt.Svg: {
+        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'svg');`);
+        if (p.viewBox) lines.push(`el_${id}.setAttribute('viewBox', ${JSON.stringify(p.viewBox)});`);
+        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('svg', p))});`);
+        appendEl(id, parentVar); genDynamics(id, p); genChildren(id, `el_${id}`);
+        break;
+      }
+      case Nt.Group: {
+        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'g');`);
+        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('group', p))});`);
+        genSvgStr(id, 'transform', p.transform);
+        appendEl(id, parentVar); genDynamics(id, p); genChildren(id, `el_${id}`);
+        break;
+      }
+      case Nt.Rect: {
+        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'rect');`);
+        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('rect', p))});`);
+        genGeo(id, 'x', p.x); genGeo(id, 'y', p.y); genGeo(id, 'width', p.w); genGeo(id, 'height', p.h); genGeo(id, 'rx', p.rx);
+        genSvgStr(id, 'transform', p.transform);
+        appendEl(id, parentVar); genDynamics(id, p);
+        break;
+      }
+      case Nt.Line: {
+        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'line');`);
+        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('line', p))});`);
+        genGeo(id, 'x1', p.x1); genGeo(id, 'y1', p.y1); genGeo(id, 'x2', p.x2); genGeo(id, 'y2', p.y2);
+        appendEl(id, parentVar); genDynamics(id, p);
+        break;
+      }
+      case Nt.Circle: {
+        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'circle');`);
+        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('circle', p))});`);
+        genGeo(id, 'cx', p.cx); genGeo(id, 'cy', p.cy); genGeo(id, 'r', p.r);
+        appendEl(id, parentVar); genDynamics(id, p);
+        break;
+      }
+      case Nt.Path: {
+        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'path');`);
+        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('path', p))});`);
+        genSvgStr(id, 'd', p.d); genSvgStr(id, 'transform', p.transform);
+        appendEl(id, parentVar); genDynamics(id, p);
+        break;
+      }
+      case Nt.Arc: { // a <path> whose d is computed by __arc(cx,cy,r,from,to,inner) — pie slice / donut segment / gauge
+        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'path');`);
+        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('arc', p))});`);
+        const arcParts = [p.cx, p.cy, p.r, p.start, p.end, p.inner];
+        const arcArgs = arcParts.map((e) => (e ? logic.compileExpr(e, pageScope) : '0')).join(', ');
+        const arcReactive = arcParts.some((e) => e !== undefined && e.kind !== Ek.Lit);
+        lines.push(arcReactive ? `effect(() => el_${id}.setAttribute('d', __arc(${arcArgs})));` : `el_${id}.setAttribute('d', __arc(${arcArgs}));`);
+        appendEl(id, parentVar); genDynamics(id, p);
         break;
       }
 
@@ -444,12 +626,20 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const wrapLi = listItemEach.has(id); // a direct child of a List: each row is its own <li>
         const listJS = logic.compileExpr(p.list, pageScope);
         const filterJS = p.filter ? logic.compileExpr(p.filter, pageScope) : ''; // `where cond`: item var bare inside .filter
-        // the body reads the row through its signal: compile refs as `<as>.get()` (restore scope after)
+        // the body reads the row through its signal: compile refs as `<as>.get()` (restore scope after).
+        // an optional index var (`as item, i`) is a second per-row signal, so `i` also compiles as `i.get()`.
         const prevSig = pageScope.sigLocals;
-        pageScope.sigLocals = new Set([...(prevSig || []), p.as]);
+        pageScope.sigLocals = new Set([...(prevSig || []), p.as, ...(p.index ? [p.index] : [])]);
+        // inline-editable list items: if this each iterates a settable local list state, record it so an input
+        // `bind(<as>.field)` inside the body writes back a patch to that state (see logic.bindWrite).
+        const srcName = p.list.kind === Ek.Ref ? p.list.name.split('.')[0] : '';
+        const settable = !!srcName && stateKeys.has(srcName) && !queryStates.has(srcName);
+        const prevItemBinds = pageScope.itemBinds;
+        pageScope.itemBinds = settable ? { ...(prevItemBinds || {}), [p.as]: srcName } : prevItemBinds;
         const body = capture(() => genChildren(id, '__p'));
         pageScope.sigLocals = prevSig;
-        lines.push(`function buildItem_${id}(__p, ${p.as}) {`); // ${p.as} is the row signal; body refs compiled as ${p.as}.get()
+        pageScope.itemBinds = prevItemBinds;
+        lines.push(`function buildItem_${id}(__p, ${p.as}${p.index ? `, ${p.index}` : ''}) {`); // ${p.as} is the row signal; body refs compiled as ${p.as}.get() (same for the index signal)
         for (const l of body) lines.push('  ' + l);
         lines.push(`}`);
         lines.push(`const start_${id} = document.createComment('each');`);
@@ -465,10 +655,11 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
         lines.push(`    let __e = map_${id}.get(__k);`);
         lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
-        lines.push(`    else { const __sig = signal(__row); const __r = root(() => { const __c = ${wrapLi ? "document.createElement('li')" : 'document.createDocumentFragment()'}; buildItem_${id}(__c, __sig); return ${wrapLi ? '[__c]' : '[...__c.childNodes]'}; }); __e = { sig: __sig, nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
+        lines.push(`    else { const __sig = signal(__row);${p.index ? ' const __ix = signal(0);' : ''} const __r = root(() => { const __c = ${wrapLi ? "document.createElement('li')" : 'document.createDocumentFragment()'}; buildItem_${id}(__c, __sig${p.index ? ', __ix' : ''}); return ${wrapLi ? '[__c]' : '[...__c.childNodes]'}; }); __e = { sig: __sig,${p.index ? ' idx: __ix,' : ''} nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
         lines.push(`    __next.push(__e);`);
         lines.push(`  }`);
         lines.push(`  for (const [__k, __e] of map_${id}) if (!__seen.has(__k)) { __e.dispose(); for (const __n of __e.nodes) __n.remove(); map_${id}.delete(__k); }`);
+        if (p.index) lines.push(`  for (let __i = 0; __i < __next.length; __i++) __next[__i].idx.set(__i);`); // reactive position: reorder/filter reindexes surviving rows
         lines.push(`  __order(anchor_${id}.parentNode, anchor_${id}, __next, order_${id}); order_${id} = __next;`);
         lines.push(`});`);
         break;
@@ -532,7 +723,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   function isStatic(): boolean {
     if (opts.format === Fmt.Store) return false;  // store has no DOM; shell excluded by its `slot` (reactive type)
     if ((doc.params || []).length) return false;  // a param page needs mount(app, params), never the static path
-    const reactiveType = new Set<string>([Nt.When, Nt.Each, Nt.Custom, Nt.Form, Nt.SearchField, Nt.DataTable, Nt.Slot]);
+    const reactiveType = new Set<string>([Nt.When, Nt.Each, Nt.Custom, Nt.Form, Nt.SearchField, Nt.Number, Nt.Range, Nt.Date, Nt.DataTable, Nt.Slot, Nt.Chart, Nt.Svg, Nt.Group, Nt.Rect, Nt.Line, Nt.Circle, Nt.Path, Nt.Arc]);
     const reactiveProp: Array<keyof NodeProps> = ['action', 'bind', 'submit', 'on', 'inputs', 'data'];
     const interpKeys: Array<keyof NodeProps> = ['value', 'src', 'alt', 'label', 'to', 'summary'];
     for (const id of Object.keys(nodes)) {
@@ -540,7 +731,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       if (reactiveType.has(n.type)) return false;
       if (reactiveProp.some((k) => p[k] !== undefined)) return false;
       if ((p.class || []).some((c) => typeof c !== 'string')) return false; // reactive class toggle -> not static
-      if ((p.aria && Object.keys(p.aria).length) || (p.styleVars && Object.keys(p.styleVars).length)) return false; // aria()/style() write attrs/CSS-vars at runtime via genDynamics -> the static HTML path would silently drop them
+      if ((p.aria && Object.keys(p.aria).length) || (p.styleVars && Object.keys(p.styleVars).length) || p.disabled !== undefined || p.draggable !== undefined) return false; // aria()/style()/disabled/draggable write attrs+listeners at runtime via genDynamics -> the static HTML path would silently drop them
       if (interpKeys.some((k) => { const v = p[k]; return !!v && typeof v === 'object' && 'kind' in v && v.kind === Ek.Interp; })) return false;
     }
     return true;

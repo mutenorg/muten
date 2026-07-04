@@ -198,15 +198,15 @@ scripts; `npm run dev` / `npm run build` run them:
 
 - **`muten dev`** - an **in-memory** dev server (no `.muten-dev/` folder) with **surgical HMR**: edit a node's
   text or class and *only that node* re-renders - your counters, inputs and list selection survive, no full
-  reload, no flash. Compile/runtime errors surface Vite-quality (file:line:col + a code frame + "did you
-  mean…?"), in the terminal and as a browser overlay. The oracle runs on every save.
+  reload, no flash. Compile/runtime errors surface with the file:line:col + a code frame + "did you
+  mean…?", in the terminal and as a browser overlay. The oracle runs on every save.
 - **`muten bundle`** - the production CSR build: per-route chunks, content-hashed CSS, **source maps that
   point at your `.muten` lines** (a runtime error shows `page.muten:18`, not `boot-x.js:441`), and a per-route
   **ship-size report** so "minimum by construction" is visible.
 
-The build is configured in **`muten.config`** - written in muten syntax, not JS (it carries the dev port and,
-for Tailwind/DaisyUI, the theme adapter + component classes). A `--vite` flag on `dev`/`bundle` falls back to
-the legacy Vite plugin for an app that needs a custom Vite/PostCSS plugin:
+There is **no Vite, no bundler config** - muten owns the entry and the bundler (embedded esbuild). The build is
+configured entirely in **`muten.config`** - written in muten syntax, not JS (it carries the dev port and, for
+Tailwind/DaisyUI, the theme adapter + component classes):
 
 ```
 # muten.config
@@ -261,8 +261,8 @@ The source is TypeScript under `src/`, organized by **domain**: each has its own
 | [`src/engine/style`](src/engine/style/README.md) | the styling token vocabulary (the engine ships no values) |
 | [`src/engine/project`](src/engine/project/README.md) | filesystem + whole-app awareness (load · analyze · routes · styles) |
 
-The runtime (the only thing shipped to the browser), the runner (`esbuild-muten.ts` - dev + bundle), the
-legacy Vite plugin, the CLI and the build/lint orchestration also live in `src/`. See [`src/engine/README.md`](src/engine/README.md) for the
+The runtime (the only thing shipped to the browser), the runner (`esbuild-muten.ts` - dev + bundle), the CLI
+and the build/lint orchestration also live in `src/`. See [`src/engine/README.md`](src/engine/README.md) for the
 file-level conventions (≤500 lines, honest types, data-table dispatch, no magic strings).
 
 ## Build
@@ -287,7 +287,7 @@ initials). For behavior the primitives can't express, drop to a `Custom` compone
 production system on it yet (small ecosystem, one maintainer, not yet battle-tested).
 
 **Solid today:** the language + compiler, the `dev` / `bundle` / `build` / `check` / `map` CLI + oracle, the
-native runner (embedded esbuild) with **surgical HMR** + Vite-quality errors + source maps, the VS Code
+native runner (embedded esbuild) with **surgical HMR** + typed file:line:col errors + source maps, the VS Code
 extension (live-lint + autocomplete).
 The bounded list toolkit - inline objects, `patch`, `each...where`, aggregates (`sum`/`count`/`avg`/`min`/`max`),
 `sort`/`sortDesc`, and page->store action composition, so a real CRUD/dashboard app is pure muten, no JS escape.

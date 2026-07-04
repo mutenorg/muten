@@ -46,6 +46,28 @@ export class Parser extends Grammar {
       [Mod.Submit, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.submit = this.parseDotted(); if (paren) this.eat(Tk.Punct, Pn.ParenR); }],
       [Mod.Where, (props: NodeProps) => { props.where = this.parseParenList(() => this.rebuildClause()); }],
       [Mod.Columns, (props: NodeProps) => { props.columns = this.parseParenList(() => this.eat(Tk.Ident).v); }],
+      [Mod.Options, (props: NodeProps) => { props.options = this.parseParenList(() => this.eat(Tk.Ident).v); }], // Select options(a, b, c)
+      [Mod.Kind, (props: NodeProps) => { props.kind = this.parenIdent(); }],   // Chart kind(bar) — the mark type
+      [Mod.Color, (props: NodeProps) => { props.color = this.parenIdent(); }], // Chart color(field) — the series encoding
+      // geometry (Chart encodings read x/y as field refs; SVG marks compile them as numbers). `(...)` = one expression.
+      [Mod.X, (props: NodeProps) => { props.x = this.parseExpr(); }],
+      [Mod.Y, (props: NodeProps) => { props.y = this.parseExpr(); }],
+      [Mod.W, (props: NodeProps) => { props.w = this.parseExpr(); }],
+      [Mod.H, (props: NodeProps) => { props.h = this.parseExpr(); }],
+      [Mod.Cx, (props: NodeProps) => { props.cx = this.parseExpr(); }],
+      [Mod.Cy, (props: NodeProps) => { props.cy = this.parseExpr(); }],
+      [Mod.R, (props: NodeProps) => { props.r = this.parseExpr(); }],
+      [Mod.X1, (props: NodeProps) => { props.x1 = this.parseExpr(); }],
+      [Mod.Y1, (props: NodeProps) => { props.y1 = this.parseExpr(); }],
+      [Mod.X2, (props: NodeProps) => { props.x2 = this.parseExpr(); }],
+      [Mod.Y2, (props: NodeProps) => { props.y2 = this.parseExpr(); }],
+      [Mod.Rx, (props: NodeProps) => { props.rx = this.parseExpr(); }],
+      [Mod.Start, (props: NodeProps) => { props.start = this.parseExpr(); }], // Arc sweep start (degrees)
+      [Mod.End, (props: NodeProps) => { props.end = this.parseExpr(); }],     // Arc sweep end (degrees)
+      [Mod.Inner, (props: NodeProps) => { props.inner = this.parseExpr(); }], // Arc inner radius (donut)
+      [Mod.ViewBox, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.viewBox = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // Svg viewBox("0 0 W H")
+      [Mod.D, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); const t = this.eat(Tk.String); props.d = this.parseInterpolation(t.v, t.pos + 1); if (p) this.eat(Tk.Punct, Pn.ParenR); }], // Path d("M{x},{y} …")
+      [Mod.Transform, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); const t = this.eat(Tk.String); props.transform = this.parseInterpolation(t.v, t.pos + 1); if (p) this.eat(Tk.Punct, Pn.ParenR); }], // transform("rotate(45)")
       // a second `class()` appends, never overwrites the first
       [Mod.Class, (props: NodeProps) => { props.class = [...(props.class || []), ...this.parseParenList(() => { // raw classes + `name when cond` + interpolated `"prefix-{x}"`
         if (this.at(Tk.String)) {
@@ -64,6 +86,15 @@ export class Parser extends Grammar {
       [Mod.On, (props: NodeProps) => { props.on = { ...props.on, ...this.parseArgs() }; }],               // Custom on(event: action, ...)
       [Mod.Aria, (props: NodeProps) => { props.aria = { ...props.aria, ...this.parseAriaArgs() }; }],      // aria(label: "Close", expanded: isOpen) -> aria-*/role
       [Mod.Style, (props: NodeProps) => { props.styleVars = { ...props.styleVars, ...this.parseStyleArgs() }; }], // style(w: "{pct}%") -> CSS var --w (the bounded path for dynamic values: progress, transforms)
+      [Mod.Disabled, (props: NodeProps) => { // `disabled when <cond>` -> reactive el.disabled; bare `disabled` = always disabled
+        if (this.at(Tk.Ident, Kw.When)) { this.next(); props.disabled = this.parseExpr(); }
+        else props.disabled = { kind: Ek.Lit, value: true };
+      }],
+      [Mod.Min, (props: NodeProps) => { props.min = this.parseExpr(); }],   // Number/Range min(0) — `(n)` parses as a grouped expression
+      [Mod.Max, (props: NodeProps) => { props.max = this.parseExpr(); }],   // Number/Range max(100)
+      [Mod.Step, (props: NodeProps) => { props.step = this.parseExpr(); }], // Number/Range step(5)
+      [Mod.Draggable, (props: NodeProps) => { props.draggable = this.parseExpr(); }],                 // draggable(item.id) — the id the drop carries
+      [Mod.Droptarget, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.dropGroup = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // droptarget("group")
     ]);
 
     this.statements = new Map([
@@ -423,13 +454,14 @@ export class Parser extends Grammar {
     return { type: Nt.When, props: { cond }, children: this.parseChildren(), loc: this.locOf(head.pos) };
   }
 
-  // `each <list> as <item> { ... }`: list render; `item` is a scope variable inside the block.
+  // `each <list> as <item>[, <i>] { ... }`: list render; `item` (and optional 0-based index `i`) are scope variables.
   private parseEach(): IRNode {
     const head = this.eat(Tk.Ident, Kw.Each);
     const list = this.parseExpr();
     this.eat(Tk.Ident, Kw.As);
     const as = this.eat(Tk.Ident).v;
     const props: NodeProps = { list, as };
+    if (this.at(Tk.Punct, Pn.Comma)) { this.next(); props.index = this.eat(Tk.Ident).v; } // `each x as item, i`: i = the item's 0-based position (reactive)
     if (this.at(Tk.Ident, Kw.Where)) { this.next(); props.filter = this.parseExpr(); } // `each x as i where cond`: render only matching items
     return { type: Nt.Each, props, children: this.parseChildren(), loc: this.locOf(head.pos) };
   }
@@ -458,7 +490,7 @@ export class Parser extends Grammar {
       switch (tok.t) {
         case Tk.String: { const key = STRING_PROP[type] || 'label'; if (props[key] !== undefined) { reading = false; break; } const t = this.next(); props[key] = INTERPOLATES.has(type) ? this.parseInterpolation(t.v, t.pos + 1) : t.v; break; } // a 2nd positional string is NOT a prop — it's the next sibling (e.g. the next `match` arm with a quoted value)
         case Tk.Param: { const key = STRING_PROP[type] || 'label'; props[key] = { $param: this.next().v }; break; } // part param standing in for the string
-        case Tk.Ref: props.data = this.next().v; break;                            // positional @ref = data (DataTable @rows)
+        case Tk.Ref: { let r = this.next().v; while (this.at(Tk.Punct, Pn.Dot)) { this.next(); r += '.' + this.eat(Tk.Ident).v; } props.data = r; break; } // positional @ref = data list: a page state/query/get (`@rows`) OR a store member (`@orders.items`)
         case Tk.Arrow: this.parseArrow(type, props); break;                        // -> "/route" (Link) or -> action(arg)
         case Tk.Ident: {
           const word = tok.v;
@@ -540,6 +572,14 @@ export class Parser extends Grammar {
     let type = this.eat(Tk.Ident).v;
     if (this.at(Tk.Punct, Pn.Lt)) { this.next(); type += '<' + this.eat(Tk.Ident).v + '>'; this.eat(Tk.Punct, Pn.Gt); }
     return type;
+  }
+
+  // `(ident)` — one identifier in parens (Chart kind/x/y/color); bare `ident` also accepted.
+  private parenIdent(): string {
+    const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next();
+    const v = this.eat(Tk.Ident).v;
+    if (paren) this.eat(Tk.Punct, Pn.ParenR);
+    return v;
   }
 
   // IDENT(.IDENT)* -> "cart.total". A `$param` head resolves at compose time.

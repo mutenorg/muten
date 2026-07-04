@@ -63,7 +63,7 @@ predarg     ::= ident ws "=>" ws expr
 
 node       ::= whennode | eachnode | linknode | actionnode | customnode | plainnode
 whennode   ::= "when" sp expr ws block
-eachnode   ::= "each" sp expr sp "as" sp ident ws block
+eachnode   ::= "each" sp expr sp "as" sp ident ("," ws ident)? ws block
 block      ::= "{" ws (node ws)* "}"
 linknode   ::= ${alt(LINK)} (sp (commonpart | "->" ws string))* (ws block)?
 actionnode ::= (${alt(ACTION)}) (sp (commonpart | actionarrow))* (ws block)?
@@ -73,7 +73,15 @@ plainnode  ::= (${alt(PLAIN)}) (sp commonpart)* (ws block)?
 commonpart ::= string | ref | level | modifier
 level      ::= "h" [1-6]
 
-modifier   ::= classmod | bindmod | submitmod | wheremod | columnsmod | altmod | inputsmod | onmod
+modifier   ::= classmod | bindmod | submitmod | wheremod | columnsmod | optionsmod | chartmod | geomod | numattrmod | strattrmod | altmod | inputsmod | onmod | disabledmod | draggablemod | droptargetmod
+numattrmod ::= ("min" | "max" | "step") ws "(" ws expr ws ")"
+disabledmod ::= "disabled" (sp "when" sp expr)?
+draggablemod ::= "draggable" ws "(" ws expr ws ")"
+droptargetmod ::= "droptarget" ws "(" ws string ws ")"
+optionsmod ::= "options" ws "(" ws ident (ws "," ws ident)* ws ")"
+chartmod   ::= ("kind" | "color") ws "(" ws ident ws ")"
+geomod     ::= ("x1" | "y1" | "x2" | "y2" | "cx" | "cy" | "rx" | "start" | "end" | "inner" | "x" | "y" | "w" | "h" | "r") ws "(" ws expr ws ")"
+strattrmod ::= ("viewBox" | "transform" | "d") ws "(" ws string ws ")"
 classmod   ::= "class" ws "(" ws classitem (ws "," ws classitem)* ws ")"
 classitem  ::= (string | ident) (sp "when" sp expr)?
 bindmod    ::= "bind" sp (ref | dotted)

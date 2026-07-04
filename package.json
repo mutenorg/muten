@@ -1,6 +1,6 @@
 {
   "name": "@muten/core",
-  "version": "0.0.35",
+  "version": "0.0.38",
   "description": "AI-first frontend framework - compiles .muten files to vanilla JS + signals.",
   "repository": {
     "type": "git",
@@ -16,8 +16,7 @@
   "main": "./dist/index.js",
   "exports": {
     ".": "./dist/index.js",
-    "./browser.js": "./dist/browser.js",
-    "./vite-plugin-muten.js": "./dist/vite-plugin-muten.js"
+    "./browser.js": "./dist/browser.js"
   },
   "imports": {
     "#engine/*": "./dist/engine/*"
@@ -54,7 +53,6 @@
     "@types/node": "^26.0.0",
     "gbnf": "^0.1.41",
     "typescript": "^6.0.3",
-    "vite": "^8.0.16",
     "@iconify/types": "^2.0.0"
   },
   "dependencies": {

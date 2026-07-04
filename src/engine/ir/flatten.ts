@@ -1,7 +1,7 @@
 // flatten: nested authoring tree -> canonical flat Doc, addressable by id.
 // Assigns each node a deterministic pre-order id (n1, n2, ...). From here on the engine
 // works by id only: the flat Doc is the single shape that is validated, mutated, and compiled.
-// Consumed by compose.ts (composeDoc) and directly by the Vite plugin and CLI.
+// Consumed by compose.ts (composeDoc) and directly by the runner and CLI.
 
 import type { IR, IRNode, FlatNode, Doc } from '#engine/shared/types.js';
 

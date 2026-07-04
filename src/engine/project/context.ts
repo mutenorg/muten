@@ -1,5 +1,5 @@
 // context.ts: the project's store facts that validate AND compile both need, derived from the parsed
-// .store IRs in ONE place. lint, build, and the Vite plugin each assembled this by hand and DRIFTED — the dev
+// .store IRs in ONE place. lint, build, and the runner each assembled this by hand and DRIFTED — the dev
 // overlay even passed validate a weaker context than `check` (missing storeSelfMut + iconExists), so the IDE
 // silently skipped checks the CLI ran. One source, no drift. (This is muten owning one project model, not
 // every consumer re-deriving it — the same principle as the unified resolver in ir/refs.ts.)

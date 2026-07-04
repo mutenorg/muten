@@ -92,10 +92,80 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     doc: 'Search input two-way bound to a text state. The placeholder interpolates: `SearchField bind @draft "Message #{channel}"`.',
     snippet: 'SearchField bind(${1:search}) "${2:Search by name}"',
   },
+  Password: {
+    string: 'placeholder', props: { bind: 'state', placeholder: 'text?' }, children: false, interp: true,
+    doc: 'Masked password input two-way bound to a text state (usable OUTSIDE a Form). Gate the next action reactively: `Password bind(pw) "Password"` + `Button "Next" disabled when pw.length < 8`.',
+    snippet: 'Password bind(${1:pw}) "${2:Password}"',
+  },
+  Select: {
+    string: 'placeholder', props: { bind: 'state', options: 'idents', placeholder: 'text?' }, children: false,
+    doc: 'Dropdown bound to a text state with a fixed option list: `Select bind(role) options(founder, engineer, other) "Pick a role"`. The placeholder is a non-selectable prompt shown while the value is empty.',
+    snippet: 'Select bind(${1:role}) options(${2:a, b, c})',
+  },
+  Checkbox: {
+    string: 'label', props: { bind: 'state', label: 'text?' }, children: false, interp: true,
+    doc: 'Checkbox bound to a bool state, with a clickable label: `Checkbox bind(agree) "I accept the terms"`.',
+    snippet: 'Checkbox bind(${1:agree}) "${2:I accept the terms}"',
+  },
+  Number: {
+    string: 'placeholder', props: { bind: 'state', min: 'expr?', max: 'expr?', step: 'expr?', placeholder: 'text?' }, children: false, interp: true,
+    doc: 'Numeric input two-way bound to a NUMBER state (usable outside a Form): `Number bind(qty) min(1) max(99)`. Optional `min`/`max`/`step` (numbers or a state).',
+    snippet: 'Number bind(${1:qty}) min(${2:1}) max(${3:99})',
+  },
+  Range: {
+    props: { bind: 'state', min: 'expr?', max: 'expr?', step: 'expr?' }, children: false,
+    doc: 'Slider (`<input type=range>`) two-way bound to a NUMBER state: `Range bind(volume) min(0) max(100) step(5)`. Defaults 0..100 step 1. Style the track/thumb with your CSS (accent-color, ::-webkit-slider-thumb).',
+    snippet: 'Range bind(${1:volume}) min(${2:0}) max(${3:100})',
+  },
+  Date: {
+    string: 'placeholder', props: { bind: 'state', placeholder: 'text?' }, children: false, interp: true,
+    doc: 'Native date picker (`<input type=date>`) two-way bound to a date/text state (ISO `YYYY-MM-DD`): `Date bind(due)`. The browser supplies the calendar popup — for a single date this is the whole date picker, no Custom. (A multi-month / range calendar is out of scope: it needs day-range generation.)',
+    snippet: 'Date bind(${1:due})',
+  },
   DataTable: {
     props: { data: 'state', where: 'clauses?', columns: 'fields' }, children: true,
     doc: 'Reactive table over a list/query. Static `where` filters are pushed to the query; dynamic ones stay reactive.',
     snippet: 'DataTable @${1:items}\n\tcolumns(${2:name})',
+  },
+  Chart: {
+    string: 'label', props: { data: 'state', kind: 'ident?', x: 'ident', y: 'ident', color: 'ident?' }, children: false, interp: true,
+    doc: 'Native chart — SVG, zero JS. Declare the data + mark `kind` + `x`/`y` encodings from entity FIELDS; scales, axes and layout are automatic and reactive: `Chart @sales "Revenue by month" kind(bar) x(month) y(revenue)`. The optional string is the title. kind = bar | line | area | point (default bar). `color(field)` colors + adds a legend. Style via CSS: `.mu-chart-bar` / `.mu-chart-line` / `.mu-chart-area` / `.mu-chart-dot` / `.mu-chart-grid` / `.mu-chart-title` / `.mu-chart-legend` (colors read `theme.muten` `--color-*`).',
+    snippet: 'Chart @${1:data} "${2:Title}" kind(${3:bar}) x(${4:label}) y(${5:value})',
+  },
+  Svg: {
+    props: { viewBox: 'text?' }, children: true,
+    doc: 'Native SVG canvas — the vector layer under Chart. Declare marks (Rect/Line/Circle/Path/Group) from data with `each`; coordinates are number expressions (use the `map` built-in for scales). `Svg viewBox("0 0 100 100") { each pts as p { Circle cx(p.x) cy(p.y) r(2) } }`. Style via CSS on your own class().',
+    snippet: 'Svg viewBox("0 0 ${1:100} ${2:100}") {\n\t$0\n}',
+  },
+  Rect: {
+    props: { x: 'expr?', y: 'expr?', w: 'expr?', h: 'expr?', rx: 'expr?' }, children: false,
+    doc: 'SVG rectangle: `Rect x(0) y(map(v,0,max,100,0)) w(20) h(...)`. Coordinates are number expressions. Fill/stroke via class() + CSS.',
+    snippet: 'Rect x(${1:0}) y(${2:0}) w(${3:10}) h(${4:10})',
+  },
+  Line: {
+    props: { x1: 'expr?', y1: 'expr?', x2: 'expr?', y2: 'expr?' }, children: false,
+    doc: 'SVG line between two points: `Line x1(0) y1(0) x2(100) y2(50)`. Stroke via class() + CSS.',
+    snippet: 'Line x1(${1:0}) y1(${2:0}) x2(${3:100}) y2(${4:0})',
+  },
+  Circle: {
+    props: { cx: 'expr?', cy: 'expr?', r: 'expr?' }, children: false,
+    doc: 'SVG circle: `Circle cx(map(p.x,0,mx,0,100)) cy(...) r(3)`. Fill via class() + CSS. The mark for scatter plots.',
+    snippet: 'Circle cx(${1:0}) cy(${2:0}) r(${3:3})',
+  },
+  Path: {
+    props: { d: 'text?' }, children: false,
+    doc: 'SVG path — the `d` string interpolates: `Path d("M0,0 L{w},{h} Z")`. For arbitrary shapes / a computed outline.',
+    snippet: 'Path d("${1:M0,0 L10,10}")',
+  },
+  Group: {
+    props: { transform: 'text?' }, children: true,
+    doc: 'SVG group `<g>` — a transform/organizational wrapper for marks: `Group transform("translate(10,0)") { … }`.',
+    snippet: 'Group {\n\t$0\n}',
+  },
+  Arc: {
+    props: { cx: 'expr?', cy: 'expr?', r: 'expr?', start: 'expr?', end: 'expr?', inner: 'expr?' }, children: false,
+    doc: 'SVG arc/sector — the radial workhorse (pie slice, donut segment, gauge). Sweeps `start`→`end` DEGREES (0 = top, clockwise) at radius `r` around (`cx`,`cy`); `inner(r2)` makes a donut ring. `Arc cx(80) cy(80) r(70) start(0) end(120) inner(40)`. Fill via class() + CSS.',
+    snippet: 'Arc cx(${1:80}) cy(${2:80}) r(${3:70}) start(${4:0}) end(${5:90})',
   },
   RowAction: {
     string: 'label', props: { label: 'text', action: 'action', arg: 'expr?' }, children: false,
@@ -128,8 +198,8 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     snippet: 'when ${1:cond} {\n\t$0\n}',
   },
   Each: {
-    props: { list: 'expr', as: 'ident', filter: 'expr?' }, children: true, control: true,
-    doc: 'List render: `each <list> as <item> { ... }`. Filter with `where`: `each posts as p where p.published { ... }` renders only matching items (no leak). The item is a scope variable in the template.',
+    props: { list: 'expr', as: 'ident', index: 'ident?', filter: 'expr?' }, children: true, control: true,
+    doc: 'List render: `each <list> as <item> { ... }`. Add a 0-based reactive index with a comma: `each <list> as <item>, <i> { ... }` (i = position; rank when sorted). Filter with `where`: `each posts as p where p.published { ... }`. The item (and index) are scope variables.',
     snippet: 'each ${1:items} as ${2:item} {\n\t$0\n}',
   },
   Custom: {
@@ -139,23 +209,30 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
 };
 
-export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'class', 'alt', 'inputs', 'on', 'aria', 'style'];
+export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step'];
 export const MODIFIER_DOCS = {
   bind: 'Two-way bind to a @state, e.g. `bind @search`.',
   submit: 'Action to run on form submit, e.g. `submit createUser`.',
   where: 'Filter clauses: `where(role == admin, name contains @q)`.',
   columns: 'Columns to show: `columns(name, email, role)`.',
+  options: 'The fixed value list of a standalone `Select`: `Select bind(role) options(admin, member, guest)`.',
   class: 'The ONE way to style: raw CSS class(es) — utility classes (`class("flex flex-row gap-4")`) or your own CSS (`class("card")`, backed by styles.css using theme.muten CSS vars). Muten stays agnostic about appearance: any class string passes straight through.',
   alt: 'Required accessible/SEO text for an Image: `alt "{p.title}"`. Use "" for decorative images.',
   inputs: 'Custom component inputs: `inputs(data: @sales)`.',
   on: 'Custom component events wired to actions: `on(select: pick)`.',
   aria: 'Accessibility attributes on ANY node — the bounded way to write `aria-*`/`role` (muten is HTML + logic): `aria(label: "Close", role: "dialog", expanded: menuOpen)`. Each key → `aria-<key>`; `role` → `role`. A literal value is a static attribute; a value that reads state is REACTIVE (e.g. `aria(expanded: open)` keeps aria-expanded in sync). Use this for an accessible interactive widget instead of escaping to Custom.',
   style: 'The bounded way to bind a DYNAMIC CSS value to state — for progress bars, data-driven sizes, transforms: `style(w: "{pct}%")`. Each key becomes a CSS custom property `--key` (muten prepends `--`, so it can ONLY set variables, never arbitrary properties — no competing with class()). The value is an interpolated string; it is REACTIVE when it reads state. Your CSS consumes it: `.bar { width: var(--w); }`. Use class() for STATIC styling; use style() only for a value that changes at runtime.',
+  draggable: 'Make an element a drag source carrying an id: `draggable(item.id)`. A pointer-based floating clone tracks the cursor (touch-ready, styled via .mu-dnd-overlay / .mu-dnd-ghost). The drop target reads the id.',
+  droptarget: 'A drop zone: `droptarget("done") on(drop: move)` fires `move(draggedId, "done")`. Nested zones are safe — the INNERMOST zone under the pointer wins (no double-fire). muten owns the data (do the `patch` in the action).',
+  disabled: 'Reactively disable a form control (Button/RowAction/SearchField/Password/Select/Checkbox/Number/Range/Form): `disabled when <cond>` sets the real `disabled` property (e.g. `Button "Next" -> next disabled when pw.length < 8`). Bare `disabled` = always disabled. Prefer this over a fake CSS class + aria(disabled) hand-roll; it does nothing on non-control nodes (the oracle flags it).',
+  min: 'Minimum value of a Number/Range input: `Range bind(v) min(0)`. A number or a state (reactive).',
+  max: 'Maximum value of a Number/Range input: `Range bind(v) max(100)`. A number or a state (reactive).',
+  step: 'Step increment of a Number/Range input: `Range bind(v) step(5)`. A number or a state.',
 };
 
 // Built-in formatting functions: callable like a `use`'d function but ALWAYS available (no import). The bounded
 // answer to "muten has no dates/string ops" — a FIXED set, so the language stays small and the oracle knows them.
-export const BUILTINS = ['upper', 'lower', 'initial', 'truncate', 'money', 'ago', 'date', 'time', 'datetime', 'calendar', 'weekday', 'now', 'isToday', 'isPast', 'isFuture', 'before', 'after', 'daysUntil', 'dayKey', 'addDays'];
+export const BUILTINS = ['upper', 'lower', 'initial', 'truncate', 'money', 'map', 'sin', 'cos', 'sqrt', 'abs', 'round', 'floor', 'ceil', 'pow', 'min', 'max', 'pi', 'ago', 'date', 'time', 'datetime', 'calendar', 'weekday', 'now', 'isToday', 'isPast', 'isFuture', 'isEmail', 'before', 'after', 'daysUntil', 'dayKey', 'addDays'];
 // Identifiers the emitted page/store module already binds — the signals runtime (`signal`/`effect`/…), the
 // injected data layer (`query`, `mount`), and the formatting BUILTINS — all in the SAME scope as a state/get/
 // action const. Naming a state `query` compiles to `const query = …` colliding with the runtime's `query`
@@ -168,6 +245,18 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   initial: 'initial(name) → first letter, uppercased — avatar initials: `Text "{initial(user.name)}"`.',
   truncate: 'truncate(text, n) → first n characters, + "…" if longer.',
   money: 'money(number[, "USD"]) → localized currency, e.g. $1,234.56.',
+  map: 'map(v, inLo, inHi, outLo, outHi) → linear scale, e.g. a value to an SVG coordinate: `Circle cy(map(p.val, 0, max, 100, 0))`.',
+  sin: 'sin(radians) → sine. For a radial position: `cx(cx0 + r * cos(a))`, `cy(cy0 + r * sin(a))`. Degrees → radians with `a * pi() / 180`.',
+  cos: 'cos(radians) → cosine (see sin).',
+  sqrt: 'sqrt(n) → square root (0 for negatives). Bubble radius from area: `r(sqrt(p.value))`.',
+  abs: 'abs(n) → absolute value.',
+  round: 'round(n) → nearest integer.',
+  floor: 'floor(n) → round down.',
+  ceil: 'ceil(n) → round up.',
+  pow: 'pow(base, exp) → base^exp.',
+  min: 'min(a, b) → the smaller of two numbers (2-arg; for a list minimum use `list.min by field`).',
+  max: 'max(a, b) → the larger of two numbers (2-arg; for a list maximum use `list.max by field`).',
+  pi: 'pi() → 3.14159… (the constant, as a call).',
   ago: 'ago(isoText) → relative time: "just now" / "5m ago" / "3h ago" / "2d ago" (the timestamp is a text field holding an ISO string).',
   date: 'date(isoText) → short date, e.g. "Jan 5".',
   time: 'time(isoText) → short time, e.g. "3:42 PM".',
@@ -178,6 +267,7 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   isToday: 'isToday(isoText) → bool: is the date today? For `when`/grouping: `when isToday(msg.time) { … }`.',
   isPast: 'isPast(isoText) → bool: is the date before now? (deadlines, expiry).',
   isFuture: 'isFuture(isoText) → bool: is the date after now? (upcoming events).',
+  isEmail: 'isEmail(text) → bool: is it a valid email address? For hand-rolled form validation (a `Form` checks `email` fields on submit; this is the same check as an expression): `get emailOk = isEmail(email)` then `Button "Save" -> save disabled when not emailOk`.',
   before: 'before(text, sep) → the part of `text` BEFORE the first `sep` (whole string if not found): `before(user.email, "@")` → the username; `before(name, " ")` → first name.',
   after: 'after(text, sep) → the part of `text` AFTER the first `sep` (empty if not found): `after(user.email, "@")` → the domain.',
   daysUntil: 'daysUntil(isoText) → whole days from today to the date (negative if past, 0 = today): `Span "in {daysUntil(appt.date)} days"`. Pair with isToday/isPast for nicer labels.',

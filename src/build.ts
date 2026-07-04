@@ -92,9 +92,9 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
 
     // `use` functions live in external .ts files that the standalone build cannot bundle; the page
     // would compile a call with no definition -> runtime ReferenceError. Warn instead of shipping broken HTML.
-    // Use `vite build` for a bundle that includes them.
+    // Use `muten bundle` for a build that includes them.
     const useFns = (doc.imports || []).flatMap((i) => i.names);
-    if (useFns.length) console.log(`  ⚠ /${page.route}: \`use\` function(s) ${useFns.join(', ')} are NOT inlined into the standalone build — they'll throw at runtime. Use \`vite build\` for a bundle that includes them.`);
+    if (useFns.length) console.log(`  ⚠ /${page.route}: \`use\` function(s) ${useFns.join(', ')} are NOT inlined into the standalone build — they'll throw at runtime. Use \`muten bundle\` for a build that includes them.`);
 
     const { ok, diagnostics } = validate(doc, { parts: partNames, stores, storeMembers, storeEntities, storeSelfMut, iconExists }); // project-aware validation (FULL parity with `check`)
     if (!ok) throw new Error(`/${page.route}\n` + diagnostics.map((d) => '   ' + formatDiagnostic(d, rel(page.screenPath))).join('\n'));
@@ -151,7 +151,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   // `muten build` emits static per-route HTML. A stateful multi-page app (shared .store, route guards,
   // persistent shell) needs SPA behavior: each static page reloads from scratch, so store state does NOT
   // persist across navigations and guards aren't enforced. Warn loudly rather than ship a silent lie.
-  if (pages.length > 1 && stores.length) console.log(`\n⚠ This app shares a .store across ${pages.length} pages. The static build renders each page standalone, so store state does NOT persist across page navigations (and route guards / a persistent shell aren't wired). For a stateful multi-page SPA, deploy with \`vite build\`.`);
+  if (pages.length > 1 && stores.length) console.log(`\n⚠ This app shares a .store across ${pages.length} pages. The static build renders each page standalone, so store state does NOT persist across page navigations (and route guards / a persistent shell aren't wired). For a stateful multi-page SPA, deploy with \`muten bundle\`.`);
 
   // emit a route index only when no root route ("/") already wrote dist/index.html,
   // so a "/ -> home" build keeps the home page rather than overwriting it with the listing.

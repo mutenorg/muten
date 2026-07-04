@@ -1,11 +1,11 @@
 // validate: structured diagnostics over the flat Doc.
 // Knows the whole vocabulary (types, tokens, state, ops, parts) and each-item scope, so every
 // error is specific and suggests the closest candidate. The same Doc that compiles is validated,
-// so the editor and build never disagree. Used by the live linter, `muten lint`, and Vite.
+// so the editor and build never disagree. Used by the live linter, `muten lint`, and the runner.
 
 import { diag, closest } from '#engine/shared/diagnostics.js';
 import { PRIMITIVE_NAMES, ACTION_OPS, PRIMITIVES, BUILTINS, RESERVED_NAMES } from '#engine/lang/manifest.js';
-import { Nt, Ek, StOp, BOp } from '#engine/shared/vocab.js';
+import { Nt, Ek, StOp, BOp, CHART_KINDS, SVG_PRIMS } from '#engine/shared/vocab.js';
 import { exprListType, isKnownHead, selfUpdateTargets, type RefFacts, type KnownHeads } from '#engine/ir/refs.js';
 import type { Doc, FlatNode, ValidateCtx, ValidateResult, Diagnostic, Expr, Stmt, RequestStmt, StringPropValue, Loc } from '#engine/shared/types.js';
 
@@ -14,6 +14,11 @@ const REF_PROPS: Array<'bind' | 'data'> = ['bind', 'data']; // props whose value
 const KNOWN_OPS = new Set<string>([...ACTION_OPS, StOp.Request]); // Request is parsed + compiled but is not a method op
 const SOURCE_OPS = new Set<string>([StOp.Create, StOp.Update, StOp.Delete, StOp.Refetch]); // hit the backend, so the list MUST be query/source-backed
 const SCALARS = ['text', 'number', 'bool', 'uuid', 'email', 'string', 'date', 'password', 'textarea'];
+const STRINGY = ['text', 'string', 'email', 'uuid', 'date', 'password', 'textarea']; // string-backed scalars: expose `.length` (a text value's character count) for reactive length gates
+const DISABLEABLE = new Set<string>([Nt.Button, Nt.RowAction, Nt.SearchField, Nt.Password, Nt.Select, Nt.Checkbox, Nt.Number, Nt.Range, Nt.Date, Nt.Form]); // `disabled` only affects form controls
+// native primitives that share a name with common plugin (shadcn) parts → a part-style call resolves to the
+// primitive and trips `missing-prop`; the value is the native usage to point the AI at.
+const SHADOWED_PRIMITIVE: { readonly [k: string]: string } = { [Nt.Select]: 'Select bind(x) options(a, b)', [Nt.Checkbox]: 'Checkbox bind(ok)', [Nt.Number]: 'Number bind(n)', [Nt.Range]: 'Range bind(v) min(0) max(100)', [Nt.Date]: 'Date bind(d)', [Nt.Chart]: 'Chart @data kind(bar) x(field) y(field)' };
 const FIELD_TYPES = ['text', 'string', 'email', 'number', 'bool', 'date', 'password', 'textarea', 'uuid']; // valid entity-field types a Form renders; an unknown one degrades to a text input, so the oracle flags it
 
 // collect the variable names referenced by an expression AST
@@ -73,6 +78,13 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     D.push(diag('unknown-client', `${st.method} "${lead}…": "${client}" is not a declared api client — ${tip}.`, { loc: st.loc ?? null, suggestion: ctx.apiClients.length ? closest(client, ctx.apiClients) : null, from: client }));
   };
   const nodes = doc.nodes || {};
+
+  // `meta { title "…" }` values are STATIC strings — the runtime `applyMeta` sets them verbatim (no interpolation).
+  // A `{expr}` here used to lint clean and then ship literal braces into `<title>` (lint ≠ runtime). Reject it, so
+  // the promise holds; a per-item title (`{product.name}`) isn't expressible in meta today (documented in seo.md).
+  for (const [key, val] of Object.entries(doc.meta || {}))
+    if (typeof val === 'string' && /\{[^}]+\}/.test(val))
+      D.push(diag('meta-static', `meta ${key} "${val}" contains \`{…}\` — meta values are STATIC strings and do NOT interpolate (the runtime would ship the literal braces into <head>). Use a fixed string; a per-item/dynamic <title> isn't supported in \`meta\` yet.`, { loc: null, from: val }));
 
   // Reserved-name collision: a state/get/action named like a runtime / data-layer / builtin identifier compiles
   // to a duplicate `const` in the SAME scope (emit.ts dataLayer injects `query`, the BUILTINS, etc. alongside the
@@ -224,9 +236,11 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   const checkRef = (value: string | undefined, node: FlatNode): void => {
     if (typeof value === 'string' && value.startsWith('@')) {
       const name = value.slice(1).split('.')[0];
-      if (!stateKeys.has(name) && !storeDomains.has(name)) { // `@store.member` is a valid bind target too
-        const near = closest(name, [...stateKeys]);
-        D.push(diag('unknown-ref', `"@${name}" is not a declared state`, { loc: node.loc, suggestion: near ? '@' + near : null, from: '@' + name, related: near ? doc.state?.[near]?.loc ?? null : null }));
+      // a `@`-ref names a list/value source: a page state, a page `get` (derived list — for Chart/DataTable), or a
+      // store (`@store.member`). All three are valid; only a name that is NONE of them is an unknown ref.
+      if (!stateKeys.has(name) && !storeDomains.has(name) && !(doc.gets && name in doc.gets)) {
+        const near = closest(name, [...stateKeys, ...Object.keys(doc.gets || {})]);
+        D.push(diag('unknown-ref', `"@${name}" is not a declared state or get`, { loc: node.loc, suggestion: near ? '@' + near : null, from: '@' + name, related: near ? doc.state?.[near]?.loc ?? null : null }));
       }
     }
   };
@@ -248,9 +262,19 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       const [head, ...rest] = e.name.split('.');
       const t = scope.has(head) ? (scope.get(head) || '') : (doc.state?.[head]?.type || '');
       if (!rest.length) return t;
+      if (rest.length === 1 && rest[0] === 'length' && (t === 'list' || t.startsWith('list<') || STRINGY.includes(t))) return 'number'; // `.length` of a list or a text value is a number (typed so a length gate `x.length >= 8` is compare-checked)
       return (rest.length === 1 && doc.entities?.[t]?.[rest[0]]) || ''; // entity field type (deeper or non-entity -> unknown)
     }
-    if (e.kind === Ek.Agg) return (e.op === 'sort' || e.op === 'sortDesc') ? '' : 'number'; // aggregates -> number; sort -> a list (don't infer)
+    if (e.kind === Ek.Agg) {
+      if (e.op === 'at') { // `list.at(n)` -> the element type; `.at(n).field` -> that field's type
+        const h = e.list.split('.')[0]; const lt = (scope.get(h) || doc.state?.[h]?.type || getListType(h));
+        const elem = lt.startsWith('list<') ? lt.slice(5, -1) : '';
+        if (!e.member) return elem;
+        const first = e.member.split('.')[0];
+        return first === 'id' ? 'uuid' : (doc.entities?.[elem]?.[first] || '');
+      }
+      return (e.op === 'sort' || e.op === 'sortDesc' || e.op === 'take') ? '' : 'number'; // aggregates -> number; sort/take -> a list (don't infer)
+    }
     return ''; // bin/call/obj/tern/un: don't infer
   };
 
@@ -259,6 +283,21 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   // SHARED resolver (engine/ir/refs.ts) so the linter and the emitter resolve element types IDENTICALLY.
   const getListType = (head: string): string =>
     (doc.gets && head in doc.gets) ? exprListType(doc.gets[head], refFacts, new Set([head])) : '';
+
+  // The element entity behind a `@data` list ref (Chart / DataTable), resolved through the SAME sources the
+  // store-centric architecture uses: a page `state`/`query` list, a page `get` list, OR a store member
+  // (`orders.items`). Returns the element field→type map (+ its entity name, for the DataTable `row` scope) so
+  // x/y and columns stay oracle-checked whatever the source. `known` is false only when the ref is nothing at all.
+  const dataElement = (d: string): { name: string; fields: { readonly [f: string]: string } | null; isList: boolean; known: boolean } => {
+    const elemName = (t: string): string => t.startsWith('list<') ? t.slice(5, -1) : '';
+    const st = doc.state?.[d]?.type;
+    if (st !== undefined) { const nm = elemName(st); return { name: nm, fields: doc.entities?.[nm] ?? null, isList: st === 'list' || st.startsWith('list<'), known: true }; }
+    const gt = getListType(d);
+    if (gt) { const nm = elemName(gt); return { name: nm, fields: doc.entities?.[nm] ?? null, isList: true, known: true }; }
+    const se = ctx.storeEntities?.[d]; // a store list member (`orders.items` -> the Order entity's fields)
+    if (se) return { name: '', fields: se, isList: true, known: true };
+    return { name: '', fields: null, isList: false, known: false };
+  };
   // arithmetic `- * /` on a non-number operand produces NaN at runtime. `+` is also string concat, so it's left alone.
   const checkArith = (e: Expr, loc: Loc | null, scope: Map<string, string>): void => {
     if (e.kind === Ek.Bin) {
@@ -324,6 +363,10 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         // sum/avg/min/max reduce a number projection (a `min` over text strings -> NaN);
         // count's body is a true/false condition, so it's exempt.
         if (e.op === 'take') { const bt = exprType(e.body, bodyScope); if (bt && bt !== 'number') D.push(diag('take-count', `\`take(n)\` takes a NUMBER count (how many items), but got "${bt}". e.g. \`posts.take(10)\` or \`posts.take(limit)\`.`, { loc })); }
+        else if (e.op === 'at') {
+          const bt = exprType(e.body, bodyScope); if (bt && bt !== 'number') D.push(diag('at-index', `\`at(n)\` takes a NUMBER index (which position), but got "${bt}". e.g. \`matches.at(hi)\` where hi is a number state.`, { loc }));
+          if (e.member) { const first = e.member.split('.')[0]; if (ent && first !== 'id' && !(first in ent)) D.push(diag('unknown-member', `"${first}" is not a field of ${elem} — \`at(n).<field>\` reads a field of the element.`, { loc, suggestion: closest(first, ['id', ...Object.keys(ent)]), from: first })); }
+        }
         else if (e.op !== 'count' && e.op !== 'sort' && e.op !== 'sortDesc') { const bt = exprType(e.body, bodyScope); if (bt && bt !== 'number') D.push(diag('agg-type', `\`${e.op} …\` reduces a NUMBER, but the body is "${bt}". Use a number projection (count uses a true/false condition).`, { loc })); }
         checkExpr(e.body, loc, bodyScope);
         return; // collectRefs already skips the body (the item fields aren't in the outer scope)
@@ -366,13 +409,15 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       const fields = entityFieldSet(t);
       if (fields) {
         if (!fields.has(member)) D.push(diag('unknown-member', `"${member}" is not a field of ${t} (${scope.has(head) ? 'item' : 'state'} "${head}")`, { loc, suggestion: closest(member, [...fields]), from: member }));
-        else { // depth-2+ chain `c.field.sub`: entity fields are scalars/enums (no sub-fields), so `.sub` is invalid unless the field is itself an entity
+        else { // depth-2+ chain `c.field.sub`: entity fields are scalars/enums (no sub-fields), so `.sub` is invalid unless the field is itself an entity — EXCEPT `.length` on a text/list field (its character/item count)
           const sub = ref.slice(dot + 1).split('.')[1];
           const ft = doc.entities?.[t]?.[member] || '';
-          if (sub && !doc.entities?.[ft]) D.push(diag('unknown-member', `"${member}" is ${ft.startsWith('enum:') ? 'an enum' : `a ${ft}`} — it has no field "${sub}"`, { loc, from: sub }));
+          const lengthOk = sub === 'length' && (STRINGY.includes(ft) || ft === 'list' || ft.startsWith('list<'));
+          if (sub && !doc.entities?.[ft] && !lengthOk) D.push(diag('unknown-member', `"${member}" is ${ft.startsWith('enum:') ? 'an enum' : `a ${ft}`} — it has no field "${sub}"`, { loc, from: sub }));
         }
       } else if (SCALARS.includes(t)) {
-        D.push(diag('unknown-member', `"${head}" is a ${t} — it has no field "${member}"`, { loc }));
+        // a text value exposes `.length` (its character count); any other member is a typo. numbers/bools have none.
+        if (!(member === 'length' && STRINGY.includes(t))) D.push(diag('unknown-member', `"${head}" is a ${t} — it has no field "${member}"${STRINGY.includes(t) ? ' (a text value exposes only .length)' : ''}`, { loc }));
       } else if (actionNames.has(head) && !stateKeys.has(head)) {
         const am = new Set(['pending', 'error']); // async action exposes only .pending / .error
         if (!am.has(member)) D.push(diag('unknown-member', `action "${head}" exposes only .pending / .error, not "${member}"`, { loc, suggestion: closest(member, [...am]), from: member }));
@@ -409,7 +454,10 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       const spec = prim ? prim.props : {};
       for (const [pname, hint] of Object.entries(spec)) {
         if (!hint.endsWith('?') && !(pname in (n.props || {}))) {
-          D.push(diag('missing-prop', `${n.type} is missing the required "${pname}"`, { loc: n.loc }));
+          // Select/Checkbox/Number/Range/Date/Chart are native primitives that share a name with common plugin
+          // (shadcn) parts — a part-style call (`Select(value: …)`) resolves to the primitive and trips this. Say so.
+          const tip = SHADOWED_PRIMITIVE[n.type] ? ` — "${n.type}" is a native primitive (it shadows any same-named plugin part); use its API, e.g. \`${SHADOWED_PRIMITIVE[n.type]}\`` : '';
+          D.push(diag('missing-prop', `${n.type} is missing the required "${pname}"${tip}`, { loc: n.loc }));
         }
       }
     }
@@ -437,13 +485,13 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     }
     if (n.type === 'DataTable') { // columns + where fields must be real fields of the row entity (else blank column / dead filter / @ref crash)
       const d = String(props.data ?? '').replace(/^@/, '');
-      const dt = doc.state?.[d]?.type || '';
+      const de = dataElement(d); // page state / query / get / store member
       // the data must be a LIST — a scalar/record here lints clean today, then crashes at runtime ("not iterable").
-      if (d && d in (doc.state || {}) && dt !== 'list' && !dt.startsWith('list<'))
-        D.push(diag('datatable-not-list', `DataTable shows a list, but "${d}" is "${dt}" (not a list) — bind a \`list<…>\` state or a query.`, { loc: n.loc, from: d }));
-      const elem = dt.startsWith('list<') ? dt.slice(5, -1) : '';
-      const rowFields = entityFieldSet(elem);
+      if (d && de.known && !de.isList)
+        D.push(diag('datatable-not-list', `DataTable shows a list, but "${d}" is not a list — bind a \`list<…>\` state, query, get, or store list.`, { loc: n.loc, from: d }));
+      const rowFields = de.fields ? new Set(['id', ...Object.keys(de.fields)]) : null;
       if (rowFields) {
+        const elem = de.name || 'the data';
         for (const col of (props.columns || [])) if (typeof col === 'string' && !rowFields.has(col)) D.push(diag('unknown-column', `column "${col}" is not a field of ${elem}`, { loc: n.loc, suggestion: closest(col, [...rowFields]), from: col }));
         for (const clause of (props.where || [])) if (typeof clause === 'string') {
           const field = clause.trim().split(/\s+/)[0];
@@ -452,15 +500,70 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         }
       }
     }
-    if (n.type === 'SearchField') { // SearchField writes a single text string: binding a number/bool/list/entity silently corrupts it
-      const b = String(props.bind ?? '').replace(/^@/, '').split('.')[0];
-      const bt = b ? doc.state?.[b]?.type : undefined;
-      if (bt !== undefined && !['text', 'string', 'email'].includes(bt)) D.push(diag('bind-type', `SearchField binds a single text value, but "${b}" is "${bt}" — bind a text state (e.g. \`q = "" : text\`).`, { loc: n.loc }));
+    if (n.type === Nt.SearchField || n.type === Nt.Password || n.type === Nt.Select || n.type === Nt.Checkbox || n.type === Nt.Number || n.type === Nt.Range || n.type === Nt.Date) {
+      // A bound input carries one scalar. It binds a page STATE (`bind(q)`), OR — inside an `each` — a FIELD of the
+      // row entity (`bind(row.value)`), which two-way-edits that list element. Either way the type must match.
+      const raw = String(props.bind ?? '').replace(/^@/, '');
+      const head = raw.split('.')[0], sub = raw.split('.')[1];
+      const isBool = n.type === Nt.Checkbox;
+      const isNum = n.type === Nt.Number || n.type === Nt.Range;
+      const isDate = n.type === Nt.Date;
+      const want = isNum ? ['number'] : isBool ? ['bool'] : isDate ? ['date', 'text', 'string'] : ['text', 'string', 'email'];
+      const kindWord = isNum ? 'a number' : isBool ? 'a bool' : isDate ? 'a date' : 'a single text value';
+      const hint = isNum ? 'a number state (e.g. `qty = 0 : number`)' : isBool ? 'a bool state (e.g. `agree = false : bool`)' : isDate ? 'a date state (e.g. `due = "" : date`)' : 'a text state (e.g. `role = "" : text`)';
+      const eachElem = head && scope.has(head) ? (scope.get(head) || '') : ''; // an `each` row var -> its element entity
+      if (eachElem && doc.entities?.[eachElem]) {
+        const ft = sub ? (doc.entities[eachElem][sub] || (sub === 'id' ? 'uuid' : '')) : '';
+        if (!sub) D.push(diag('bind-type', `${n.type} inside \`each\` edits a list item — bind one of its FIELDS: \`bind(${head}.<field>)\`.`, { loc: n.loc, from: head }));
+        else if (!ft) D.push(diag('bind-type', `"${sub}" is not a field of ${eachElem}`, { loc: n.loc, suggestion: closest(sub, Object.keys(doc.entities[eachElem])), from: sub }));
+        else if (isNum ? ft !== 'number' : isBool ? ft !== 'bool' : (!want.includes(ft) && !ft.startsWith('enum:'))) D.push(diag('bind-type', `${n.type} binds ${kindWord}, but ${eachElem}.${sub} is "${ft}".`, { loc: n.loc, from: sub }));
+      } else if (scope.has(head) && sub) {
+        // `head` is an `each` row var, but its element entity didn't resolve — the list is a STORE/query list (or an
+        // unknown element type). Its rows are NOT editable through a direct input bind (write-back only works on a
+        // settable page list state). Don't say "declare a state" (impossible per-row) — point at the action pattern.
+        D.push(diag('bind-type', `${n.type} binds a field of the \`each\` row "${head}", but rows of a store/query list can't be edited through a direct input bind — change the value with an action (a store \`patch where id == ${head}.id with { ${sub}: … }\`, fired by a Button), or iterate a settable page \`state\` list to bind fields directly.`, { loc: n.loc, from: head }));
+      } else {
+        const bt = head ? doc.state?.[head]?.type : undefined;
+        // SearchField stays lenient about existence (legacy); the newer inputs require a real state.
+        if (n.type !== Nt.SearchField && head && bt === undefined) D.push(diag('bind-type', `${n.type} binds "${head}", which is not a state on this page — declare ${hint}.`, { loc: n.loc, suggestion: closest(head, [...stateKeys]), from: head }));
+        else if (bt !== undefined && !want.includes(bt)) D.push(diag('bind-type', `${n.type} binds ${kindWord}, but "${head}" is "${bt}" — bind ${hint}.`, { loc: n.loc }));
+      }
     }
     if (n.type === 'Custom') { // inputs(@state) + on(action) were unvalidated: undefined refs / missing actions crash at runtime
       for (const v of Object.values(props.inputs || {})) if (typeof v === 'string') checkRef(v, n);
       for (const v of Object.values(props.on || {})) if (typeof v === 'string') checkAction(v, n);
     }
+    if (n.type === Nt.Chart) { // data must be a list; x/y/color must be real fields; y must be numeric; kind bounded
+      const d = String(props.data ?? '').replace(/^@/, '');
+      const de = dataElement(d); // page state / query / get / store member — the store-centric pattern derives via get
+      if (d && de.known && !de.isList)
+        D.push(diag('chart-not-list', `Chart plots a list, but "${d}" is not a list — bind a \`list<…>\` state, query, get, or store list.`, { loc: n.loc, from: d }));
+      if (typeof props.kind === 'string' && !CHART_KINDS.has(props.kind))
+        D.push(diag('chart-kind', `Chart kind "${props.kind}" is not one of bar / line / area / point / scatter / pie / donut.`, { loc: n.loc, suggestion: closest(props.kind, [...CHART_KINDS]), from: props.kind }));
+      const elem = de.name || 'the data';
+      const rowFields = de.fields ? new Set(['id', ...Object.keys(de.fields)]) : null;
+      // Chart reads x/y as bare FIELD refs (not coordinate expressions); '' when absent, null when a non-ref expr.
+      const chartField = (e: Expr | undefined): string | null => e === undefined ? '' : (e.kind === Ek.Ref && !e.name.includes('.') ? e.name : null);
+      const xf = chartField(props.x), yf = chartField(props.y);
+      if (xf === null) D.push(diag('chart-field', `Chart x must be a field of ${elem} (e.g. \`x(month)\`), not an expression.`, { loc: n.loc }));
+      if (yf === null) D.push(diag('chart-field', `Chart y must be a numeric field (e.g. \`y(revenue)\`), not an expression.`, { loc: n.loc }));
+      if (rowFields) {
+        for (const [enc, f] of [['x', xf], ['y', yf], ['color', props.color ?? '']] as const)
+          if (typeof f === 'string' && f && !rowFields.has(f)) D.push(diag('chart-field', `Chart ${enc}(${f}): "${f}" is not a field of ${elem}`, { loc: n.loc, suggestion: closest(f, [...rowFields]), from: f }));
+        const yt = typeof yf === 'string' && yf ? (de.fields?.[yf] || '') : '';
+        if (yt && yt !== 'number') D.push(diag('chart-field', `Chart y(${yf}): "${yf}" is "${yt}", but y must be a number field (it is the value axis).`, { loc: n.loc, from: yf }));
+      }
+    }
+    if (SVG_PRIMS.has(n.type)) { // SVG mark geometry are EXPRESSIONS — validate their refs (e.g. `map(unknownState, …)`)
+      for (const g of ['x', 'y', 'w', 'h', 'cx', 'cy', 'r', 'x1', 'y1', 'x2', 'y2', 'rx', 'start', 'end', 'inner'] as const) { const e = props[g]; if (e) checkExpr(e, n.loc ?? null, scope); }
+      for (const s of [props.d, props.transform]) if (s && typeof s === 'object' && 'kind' in s) for (const part of s.parts) if (typeof part !== 'string') checkExpr(part, n.loc ?? null, scope);
+    }
+    // target restrictions: kind/color = Chart-only; SVG geometry = mark-only; x/y = Chart OR SVG; viewBox = Svg-only.
+    if ((props.kind || props.color) && n.type !== Nt.Chart) D.push(diag('encoding-target', `kind / color only apply to Chart, not ${n.type}.`, { loc: n.loc, from: n.type }));
+    if ((props.w || props.h || props.cx || props.cy || props.r || props.x1 || props.y1 || props.x2 || props.y2 || props.rx || props.start || props.end || props.inner || props.d || props.transform) && !SVG_PRIMS.has(n.type))
+      D.push(diag('encoding-target', `SVG geometry (w/h/cx/cy/r/start/end/inner/d/transform) only applies to Svg marks (Rect/Line/Circle/Arc/Path/Group), not ${n.type}.`, { loc: n.loc, from: n.type }));
+    if ((props.x || props.y) && n.type !== Nt.Chart && !SVG_PRIMS.has(n.type)) D.push(diag('encoding-target', `x / y only apply to Chart or an SVG mark, not ${n.type}.`, { loc: n.loc, from: n.type }));
+    if (props.viewBox && n.type !== Nt.Svg) D.push(diag('encoding-target', `viewBox only applies to Svg, not ${n.type}.`, { loc: n.loc, from: n.type }));
     // Icon resolves to inline SVG at BUILD, so its name must be a static `set:name` literal. A data-driven name
     // (`Icon "{m.icon}"`) parses to an Interp, NOT a string — so the old `typeof === 'string'` check missed exactly
     // the case it claimed to catch (a per-row icon from data). Catch BOTH: the interpolated form and the missing set.
@@ -497,6 +600,12 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       if ('cond' in c) checkExpr(c.cond, n.loc ?? null, scope);
       else if ('interp' in c) for (const pt of c.interp.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);
     }
+    if (props.disabled) { // `disabled when <cond>`: the condition is a real expression, and it only affects form controls
+      checkExpr(props.disabled, n.loc ?? null, scope);
+      if (!DISABLEABLE.has(n.type)) D.push(diag('disabled-target', `\`disabled\` does nothing on ${n.type} — it applies to form controls (Button, RowAction, SearchField, Password, Select, Checkbox, Form).`, { loc: n.loc, from: n.type }));
+    }
+    if (props.draggable) checkExpr(props.draggable, n.loc ?? null, scope); // `draggable(item.id)` — the id expression is real
+    for (const v of Object.values(props.on || {})) if (typeof v === 'string' && n.type !== 'Custom') checkAction(v, n); // on(event: action) on any element — the action must exist (Custom's on() is checked above)
     if (props.aria) for (const expr of Object.values(props.aria)) checkExpr(expr, n.loc ?? null, scope);  // `aria(key: expr)` values are real expressions: an unknown/renamed state ref is caught here, not at runtime
     if (props.styleVars) for (const sv of Object.values(props.styleVars)) if (typeof sv !== 'string') for (const pt of sv.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);  // `style(w: "{ref}")` interpolations: an unknown state ref is caught here, not at runtime
     const interps: StringPropValue[] = [];
@@ -516,12 +625,15 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     let childScope = scope;
     if (n.type === Nt.Each && props.as) {
       childScope = new Map([...scope, [props.as, listElem(props.list)] as [string, string]]);
+      if (props.index) { // `as item, i`: i is a number (position). Same name as the item shadows it → the item ref would read a number at runtime, lint-clean — catch it.
+        if (props.index === props.as) D.push(diag('each-index-name', `the index variable "${props.index}" must differ from the item variable "${props.as}" (it shadows the item)`, { loc: n.loc, from: props.index }));
+        childScope = new Map([...childScope, [props.index, 'number'] as [string, string]]);
+      }
       if (props.filter) checkExpr(props.filter, n.loc ?? null, childScope); // `where <cond>` reads the item var
     }
     else if (n.type === 'DataTable') {
       const d = String(props.data || '').replace(/^@/, '');
-      const dt = doc.state?.[d]?.type || '';
-      childScope = new Map([...scope, ['row', dt.startsWith('list<') ? dt.slice(5, -1) : ''] as [string, string]]);
+      childScope = new Map([...scope, ['row', dataElement(d).name] as [string, string]]); // RowActions read `row.id` — bind `row` to the element entity (state / get / store)
     }
     for (const c of n.children || []) walk(c, childScope, n.type === 'DataTable');
   };

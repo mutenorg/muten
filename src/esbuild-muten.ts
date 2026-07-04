@@ -1,6 +1,6 @@
-// esbuild-muten.ts: the muten build on esbuild instead of Vite. Same job as vite-plugin-muten.ts (compile
-// .muten -> JS, serve the runtime/shell/store as virtual modules, run the oracle), wired to esbuild's
-// onResolve/onLoad so muten owns the bundler directly — Vite is now only the `--vite` fallback.
+// esbuild-muten.ts: the muten build, on embedded esbuild — the ONLY runner. Compiles .muten -> JS, serves the
+// runtime/shell/store as virtual modules, runs the oracle, wired to esbuild's onResolve/onLoad so muten owns
+// the bundler directly. No Vite: `muten dev` / `muten bundle` route straight here.
 //
 // `bundleEsbuild` = production build (per-route chunks + source maps + hashed CSS); `devEsbuild` = a dev server
 // (own HTTP + esbuild incremental + SSE full-reload). CSS (sass -> theme -> Tailwind) is built as its own
@@ -287,6 +287,7 @@ export async function bundleEsbuild(root: string, outDir = join(root, 'dist')): 
     result = await esbuild.build({
       entryPoints: { boot: join(root, 'src', 'app.muten') },
       bundle: true, format: 'esm', splitting: true, minify: true, sourcemap: true, metafile: true,
+      define: { __MUTEN_DEV__: 'false' }, // prod: DCE the dev-only __muten_rt registry so unused helpers (chart/DnD/arc) tree-shake out
       outdir: outDir, entryNames: 'assets/[name]-[hash]', chunkNames: 'assets/[name]-[hash]',
       assetNames: 'assets/[name]-[hash]', publicPath: '/', logLevel: 'silent',
       plugins: [mutenEsbuild(root, model)],
@@ -380,6 +381,7 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
   const ctx = await esbuild.context({
     entryPoints: { boot: join(root, 'src', 'app.muten') },
     bundle: true, format: 'esm', splitting: true, sourcemap: true, write: false,
+    define: { __MUTEN_DEV__: 'true' }, // dev: keep the __muten_rt registry (HMR patch + DevTools reach the runtime through it)
     // entry stays unhashed (index.html references /assets/boot.js); SHARED CHUNKS must be hashed, or ≥2 of them
     // (e.g. the runtime + a shared lib like fruta) both land on assets/chunk.js and esbuild aborts the dev build.
     outdir, entryNames: 'assets/[name]', chunkNames: 'assets/[name]-[hash]', assetNames: 'assets/[name]',

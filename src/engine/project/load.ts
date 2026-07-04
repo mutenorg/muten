@@ -1,12 +1,13 @@
 // load: project-aware loader that turns a .muten page into everything needed to compile it.
 // Pipeline: parse -> gather parts (shared + local + inline) -> compose (inline instances) ->
 // hoist entity/state/mock of used parts -> gather styles (page + used parts) -> flatten data.
-// Consumed by build.ts, map.ts, and the Vite plugin.
+// Consumed by build.ts, map.ts, and the runner.
 
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { createRequire } from 'node:module';
 import { parse } from '#engine/lang/parse.js';
+import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { resolveStyles } from '#engine/project/styles.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { readMutenConfig } from '#engine/project/config.js';
@@ -38,10 +39,15 @@ export async function loadPluginParts(appRoot: string): Promise<Parts> {
     for (const c of reg.components || []) {
       const filePath = join(dir, c.file);
       if (!existsSync(filePath)) continue;
-      const ir = parse(readFileSync(filePath, 'utf8'));
+      // A plugin part that SHADOWS a native primitive (e.g. an older shadcn `Checkbox`/`Select`/`Chart` after the
+      // core gained those primitives) must NOT brick the whole app — the primitive wins; skip the plugin part.
+      // Any other parse error in a plugin file is also non-fatal (the plugin is not the user's code). Local parts
+      // still hard-error on shadow (parse.ts), where a rename is the right fix.
+      let ir;
+      try { ir = parse(readFileSync(filePath, 'utf8')); } catch { continue; }
       const { css } = await resolveStyles(filePath);
       for (const [partName, def] of Object.entries(ir.parts || {}))
-        out[partName] = { ...def, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css };
+        if (!(partName in PRIMITIVES)) out[partName] = { ...def, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css }; // primitive-named plugin parts yield to the primitive
     }
   }
   return out;
@@ -87,7 +93,7 @@ export function storeListEntities(stores: { [domain: string]: IR }): { [k: strin
 }
 
 // Every *.store file under a directory -> parsed IR keyed by domain name.
-// Shared by the Vite plugin, the linter, and `muten map` so store refs resolve everywhere.
+// Shared by the runner, the linter, and `muten map` so store refs resolve everywhere.
 export function findStores(dir: string, out: { [domain: string]: IR } = {}): { [domain: string]: IR } {
   let entries;
   try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }

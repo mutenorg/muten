@@ -1,6 +1,6 @@
 # src/engine - file conventions
 
-All Muten source is TypeScript under `src/` (this engine, plus the runtime, the Vite plugin, the
+All Muten source is TypeScript under `src/` (this engine, plus the runtime, the esbuild runner, the
 CLI, build/lint and index). `npm run build` = `tsc` (type-check, strict) + `esbuild` → `dist/**/*.js`,
 **minified, per-file** (the module graph is preserved and the `#engine/*` imports stay intact, so
 nothing bundles into a heavy monolith). The package, the demos, the tests and the VS Code extension

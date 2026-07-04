@@ -17,8 +17,8 @@ const json = args.includes('--json');
 const root = resolve(dir || process.cwd());
 
 try {
-  if (cmd === 'dev') await dev(root, !args.includes('--vite')); // native esbuild dev server by default; --vite for the legacy engine
-  else if (cmd === 'bundle') await bundle(root, !args.includes('--vite')); // native esbuild production bundle; --vite for the legacy engine
+  if (cmd === 'dev') await dev(root);          // native esbuild dev server (surgical HMR + oracle overlay)
+  else if (cmd === 'bundle') await bundle(root); // native esbuild production bundle (per-route chunks + source maps)
   else if (cmd === 'build') await buildApp(root, undefined, (args.find((a) => a.startsWith('--url=')) || '').slice(6)); // SSG → static HTML. --url=https://site.com → absolute sitemap/robots URLs
   else if (cmd === 'check' || cmd === 'lint') {
     if (args.includes('--watch')) await lintWatch(root, json);          // standing oracle (CI/agents), no dev server

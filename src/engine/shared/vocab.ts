@@ -53,7 +53,13 @@ export enum Nt {
   Text = 'Text', Title = 'Title', Span = 'Span', Image = 'Image', Icon = 'Icon', Video = 'Video',
   // interactive
   Link = 'Link', Button = 'Button', Form = 'Form', SearchField = 'SearchField',
+  Password = 'Password', Select = 'Select', Checkbox = 'Checkbox',   // standalone bound inputs (the same controls a Form renders, usable directly outside one)
+  Number = 'Number', Range = 'Range',   // numeric inputs bound to a number state: Number = <input type=number>, Range = a slider (<input type=range>)
+  Date = 'Date',   // standalone native date picker (<input type=date>) bound to a date/text state
   DataTable = 'DataTable', RowAction = 'RowAction', Custom = 'Custom',
+  Chart = 'Chart',   // native dataviz: declare data + mark kind + x/y/color encodings; the compiler emits SVG + scales + axes
+  // native vector layer (the escape UNDER the Chart grammar — declare arbitrary marks from data, oracle-visible)
+  Svg = 'Svg', Rect = 'Rect', Line = 'Line', Circle = 'Circle', Path = 'Path', Group = 'Group', Arc = 'Arc',
   // control flow + outlet
   When = 'When', Each = 'Each', Slot = 'slot',
 }
@@ -89,5 +95,20 @@ export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle
 /** Node modifiers (post-primitive). */
 export enum Mod {
   Bind = 'bind', Submit = 'submit', Where = 'where', Columns = 'columns',
-  Class = 'class', Alt = 'alt', Inputs = 'inputs', On = 'on', Aria = 'aria', Style = 'style',
+  Class = 'class', Alt = 'alt', Inputs = 'inputs', On = 'on', Aria = 'aria', Style = 'style', Disabled = 'disabled', Options = 'options',
+  Min = 'min', Max = 'max', Step = 'step',   // Number/Range numeric bounds + step (each takes one number expression)
+  Draggable = 'draggable', Droptarget = 'droptarget',   // drag pack: mark an element draggable (carries an id) + a drop zone (fires on(drop: action(id, group)))
+  Kind = 'kind', Color = 'color',   // Chart encodings: kind(bar|line|area|point) + color(field)
+  // geometry: x/y are shared (Chart encodings read them as field refs; SVG marks as coordinate expressions).
+  X = 'x', Y = 'y', W = 'w', H = 'h', Cx = 'cx', Cy = 'cy', R = 'r', X1 = 'x1', Y1 = 'y1', X2 = 'x2', Y2 = 'y2', Rx = 'rx',
+  Start = 'start', End = 'end', Inner = 'inner',   // Arc: sweep start→end degrees (0=top, clockwise), inner radius (0=pie, >0=donut)
+  ViewBox = 'viewBox', D = 'd', Transform = 'transform',
 }
+/** Chart mark kinds — the bounded grammar-of-graphics vocabulary. */
+export const CHART_KINDS = new Set<string>(['bar', 'line', 'area', 'point', 'scatter', 'pie', 'donut']);
+/** SVG geometry attributes that take a numeric EXPRESSION (reactive). x/y are shared with Chart encodings. */
+export const SVG_GEO: readonly string[] = ['x', 'y', 'w', 'h', 'cx', 'cy', 'r', 'x1', 'y1', 'x2', 'y2', 'rx', 'start', 'end', 'inner'];
+/** The native vector primitives — marks live inside an `Svg` (or a `Group`). */
+export const SVG_PRIMS = new Set<string>([Nt.Svg, Nt.Rect, Nt.Line, Nt.Circle, Nt.Path, Nt.Group, Nt.Arc]);
+/** SVG geometry attr -> the real SVG attribute name (w/h are shorthands). */
+export const SVG_ATTR: { readonly [k: string]: string } = { x: 'x', y: 'y', w: 'width', h: 'height', cx: 'cx', cy: 'cy', r: 'r', x1: 'x1', y1: 'y1', x2: 'x2', y2: 'y2', rx: 'rx' };
