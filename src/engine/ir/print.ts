@@ -24,6 +24,7 @@ function printExpr(e: Expr): string {
     case Ek.Obj: return `{ ${e.fields.map((f) => `${f.key}: ${printExpr(f.value)}`).join(', ')} }`;
     case Ek.Agg: return `${e.list}.${e.op} ${e.op === 'count' ? 'where' : 'by'} ${printExpr(e.body)}`; // e.g. `lines.sum by price * qty` / `tasks.count where not done`
     case Ek.Filter: return `${e.list} where ${printExpr(e.cond)}`; // derived list, e.g. `tasks where status == "todo"`
+    case Ek.Arr: return `[ ${e.items.map(printValue).join('  ')} ]`; // inline `each [ … ]` list literal
   }
 }
 // parenthesize nested binary/ternary so re-parse rebuilds the same tree (over-parenthesizes to preserve structure)

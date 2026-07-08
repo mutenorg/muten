@@ -4,6 +4,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parse } from '#engine/lang/parse.js';
+import { ParseError } from '#engine/shared/diagnostics.js';
 import type { RouteEntry, Value } from '#engine/shared/types.js';
 
 export function readRoutes(appRoot: string): RouteEntry[] {
@@ -14,7 +15,7 @@ export function readRoutes(appRoot: string): RouteEntry[] {
   }
   let ir;
   try { ir = parse(readFileSync(root, 'utf8')); }
-  catch (e) { throw new Error(`${rel(root)}: ${e instanceof Error ? e.message : String(e)}`); }
+  catch (e) { if (e instanceof ParseError && !e.file) e.file = root; throw e; } // keep file:line:col for the CLI, don't flatten to a bare message
   const pagesDir = join(appRoot, 'src', 'pages');
   const routes: RouteEntry[] = (ir.routes || []).map((r) => ({
     route: r.url.replace(/^\//, ''), page: r.page, screenPath: join(pagesDir, r.page, r.page + '.muten'),

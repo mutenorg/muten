@@ -97,14 +97,19 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     doc: 'Masked password input two-way bound to a text state (usable OUTSIDE a Form). Gate the next action reactively: `Password bind(pw) "Password"` + `Button "Next" disabled when pw.length < 8`.',
     snippet: 'Password bind(${1:pw}) "${2:Password}"',
   },
+  Textarea: {
+    string: 'placeholder', props: { bind: 'state', placeholder: 'text?' }, children: false, interp: true,
+    doc: 'Multi-line text input (a standalone `<textarea>`) two-way bound to a text state, usable OUTSIDE a Form — for a message, comment, bio or description: `Textarea bind(message) "Write a message…"`. Fires `on(enter: send)` like SearchField.',
+    snippet: 'Textarea bind(${1:message}) "${2:Write a message…}"',
+  },
   Select: {
     string: 'placeholder', props: { bind: 'state', options: 'idents', placeholder: 'text?' }, children: false,
     doc: 'Dropdown bound to a text state with a fixed option list: `Select bind(role) options(founder, engineer, other) "Pick a role"`. The placeholder is a non-selectable prompt shown while the value is empty.',
     snippet: 'Select bind(${1:role}) options(${2:a, b, c})',
   },
   Checkbox: {
-    string: 'label', props: { bind: 'state', label: 'text?' }, children: false, interp: true,
-    doc: 'Checkbox bound to a bool state, with a clickable label: `Checkbox bind(agree) "I accept the terms"`.',
+    string: 'label', props: { bind: 'state?', checked: 'expr?', label: 'text?' }, children: false, interp: true,
+    doc: 'Checkbox for a bool. `bind(agree)` owns a page state (two-way). For a value you do NOT own — a store/query list row — use `checked(<bool>)` to display it and `-> action` to toggle: `Checkbox checked(t.done) -> todos.toggle(t.id)`. Exactly one of bind / checked.',
     snippet: 'Checkbox bind(${1:agree}) "${2:I accept the terms}"',
   },
   Number: {

@@ -362,7 +362,7 @@ const MIME: { [ext: string]: string } = { '.js': 'text/javascript', '.css': 'tex
 const DEV_CLIENT = `<script>(function(){function show(m){var d=document.getElementById('__mu_err');if(!d){d=document.createElement('div');d.id='__mu_err';document.body.appendChild(d);}d.style.cssText='position:fixed;inset:0;z-index:99999;background:#1a1a1f;color:#ffb4b4;font:13px/1.6 ui-monospace,monospace;overflow:auto';d.innerHTML='<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten \\u2014 runtime error</div><pre style="padding:24px;white-space:pre-wrap">'+String(m).replace(/[<&]/g,function(c){return c==='<'?'&lt;':'&amp;';})+'</pre>';}
 addEventListener('error',function(e){show((e.error&&e.error.stack)||e.message);});
 addEventListener('unhandledrejection',function(e){show('Unhandled promise rejection:\\n'+((e.reason&&e.reason.stack)||e.reason));});
-new EventSource('/_reload').onmessage=function(e){var m;try{m=JSON.parse(e.data)}catch(_){return location.reload()}if(m.type!=='patch')return location.reload();var rt=window.__muten_rt,pg=window.__muten_page;if(!rt||!pg||window.__muten_screen!==m.screen)return location.reload();try{for(var i=0;i<m.patches.length;i++){var p=m.patches[i],b=eval('('+p.src+')');if(!rt.patchNode(pg,p.id,function(c,par,n){return b(c,n,par,rt)}))return location.reload();}}catch(err){console.error('[muten hmr]',err);location.reload();}};})();</script>`;
+new EventSource('/_reload').onmessage=function(e){var m;try{m=JSON.parse(e.data)}catch(_){return location.reload()}if(m.type==='css'){var l=document.querySelector('link[href^="/assets/boot.css"]');if(l){var n=l.cloneNode(false);n.setAttribute('href','/assets/boot.css?v='+Date.now());n.onload=function(){l.remove()};l.parentNode.insertBefore(n,l.nextSibling);}return;}if(m.type!=='patch')return location.reload();var rt=window.__muten_rt,pg=window.__muten_page;if(!rt||!pg||window.__muten_screen!==m.screen)return location.reload();try{for(var i=0;i<m.patches.length;i++){var p=m.patches[i],b=eval('('+p.src+')');if(!rt.patchNode(pg,p.id,function(c,par,n){return b(c,n,par,rt)}))return location.reload();}}catch(err){console.error('[muten hmr]',err);location.reload();}};})();</script>`;
 
 // esbuild rejects build()/rebuild() with a BuildFailure carrying `.errors` (each with a code-frame location);
 // pull them out so we can format them Vite-style. null if the failure isn't a build failure (a real crash).
@@ -422,6 +422,12 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
   const reload = (): void => { for (const c of clients) c.write('data: {"type":"reload"}\n\n'); };
   const notify = async (changed: string[]): Promise<void> => {
     if (lastError) return reload();
+    // CSS-only change (styles.css/scss or theme.muten — nothing touches the Doc/JS): hot-swap the stylesheet instead
+    // of reloading. A full reload resets scroll + re-inits every signal — brutal while dragging a color in the palette.
+    if (changed.length && changed.every((f) => /styles\.(css|scss)$/.test(f) || /theme\.muten$/.test(f))) {
+      for (const c of clients) c.write('data: {"type":"css"}\n\n'); // rebuild() already refreshed cssBytes
+      return;
+    }
     const pages = changed.filter((f) => f.endsWith('.muten') && f.includes('pages'));
     if (pages.length !== 1) return reload(); // store/theme/config/multi-file edits: full reload
     try {
@@ -435,7 +441,10 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
       const opts = { stores: model.store.storesMeta, storeEntities: model.store.storeEntities, api: model.appIr?.api || {}, iconResolver: model.iconResolver, classes: model.classes };
       const patches = diff.patches.map((id) => ({ id, src: compileNodePatch(newDoc, id, opts) }));
       const msg = JSON.stringify({ type: 'patch', screen: newDoc.screen, patches });
-      for (const c of clients) c.write(`data: ${msg}\n\n`);
+      // Swap the (already-rebuilt) CSS too: a class-only edit can introduce a NEW Tailwind utility (a background, a color)
+      // whose rule didn't exist before. The patch adds the class to the DOM node, but without re-fetching the stylesheet
+      // the new class has NO rule → "I changed the background and nothing happened". The css hot-swap keeps state intact.
+      for (const c of clients) { c.write('data: {"type":"css"}\n\n'); c.write(`data: ${msg}\n\n`); }
     } catch { reload(); }
   };
 
@@ -450,7 +459,7 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
     + `<pre style="padding:24px;white-space:pre-wrap;color:#ffb4b4">${lastError.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</pre>`
     + `<script>new EventSource('/_reload').onmessage=()=>location.reload()</script></body>`;
 
-  createServer(async (req, res) => {
+  const httpServer = createServer(async (req, res) => {
     const url = (req.url || '/').split('?')[0];
     res.setHeader('Cache-Control', 'no-cache'); // dev: assets change on every edit (boot.css has no hash); never let the browser serve a stale copy
     if (url === '/_reload') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); clients.add(res); req.on('close', () => clients.delete(res)); return; }
@@ -477,7 +486,12 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
     const pub = join(root, 'public', url); // public assets (favicons, /docs, /code) still come from disk
     if (url !== '/' && existsSync(pub) && !statSync(pub).isDirectory()) { res.setHeader('Content-Type', MIME[extname(pub)] || 'application/octet-stream'); res.end(readFileSync(pub)); return; }
     res.setHeader('Content-Type', 'text/html'); res.end(indexHtml()); // SPA fallback
-  }).listen(port, () => console.log(`  muten dev (esbuild) → http://localhost:${port}/`));
+  });
+  // the configured port may be taken (another app, a stale server) — fall back to a free OS-assigned port instead of
+  // crashing, and ALWAYS print the port actually bound so a parent process can read it back.
+  httpServer.on('error', (e: NodeJS.ErrnoException) => { if (e.code === 'EADDRINUSE') { console.log(`  port ${port} is busy — using a free port instead`); httpServer.listen(0); } else throw e; });
+  httpServer.on('listening', () => { const a = httpServer.address(); const bound = a && typeof a === 'object' ? a.port : port; console.log(`  muten dev (esbuild) → http://localhost:${bound}/`); });
+  httpServer.listen(port);
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   const changed = new Set<string>();

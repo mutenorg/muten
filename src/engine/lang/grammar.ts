@@ -142,7 +142,12 @@ export class Grammar {
 
   // Atoms: parenthesised expr, object literal, literal value, or a (possibly dotted) reference.
   private primary(): Expr {
-    if (this.at(Tk.Punct, Pn.ParenL)) { this.next(); const inner = this.ternary(); this.eat(Tk.Punct, Pn.ParenR); return inner; }
+    if (this.at(Tk.Punct, Pn.ParenL)) {
+      this.next(); const inner = this.ternary(); this.eat(Tk.Punct, Pn.ParenR);
+      // `(a * 0.8).toFixed(0)` — a JS method on a parenthesized result. muten values have no methods; teach the escape.
+      if (this.at(Tk.Punct, Pn.Dot)) throw new ParseError('muten values have no methods (`.toFixed`/`.map`/`.round`…). To format a number use `money(x)`; for list operations use `where` / `sort by` / `sum by`.', this.locOf(this.peek().pos));
+      return inner;
+    }
     if (this.at(Tk.Punct, Pn.BraceL)) { // inline object literal: `{ title: @t, qty: 1 }` (the one missing value form)
       this.next();
       const fields: Array<{ key: string; value: Expr }> = [];
@@ -158,6 +163,9 @@ export class Grammar {
     if (this.at(Tk.String)) return { kind: Ek.Lit, value: this.next().v };
     if (this.at(Tk.Number)) return { kind: Ek.Lit, value: Number(this.next().v) };
     let name = this.at(Tk.Param) ? '$' + this.next().v : this.eat(Tk.Ident).v; // $param resolves at compose time
+    // `if … then … else` is a STATEMENT (action bodies only); in an expression muten uses a ternary. `if`/`then`/`else`
+    // are never valid expression atoms, so catching one here teaches the ternary instead of a cryptic "unexpected".
+    if (name === 'if' || name === 'then' || name === 'else') throw new ParseError(`muten expressions use a ternary \`cond ? a : b\`, not \`if … then … else\` — e.g. \`status == "done" ? 10000 : 5000\`.`, this.locOf(this.toks[this.pos - 1].pos));
     const literal = LITERALS.get(name);
     if (literal !== undefined) return { kind: Ek.Lit, value: literal }; // true, false, or null
     while (this.at(Tk.Punct, Pn.Dot)) { this.next(); name += '.' + this.eat(Tk.Ident).v; } // user.name, cart.total
@@ -186,7 +194,12 @@ export class Grammar {
     // `tasks.count where not done` (predicate). Item fields are read bare (item-implicit).
     if (isAgg && (this.at(Tk.Ident, Kw.By) || this.at(Tk.Ident, Kw.Where))) {
       this.next();
-      return { kind: Ek.Agg, op, list: name.slice(0, dot), body: this.parseExpr() };
+      const body = this.parseExpr();
+      // `list.sort by <f> take(n)` — sort then keep the first n (top-N / "N most recent", a very common need). `take`
+      // chains onto the sorted list here, so it reads as one expression instead of forcing two separate `get`s.
+      let take: Expr | undefined;
+      if ((op === 'sort' || op === 'sortDesc') && this.at(Tk.Ident, 'take')) { this.next(); this.eat(Tk.Punct, Pn.ParenL); take = this.parseExpr(); this.eat(Tk.Punct, Pn.ParenR); }
+      return { kind: Ek.Agg, op, list: name.slice(0, dot), body, take };
     }
     if (!isAgg && this.at(Tk.Ident, Kw.Where)) {             // derived list: `tasks where status == "todo"`, item fields read bare
       this.next();
@@ -194,6 +207,9 @@ export class Grammar {
     }
     if (this.at(Tk.Punct, Pn.ParenL)) {
       if (isAgg) throw new ParseError(`\`${op}\` takes ${op === 'count' ? '`where <cond>`' : '`by <expr>`'} now, not a \`(x => …)\` lambda — write \`${name.slice(0, dot)}.${op} ${op === 'count' ? 'where <cond>' : 'by <expr>'}\` (item fields read bare)`, this.locOf(this.peek().pos));
+      // `list.orderBy(…)` / `.limit(…)` / `.filter(…)` — a JS/LINQ method. muten values have no methods (only the
+      // built-ins take/at + `by`/`where` aggregates), so a dotted call here is always the model reaching for JS. Teach the vocabulary.
+      if (dot !== -1) throw new ParseError(`\`.${op}(…)\`: muten values have no JS methods. Filter with \`${name.slice(0, dot)} where <cond>\`, order with \`${name.slice(0, dot)}.sort by <field>\` (or \`sortDesc by\`), take the first n with \`${name.slice(0, dot)}.take(n)\`, total/average/count with \`${name.slice(0, dot)}.sum|avg|count by <field>\`, membership with \`contains\`. A \`use\`'d function is called \`fn(x)\`, never \`x.fn()\`.`, this.locOf(this.peek().pos));
       this.next();                                            // a call: fmt(a, b) -> a use'd function
       const args: Expr[] = [];
       while (!this.at(Tk.Punct, Pn.ParenR)) { args.push(this.ternary()); if (this.at(Tk.Punct, Pn.Comma)) this.next(); }
@@ -218,9 +234,26 @@ export class Grammar {
       if (open > cursor) parts.push(raw.slice(cursor, open));
       const close = raw.indexOf('}', open);
       if (close < 0) { parts.push(raw.slice(open)); break; } // unbalanced: keep the rest verbatim
-      const sub = new Grammar(raw.slice(open + 1, close)); // {expr} -> full expression AST
-      sub.rebaseParent = this; sub.rebaseBase = baseOffset + open + 1; // map its diagnostics back to the outer file
+      let sub: Grammar;
+      try { sub = new Grammar(raw.slice(open + 1, close)); } // {expr} -> full expression AST
+      catch (e) {
+        // the lexer runs in the Grammar CONSTRUCTOR, before rebaseParent is set — so a bad char inside `{…}`
+        // (e.g. a single quote) throws with a loc relative to the SUBSTRING. Map it back onto the outer file, or the
+        // error points at line 1 instead of the real line (what left the model staring at `screen …` 18 lines up).
+        if (e instanceof ParseError && e.loc && baseOffset > 0) {
+          const s = raw.slice(open + 1, close);
+          let i = 0, ln = 1;
+          while (ln < e.loc.line && i < s.length) { if (s[i] === '\n') ln++; i++; }
+          e.loc = this.locOf(baseOffset + open + 1 + i + (e.loc.col - 1));
+        }
+        throw e;
+      }
+      sub.rebaseParent = this; sub.rebaseBase = baseOffset + open + 1; // map its PARSER diagnostics back to the outer file
       parts.push(sub.parseExpr());
+      if (!sub.at(Tk.Eof)) { // trailing tokens in `{…}` — almost always a Vue/Angular pipe filter (`{x | money}`)
+        const t = sub.peek();
+        throw new ParseError(t.v === Pn.Pipe ? `muten has no pipe filters — call the function: \`{money(x)}\`, not \`{x | money}\` (also \`date\`/\`time\`/\`ago\`/\`upper\`/\`truncate(s,n)\`).` : `unexpected "${t.v}" in \`{…}\` — an interpolation holds ONE expression`, sub.locOf(t.pos));
+      }
       cursor = close + 1;
     }
     return { kind: Ek.Interp, parts };
@@ -243,7 +276,7 @@ export class Grammar {
     return this.parseScalar();
   }
 
-  private parseArray(): Value[] {
+  protected parseArray(): Value[] {
     this.eat(Tk.Punct, Pn.BrackL);
     const items: Value[] = [];
     while (!this.at(Tk.Punct, Pn.BrackR)) {

@@ -18,6 +18,14 @@ const OPERATORS: Array<[string, Tk]> = [
 const isSpace = (char: string): boolean => char === ' ' || char === '\t' || char === '\r' || char === '\n';
 const isDigit = (char: string): boolean => char >= '0' && char <= '9';
 const isWordStart = (char: string): boolean => (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || char === '_';
+
+// JS operators that don't exist in muten — point the writer (often an AI) at the muten word instead of a bare "unexpected character".
+const JS_OP_HINT: Record<string, string> = {
+  '!': 'muten has no "!" — write "not x" for negation, or "!=" for not-equal',
+  '&': 'muten has no "&&" — write "and"',
+  "'": 'muten strings and values use "double quotes" — write "completed", not \'completed\' (single quotes are not valid)',
+  '\\': 'muten has no backslash escapes — a `"` inside `{…}` is ALREADY a nested string, so write `{on ? "a" : "b"}` (remove the `\\`)',
+};
 const isWord = (char: string): boolean => isWordStart(char) || isDigit(char);
 
 // 1-based line/col for a source index, used when the lexer hits a bad character.
@@ -39,7 +47,12 @@ class Lexer {
       const start = this.index;
       const char = source[this.index];
       if (isSpace(char)) { this.index++; continue; }
-      if (char === '#') { this.skipComment(); continue; }
+      if (char === '﻿') { this.index++; continue; }             // BOM — Windows editors / model output prepend it; skip, don't die at 1:1
+      if (char === '#') { this.skipLineComment(); continue; }
+      // Comments are `#`, but tolerate the JS-isms every model reaches for (`//` line, `/* … */` block) — they carry
+      // no meaning, so accepting them costs nothing and spares the AI a landmine. A lone `/` stays division.
+      if (char === '/' && source[this.index + 1] === '/') { this.skipLineComment(); continue; }
+      if (char === '/' && source[this.index + 1] === '*') { this.skipBlockComment(); continue; }
       if (char === '"') { this.scanString(start); continue; }
       if (char === '@') { this.scanSigil(start, Tk.Ref, '@'); continue; }   // @state ref
       if (char === '$') { this.scanSigil(start, Tk.Param, ''); continue; }  // $partParam
@@ -47,7 +60,8 @@ class Lexer {
       if (isDigit(char) || (char === Pn.Dash && isDigit(source[this.index + 1]))) { this.scanNumber(start); continue; }
       if (PUNCT_CHARS.includes(char)) { this.push(Tk.Punct, char, start); this.index++; continue; }
       if (isWordStart(char)) { this.scanWord(start); continue; }           // ident / keyword
-      throw new ParseError(`unexpected character ${JSON.stringify(char)}`, locFromIndex(source, this.index));
+      const hint = JS_OP_HINT[char];                                       // catch JS-isms (! && ||) with the muten word
+      throw new ParseError(hint ?? `unexpected character ${JSON.stringify(char)}`, locFromIndex(source, this.index));
     }
     this.push(Tk.Eof, '', this.index);
     return this.tokens;
@@ -55,13 +69,15 @@ class Lexer {
 
   private push(kind: Tk, value: string, pos: number): void { this.tokens.push({ t: kind, v: value, pos }); }
 
-  private skipComment(): void { while (this.index < this.source.length && this.source[this.index] !== '\n') this.index++; }
+  private skipLineComment(): void { while (this.index < this.source.length && this.source[this.index] !== '\n') this.index++; }
+  private skipBlockComment(): void { this.index += 2; while (this.index < this.source.length && !(this.source[this.index] === '*' && this.source[this.index + 1] === '/')) this.index++; this.index += 2; } // unterminated → runs to EOF, harmless
 
   // Read until the closing quote, but a `"` inside `{...}` is a nested string literal,
   // not the end: `"Total ({items.count(i => i.status == "paid")})"` is one string token.
   private scanString(start: number): void {
     const { source } = this; let end = this.index + 1; let value = ''; let depth = 0;
     while (end < source.length && (source[end] !== '"' || depth > 0)) {
+      if (source[end] === '\\' && source[end + 1] === '"') { value += '"'; end += 2; continue; } // tolerate `\"` (the universal JS instinct: escaping a quote) → a literal " ; other `\x` (e.g. `\d` in a regex) stay literal
       if (source[end] === '{') depth++;
       else if (source[end] === '}') depth--;
       value += source[end]; end++;

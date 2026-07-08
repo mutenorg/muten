@@ -22,7 +22,7 @@ export type Source = string | { url: string; method?: string; headers?: { [k: st
 
 /** A manifest prop's type hint (`"?"` marks optional) — the vocabulary the linter shows. */
 export type PropHint =
-  | 'text' | 'text?' | 'state' | 'action' | 'action?' | 'expr' | 'expr?'
+  | 'text' | 'text?' | 'state' | 'state?' | 'action' | 'action?' | 'expr' | 'expr?'
   | 'fields' | 'route' | 'name' | 'map?' | 'clauses?' | 'ident' | 'ident?' | 'idents';
 
 /** A primitive's manifest entry: its vocabulary + docs (the single source the linter reads).
@@ -75,9 +75,10 @@ export interface TernExpr { kind: Ek.Tern; cond: Expr; then: Expr; else: Expr; }
 /** A call to a `use`'d JS function: `fmt(date, "…")`. `fn` is the imported name; never a muten primitive. */
 export interface CallExpr { kind: Ek.Call; fn: string; args: Expr[]; }
 export interface ObjExpr { kind: Ek.Obj; fields: Array<{ key: string; value: Expr }>; } // inline object literal, e.g. `{ title: @draft.title, qty: 1 }`
-export interface AggExpr { kind: Ek.Agg; op: string; list: string; body: Expr; member?: string; } // e.g. `lines.sum by price * qty` (item-implicit). `member` = the field read off an `at(n)` element (`matches.at(hi).name`).
+export interface AggExpr { kind: Ek.Agg; op: string; list: string; body: Expr; member?: string; take?: Expr; } // e.g. `lines.sum by price * qty` (item-implicit). `member` = the field read off an `at(n)` element. `take` = the top-n cap on `sort by … take(n)`.
 export interface FilterExpr { kind: Ek.Filter; list: string; cond: Expr; } // derived list, e.g. `tasks where status == "todo"` (item-implicit)
-export type Expr = LitExpr | RefExpr | UnExpr | BinExpr | TernExpr | CallExpr | ObjExpr | AggExpr | FilterExpr;
+export interface ArrExpr { kind: Ek.Arr; items: Value[]; } // inline literal list, ONLY as an `each [ {…} {…} ] as x` source — hoisted to a synthesized state in toDoc (shape inferred from the literal), so it never reaches validate/compile
+export type Expr = LitExpr | RefExpr | UnExpr | BinExpr | TernExpr | CallExpr | ObjExpr | AggExpr | FilterExpr | ArrExpr;
 
 /** A `use a, b from "./lib.ts"` — named JS functions muten may call. The seam to the JS ecosystem. */
 export interface ImportDef { names: string[]; from: string; }
@@ -250,6 +251,7 @@ export interface NodeProps {
   arg?: Expr;
   argRest?: Expr[];  // 2nd+ args of `-> f(a, b, c)` (`arg` holds the 1st); unset for single-arg calls
   bind?: string;
+  checked?: Expr;    // Checkbox checked(expr): display a bool one-way (read-only, or `-> action` to toggle) — the store-list-row alternative to bind
   submit?: string;
   // modifiers
   where?: string[];
@@ -279,6 +281,7 @@ export interface NodeProps {
   min?: Expr; max?: Expr; step?: Expr;  // Number/Range numeric bounds + increment (each one number expression, static or a state)
   index?: string;  // `each x as item, i` -> `i` is the item's 0-based position (a reactive number, updates on reorder)
   filter?: Expr;  // `each x as i where <cond>` -> render only matching items (avoids the each+when nesting leak)
+  take?: Expr;  // `each x as i [where …] take(n)` -> render only the first n (after filtering): top-N / "first few"
 }
 
 /** A nested authoring node (before flatten); also the shape parts/shell hold. */
@@ -383,6 +386,7 @@ export interface StoreSlice {
   state?: string[];
   gets?: string[];
   actions?: string[];
+  queries?: string[];   // subset of state backed by a `query` (holds { data, loading, error }) — a bare ref unwraps to .data
 }
 
 export interface CompileOpts {

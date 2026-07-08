@@ -121,7 +121,14 @@ export class Logic {
     if (this.ctx.stores[head]) {
       const member = rest[0];
       const more = rest.length > 1 ? '.' + rest.slice(1).join('.') : '';
-      if (this.inStore(head, member, 'state') || this.inStore(head, member, 'gets')) { this.ctx.usedStores.add(head); return `__store_${head}.${member}.get()${more}`; }
+      if (this.inStore(head, member, 'state') || this.inStore(head, member, 'gets')) {
+        this.ctx.usedStores.add(head);
+        // a store query member holds { data, loading, error } — a BARE ref unwraps to its .data array (same as a page
+        // query, lines above), so `each store.q as x` iterates rows, not the wrapper. `.data/.loading/.error` pass through.
+        const sub = rest[1];
+        if ((this.ctx.stores[head]?.queries || []).includes(member) && sub !== 'data' && sub !== 'loading' && sub !== 'error') return `__store_${head}.${member}.get().data${more}`;
+        return `__store_${head}.${member}.get()${more}`;
+      }
       // a store WRITE action's live status: `orders.place.pending` / `.error` -> the store's exported __pending_/__error_
       // signal. Without this the ref fell through to a bare `orders` (undefined at runtime — a documented-but-crashing pattern).
       if ((rest[1] === 'pending' || rest[1] === 'error') && this.inStore(head, member, 'actions')) { this.ctx.usedStores.add(head); return `__store_${head}.${rest[1] === 'pending' ? '__pending_' : '__error_'}${member}.get()`; }
@@ -155,7 +162,8 @@ export class Logic {
         const b = node.body;
         const dyn = b.kind === Ek.Ref && !b.name.includes('.') && b.name !== 'id' && itemF.size > 0 && !itemF.has(b.name);
         const key = dyn && b.kind === Ek.Ref ? `((__it) => __it[${this.resolveRef(b.name, scope)}])` : `((__it) => ${body})`;
-        return `[...${list}].sort((__a, __b) => { const __ka = ${key}(__a), __kb = ${key}(__b); return (__ka < __kb ? -1 : __ka > __kb ? 1 : 0) * ${dir}; })`;
+        const sorted = `[...${list}].sort((__a, __b) => { const __ka = ${key}(__a), __kb = ${key}(__b); return (__ka < __kb ? -1 : __ka > __kb ? 1 : 0) * ${dir}; })`;
+        return node.take ? `${sorted}.slice(0, ${this.compileExpr(node.take, scope)})` : sorted; // `sort by … take(n)` -> top-n after sorting
       }
       const reduce = (init: string, step: string): string => `${list}.reduce((__a, __it) => ${step}, ${init})`;
       if (node.op === 'count') return `${list}.filter((__it) => ${body}).length`;
@@ -192,6 +200,11 @@ export class Logic {
   stmtLines(st: Stmt, scope: Scope, isAsync = false): string[] {
     const ctx = this.ctx;
     const out: string[] = [];
+    // Belt-and-suspenders: the LOCAL mutation ops dereference ctx.state[target]. Validate rejects a store/undeclared target,
+    // but if compile ever runs on lint-unclean input, fail with a CLEAR message instead of a cryptic `undefined.type` crash.
+    if ('target' in st && st.target && (st.op === StOp.Push || st.op === StOp.Reset || st.op === StOp.Patch || st.op === StOp.Remove || st.op === StOp.Toggle) && !ctx.state[st.target]) {
+      throw new Error(`cannot \`${st.op}\` "${st.target}" — it is not a page-local state (a store is mutated via a store action, e.g. ${st.target}.add(…)).`);
+    }
     switch (st.op) {
       case StOp.If: {
         out.push(`if (${this.compileExpr(st.cond, scope)}) {`);

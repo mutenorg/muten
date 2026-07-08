@@ -8,6 +8,7 @@ import type { Loc, Diagnostic, DiagOpts } from '#engine/shared/types.js';
 export class ParseError extends Error {
   code: string;
   loc: Loc | null;
+  file?: string;   // tagged at the parse site so a syntax error that escapes validate still prints file:line:col
   constructor(message: string, loc?: Loc | null) {
     super(message);
     this.name = 'ParseError';
@@ -47,9 +48,21 @@ function lev(a: string, b: string): number {
   return row[b.length];
 }
 
-// CLI format: file:line:col  severity  [code]  message  -> did you mean "x"?
-export function formatDiagnostic(d: Diagnostic, file: string): string {
+// A TS/esbuild-style code frame: the offending source line + a caret under the exact column, so you SEE
+// where the error is (a `file:line:col` alone reads exact but you still have to go count the character).
+export function codeFrame(source: string, loc: Loc): string {
+  const line = source.split('\n')[loc.line - 1];
+  if (line === undefined) return '';
+  const gutter = String(loc.line);
+  const bar = ' '.repeat(gutter.length);
+  const caret = ' '.repeat(Math.max(0, loc.col - 1)) + '^';
+  return `\n  ${gutter} │ ${line}\n  ${bar} │ ${caret}\n`;
+}
+
+// CLI format: file:line:col  severity  [code]  message  -> did you mean "x"?  (+ a code frame when the source is on hand)
+export function formatDiagnostic(d: Diagnostic, file: string, source?: string): string {
   const where = d.loc ? `${file}:${d.loc.line}:${d.loc.col}` : file;
   const hint = d.suggestion ? `  → did you mean "${d.suggestion}"?` : '';
-  return `${where}  ${d.severity}  [${d.code}]  ${d.message}${hint}`;
+  const frame = source && d.loc ? codeFrame(source, d.loc) : '';
+  return `${where}  ${d.severity}  [${d.code}]  ${d.message}${hint}${frame}`;
 }

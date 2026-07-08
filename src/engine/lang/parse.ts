@@ -7,7 +7,7 @@
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { Grammar } from '#engine/lang/grammar.js';
-import { Tk, Pn, Kw, Nt, Mod, StOp, Ek, BOp } from '#engine/shared/vocab.js';
+import { Tk, Pn, Kw, Nt, Mod, StOp, Ek, BOp, nonPrimitiveHint } from '#engine/shared/vocab.js';
 import type {
   IR, IRNode, NodeProps, StringPropName, Stmt, IfStmt, Expr, Interp, Value, Level,
   Entity, FieldType, EntityConstraints, FieldConstraint,
@@ -39,10 +39,14 @@ export class Parser extends Grammar {
     this.modifiers = new Map([
       [Mod.Bind, (props: NodeProps) => { // canonical `bind(name)`; bare name / `@name` accepted during migration
         const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next();
+        if (this.at(Tk.Punct, Pn.BraceL)) throw new ParseError('bind takes ONE state name, not an inline object. muten has no `Form bind({…})` — DROP the `Form` wrapper and bind each input to its own state: `SearchField bind(name)  SearchField bind(email)  Button "Save" -> save`.', this.locOf(this.peek().pos));
         if (this.at(Tk.Ref)) { let b = this.eat(Tk.Ref).v; while (this.at(Tk.Punct, Pn.Dot)) { this.next(); b += '.' + this.eat(Tk.Ident).v; } props.bind = b; }
         else props.bind = this.parseDotted();
+        // `bind(name, email)` — several states in one bind (usually a `Form`). bind is single; teach the individual-inputs form.
+        if (this.at(Tk.Punct, Pn.Comma)) throw new ParseError('`bind` takes ONE state, not several. DROP the `Form` wrapper and bind each input to its own state: `SearchField bind(name)  SearchField bind(email)  Button "Save" -> save`.', this.locOf(this.peek().pos));
         if (paren) this.eat(Tk.Punct, Pn.ParenR);
       }],
+      [Mod.Checked, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.checked = this.parseExpr(); if (paren) this.eat(Tk.Punct, Pn.ParenR); }], // Checkbox checked(expr) — display a bool one-way (pair with `-> action` to toggle)
       [Mod.Submit, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.submit = this.parseDotted(); if (paren) this.eat(Tk.Punct, Pn.ParenR); }],
       [Mod.Where, (props: NodeProps) => { props.where = this.parseParenList(() => this.rebuildClause()); }],
       [Mod.Columns, (props: NodeProps) => { props.columns = this.parseParenList(() => this.eat(Tk.Ident).v); }],
@@ -170,9 +174,13 @@ export class Parser extends Grammar {
     const constraints: EntityConstraints = {};
     while (!this.at(Tk.Punct, Pn.BraceR)) {
       const fieldName = this.eat(Tk.Ident).v;
-      const options = [this.eat(Tk.Ident).v];                                  // type, then any `| enum` alternatives
+      let head = this.eat(Tk.Ident).v;
+      // `features list<text>` — a field holding a list of scalars (feature bullets, tags, categories). muten values
+      // already support list<scalar>; letting an entity FIELD be one spares the model the cryptic `expected ident, got "<"`.
+      if (head === 'list' && this.at(Tk.Punct, Pn.Lt)) { this.next(); const elem = this.eat(Tk.Ident).v; this.eat(Tk.Punct, Pn.Gt); head = `list<${mapFieldType(elem)}>`; }
+      const options = [head];                                                  // type, then any `| enum` alternatives
       while (this.at(Tk.Punct, Pn.Pipe)) { this.next(); options.push(this.eat(Tk.Ident).v); }
-      fields[fieldName] = options.length > 1 ? 'enum:' + options.join('|') : mapFieldType(options[0]);
+      fields[fieldName] = options.length > 1 ? 'enum:' + options.join('|') : (head.startsWith('list<') ? head : mapFieldType(options[0]));
       const constraint = this.parseConstraints();                              // optional constraints: required, min:N, max:N
       if (Object.keys(constraint).length) constraints[fieldName] = constraint;
     }
@@ -187,12 +195,25 @@ export class Parser extends Grammar {
     while (this.at(Tk.Ident, Kw.Required) || this.at(Tk.Ident, Kw.Min) || this.at(Tk.Ident, Kw.Max) || this.at(Tk.Ident, Kw.Pattern)) {
       const key = this.next().v;
       if (key === Kw.Required) { constraint.required = true; continue; }
-      this.eat(Tk.Punct, Pn.Colon);
-      if (key === Kw.Pattern) { constraint.pattern = this.eat(Tk.String).v; continue; } // `pattern:"^\d{5}$"` — a regex string
+      // accept BOTH `min:8` (muten) and `min(8)` (the function-call style every model reaches for) — same meaning.
+      const paren = this.at(Tk.Punct, Pn.ParenL);
+      if (paren) this.next(); else this.eat(Tk.Punct, Pn.Colon);
+      if (key === Kw.Pattern) { constraint.pattern = this.eat(Tk.String).v; if (paren) this.eat(Tk.Punct, Pn.ParenR); continue; } // `pattern:"^\d{5}$"` — a regex string
       const num = Number(this.eat(Tk.Number).v);
+      if (paren) this.eat(Tk.Punct, Pn.ParenR);
       if (key === Kw.Min) constraint.min = num; else constraint.max = num;
     }
     return constraint;
+  }
+
+  // The scalar type a literal initial reveals, for an untyped state (`= false` → bool). '' when it can't be inferred
+  // (an object draft or `= null` — those still need an explicit `: type`). An array → 'list' (element synthesized in toDoc).
+  private inferType(v: Value | undefined): string {
+    if (typeof v === 'boolean') return 'bool';
+    if (typeof v === 'number') return 'number';
+    if (typeof v === 'string') return 'text';
+    if (Array.isArray(v)) return 'list';
+    return '';
   }
 
   // state { } (page-local) and store { } (app-global) share one grammar: `name = <initial|query> : <type>`
@@ -214,8 +235,16 @@ export class Parser extends Grammar {
       else if (this.at(Tk.Ident, Kw.True) || this.at(Tk.Ident, Kw.False)) { initial = this.next().v === Kw.True; hasInitial = true; }
       else if (this.at(Tk.Ident, 'null')) { this.next(); hasInitial = true; }                    // `= null` → initial stays undefined → genState emits signal(null), NOT the string "null"
       else { initial = this.next().v; hasInitial = true; }                                       // bare enum value
-      this.eat(Tk.Punct, Pn.Colon);
-      const type = this.parseType();
+      // `: type` is OPTIONAL when a literal initial reveals it (`x = false` → bool, `q = ""` → text, `n = 0` → number,
+      // `cards = [ … ]` → list). Only a query / `= null` / an object draft still needs the annotation. Same "infer, don't
+      // demand a redundant declaration" as list shapes — spares the model the cryptic `expected ":", got "}"`.
+      let type: string;
+      if (this.at(Tk.Punct, Pn.Colon)) { this.next(); type = this.parseType(); }
+      else {
+        const inferred = source ? '' : this.inferType(hasInitial ? initial : undefined);
+        if (!inferred) throw new ParseError(`state "${nameTok.v}" needs a type — write \`${nameTok.v} = <value> : text|number|bool|list<T>\`${source ? ' (a query returns a list: `: list<T>`)' : ''}.`, this.locOf(this.peek().pos));
+        type = inferred;
+      }
       const persist = this.at(Tk.Ident, Kw.Persist) ? (this.next(), true) : undefined; // `: T persist` -> localStorage-backed
       const loc = this.locOf(nameTok.pos);
       target[nameTok.v] = source ? { type, source, refresh, live, loc } : { type, initial: hasInitial ? initial : null, persist, loc };
@@ -250,8 +279,15 @@ export class Parser extends Grammar {
     const name = this.eat(Tk.Ident).v;
     let params: PartParam[] | undefined;   // optional typed params: `action f(a: T, b: T)`
     if (this.at(Tk.Punct, Pn.ParenL)) params = this.parseParenList(() => { const pn = this.eat(Tk.Ident).v; this.eat(Tk.Punct, Pn.Colon); return { name: pn, type: this.parseType() }; });
+    if (this.at(Tk.Punct, Pn.Colon)) throw new ParseError(`action \`${name}\` declares a return type (\`: …\`) — muten actions cannot return a value, they only \`mutates\` state. Since \`${name}\` just derives a value from its inputs, make it a \`get\`, not an action — e.g. a detail page reads \`param pid\` then \`get match = store.items where id == pid\`. Drop the \`: Type\` and the \`return\`.`, this.locOf(this.peek().pos));
     const mutates: string[] = []; // a pure command (e.g. explicit `post`) may mutate nothing local
-    if (this.at(Tk.Ident, Kw.Mutates)) { this.next(); mutates.push(this.eat(Tk.Ident).v); while (this.at(Tk.Punct, Pn.Comma)) { this.next(); mutates.push(this.eat(Tk.Ident).v); } }
+    if (this.at(Tk.Ident, Kw.Mutates)) {
+      this.next();
+      // `mutates` with no target (`action f mutates { … }`) is the classic slip: teach the two fixes instead of "expected ident".
+      if (!this.at(Tk.Ident)) throw new ParseError(`\`mutates\` needs at least one state name (e.g. \`mutates users\`). If \`${name}\` changes no local state, drop \`mutates\` entirely: \`action ${name} { … }\`.`, this.locOf(this.peek().pos));
+      mutates.push(this.eat(Tk.Ident).v);
+      while (this.at(Tk.Punct, Pn.Comma)) { this.next(); mutates.push(this.eat(Tk.Ident).v); }
+    }
     let input = '';               // optional legacy input parameter (`<- item`)
     if (this.at(Tk.LArrow)) { this.next(); input = this.eat(Tk.Ident).v; }
     ir.actions[name] = { mutates, input, params, body: this.parseActionBody() };
@@ -297,6 +333,7 @@ export class Parser extends Grammar {
   private parseStatementInner(): Stmt {
     if (this.at(Tk.Ident, Kw.If)) return this.parseIf();
     if (this.at(Tk.Ident, 'post') || this.at(Tk.Ident, 'put') || this.at(Tk.Ident, 'delete')) return this.parseRequest();
+    if (this.at(Tk.Ident, 'let') || this.at(Tk.Ident, 'const') || this.at(Tk.Ident, 'var')) { const kw = this.peek().v; const nx = this.toks[this.pos + 1]; const vn = nx ? nx.v : 'x'; throw new ParseError(`\`${kw} ${vn} = …\` — muten actions have no \`${kw}\`/local variables. Make \`${vn}\` a \`get\` (declared outside the action), or inline its value where it's used. To bump-or-add (e.g. a cart): \`if (items.count where id == x) > 0 { items.patch where id == x with { … } } else { items.push({ … }) }\`.`, this.locOf(this.peek().pos)); }
     const target = this.eat(Tk.Ident).v;
     if (this.at(Tk.Punct, Pn.ParenL)) { // `fn(args)`: call a use'd function as a side-effect statement (validate checks fn is declared)
       this.next();
@@ -457,12 +494,16 @@ export class Parser extends Grammar {
   // `each <list> as <item>[, <i>] { ... }`: list render; `item` (and optional 0-based index `i`) are scope variables.
   private parseEach(): IRNode {
     const head = this.eat(Tk.Ident, Kw.Each);
-    const list = this.parseExpr();
+    // `each [ {…} {…} ] as x` — an inline list of static rows (feature cards, plans, testimonials). Parse the literal;
+    // toDoc hoists it into a synthesized state (shape inferred from the literal), so downstream sees a normal named list.
+    // (A list you MUTATE still needs a named state/store — you can't `push` to an anonymous inline list.)
+    const list: Expr = this.at(Tk.Punct, Pn.BrackL) ? { kind: Ek.Arr, items: this.parseArray() } : this.parseExpr();
     this.eat(Tk.Ident, Kw.As);
     const as = this.eat(Tk.Ident).v;
     const props: NodeProps = { list, as };
     if (this.at(Tk.Punct, Pn.Comma)) { this.next(); props.index = this.eat(Tk.Ident).v; } // `each x as item, i`: i = the item's 0-based position (reactive)
     if (this.at(Tk.Ident, Kw.Where)) { this.next(); props.filter = this.parseExpr(); } // `each x as i where cond`: render only matching items
+    if (this.at(Tk.Ident, 'take')) { this.next(); this.eat(Tk.Punct, Pn.ParenL); props.take = this.parseExpr(); this.eat(Tk.Punct, Pn.ParenR); } // `each x as i [where …] take(n)`: only the first n (top-N)
     return { type: Nt.Each, props, children: this.parseChildren(), loc: this.locOf(head.pos) };
   }
 
@@ -471,6 +512,15 @@ export class Parser extends Grammar {
   private parseNode(): IRNode {
     if (this.at(Tk.Ident, Kw.When)) return this.parseWhen();   // control-flow nodes look like keywords
     if (this.at(Tk.Ident, Kw.Each)) return this.parseEach();
+    // `if <cond> { … }` in the TREE — conditional rendering is `when`, not `if` (`if` is action-body only). Teach it
+    // instead of the cryptic `expected ":", got …` the model gets when `if` is parsed as a primitive name.
+    if (this.at(Tk.Ident, Kw.If)) throw new ParseError('conditional rendering is `when <cond> { … }`, not `if` (`if/else` is only inside an action body) — e.g. `when not user.isAnonymous { … }`.', this.locOf(this.peek().pos));
+    if (this.at(Tk.Ident, Kw.Else)) throw new ParseError('muten has no `else` in the tree (`if/else` is action-body only). Two branches on a page = two `when`s: `when x { … }` then `when x == false { … }` (or `when not x { … }`). For an enum use `match status { active -> …  lead -> … }`.', this.locOf(this.peek().pos));
+    // `<div>`/`<span>`/… — the model wrote an HTML tag where a primitive goes. muten has NO tags; map it to the primitive.
+    if (this.at(Tk.Punct, Pn.Lt)) {
+      const nx = this.toks[this.pos + 1]; const tag = nx && nx.t === Tk.Ident ? nx.v : ''; const hint = nonPrimitiveHint(tag);
+      throw new ParseError(hint ? `muten has no HTML tags — \`<${tag}>\` is ${hint}. Elements are \`Primitive class("…") { … }\`, never \`<${tag}>\`.` : 'muten has no HTML tags (`<div>`, `<span>`…). Use a primitive: `Stack` for a div, `Text` for a paragraph, `Span` for inline text, `Image`/`Link`/`Button`. Elements are `Primitive class("…") { … }`, never `<tag>`.', this.locOf(this.peek().pos));
+    }
     const head = this.eat(Tk.Ident);
     const type = head.v;
     const loc = this.locOf(head.pos);
@@ -522,6 +572,9 @@ export class Parser extends Grammar {
   private parseArrow(type: string, props: NodeProps): void {
     this.next();
     if (type === Nt.Link) { props.to = this.parsePath(); return; }
+    // `Button -> "/route"` — the model wants NAVIGATION. Only a Link navigates; a Button `-> action` runs an action.
+    // Teach the swap instead of the "expected ident, got string" ↔ "unknown-action" bounce that traps the model.
+    if (this.at(Tk.String)) throw new ParseError(`${type} runs an ACTION, not navigation. Only \`Link\` goes to a route — style it as a button: \`Link "…" -> "${this.peek().v}" class("btn btn-default")\`. (\`${type} -> action\` calls an action.)`, this.locOf(this.peek().pos));
     props.action = this.parseDotted();                  // local `add`, store `cart.add`, or a `$onSave` part param
     if (!this.at(Tk.Punct, Pn.ParenL)) return;
     this.next();
@@ -571,6 +624,7 @@ export class Parser extends Grammar {
   private parseType(): string {
     let type = this.eat(Tk.Ident).v;
     if (this.at(Tk.Punct, Pn.Lt)) { this.next(); type += '<' + this.eat(Tk.Ident).v + '>'; this.eat(Tk.Punct, Pn.Gt); }
+    if (this.at(Tk.Punct, Pn.Question)) throw new ParseError(`\`${type}?\` — muten has no nullable types and no \`null\`. Model "absent / nothing selected" with a bool flag + scalars instead: \`loggedIn = false : bool persist\` + \`userName = "" : text\`, shown with \`when loggedIn { … }\`.`, this.locOf(this.peek().pos));
     return type;
   }
 

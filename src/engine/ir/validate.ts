@@ -5,7 +5,7 @@
 
 import { diag, closest } from '#engine/shared/diagnostics.js';
 import { PRIMITIVE_NAMES, ACTION_OPS, PRIMITIVES, BUILTINS, RESERVED_NAMES } from '#engine/lang/manifest.js';
-import { Nt, Ek, StOp, BOp, CHART_KINDS, SVG_PRIMS } from '#engine/shared/vocab.js';
+import { Nt, Ek, StOp, BOp, CHART_KINDS, SVG_PRIMS, nonPrimitiveHint } from '#engine/shared/vocab.js';
 import { exprListType, isKnownHead, selfUpdateTargets, type RefFacts, type KnownHeads } from '#engine/ir/refs.js';
 import type { Doc, FlatNode, ValidateCtx, ValidateResult, Diagnostic, Expr, Stmt, RequestStmt, StringPropValue, Loc } from '#engine/shared/types.js';
 
@@ -13,9 +13,10 @@ const KNOWN_TYPES = new Set<string>([...PRIMITIVE_NAMES, Nt.Shell, Nt.Slot]); //
 const REF_PROPS: Array<'bind' | 'data'> = ['bind', 'data']; // props whose value is @state
 const KNOWN_OPS = new Set<string>([...ACTION_OPS, StOp.Request]); // Request is parsed + compiled but is not a method op
 const SOURCE_OPS = new Set<string>([StOp.Create, StOp.Update, StOp.Delete, StOp.Refetch]); // hit the backend, so the list MUST be query/source-backed
+const LOCAL_MUT_OPS = new Set<string>([StOp.Push, StOp.Set, StOp.Reset, StOp.Toggle, StOp.Patch, StOp.Remove]); // mutate a PAGE-LOCAL state (compiler reads doc.state[target]) — never a store
 const SCALARS = ['text', 'number', 'bool', 'uuid', 'email', 'string', 'date', 'password', 'textarea'];
 const STRINGY = ['text', 'string', 'email', 'uuid', 'date', 'password', 'textarea']; // string-backed scalars: expose `.length` (a text value's character count) for reactive length gates
-const DISABLEABLE = new Set<string>([Nt.Button, Nt.RowAction, Nt.SearchField, Nt.Password, Nt.Select, Nt.Checkbox, Nt.Number, Nt.Range, Nt.Date, Nt.Form]); // `disabled` only affects form controls
+const DISABLEABLE = new Set<string>([Nt.Button, Nt.RowAction, Nt.SearchField, Nt.Textarea, Nt.Password, Nt.Select, Nt.Checkbox, Nt.Number, Nt.Range, Nt.Date, Nt.Form]); // `disabled` only affects form controls
 // native primitives that share a name with common plugin (shadcn) parts → a part-style call resolves to the
 // primitive and trips `missing-prop`; the value is the native usage to point the AI at.
 const SHADOWED_PRIMITIVE: { readonly [k: string]: string } = { [Nt.Select]: 'Select bind(x) options(a, b)', [Nt.Checkbox]: 'Checkbox bind(ok)', [Nt.Number]: 'Number bind(n)', [Nt.Range]: 'Range bind(v) min(0) max(100)', [Nt.Date]: 'Date bind(d)', [Nt.Chart]: 'Chart @data kind(bar) x(field) y(field)' };
@@ -122,7 +123,13 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     const q = queryMembers.get(head);
     if (q) { if (!q.has(member)) D.push(diag('unknown-member', `"${member}" is not a member of query "${head}"`, { loc, suggestion: closest(member, [...q]), from: member })); return; }
     const s = storeMemberMap.get(head);
-    if (s && !s.has(member)) D.push(diag('unknown-member', `"${member}" is not a member of store "${head}"`, { loc, suggestion: closest(member, [...s]), from: member }));
+    if (s && !s.has(member)) {
+      // `donors.length` / `donors.count` — a LIST operation aimed at the store instead of its list member (the classic
+      // trap when the store and its list share a name, `donors.donors`). Point at the list, not just "unknown member".
+      const listOp = ['length', 'count', 'sum', 'avg', 'min', 'max'].includes(member);
+      const hint = listOp ? ` — \`${member}\` operates on a LIST, not the store: use \`${head}.<list>.${member}\` (members: ${[...s].join(', ')}), or add a \`get\` in the store (e.g. \`get ${member === 'length' ? 'count' : member} = <list>.${member}\`).` : '';
+      D.push(diag('unknown-member', `"${member}" is not a member of store "${head}"${hint}`, { loc, suggestion: closest(member, [...s]), from: member }));
+    }
   };
 
   // state types: a `list` must declare its element type (always know what's inside)
@@ -162,6 +169,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   for (const [ent, fields] of Object.entries(doc.entities || {})) {
     for (const [field, ftype] of Object.entries(fields as Record<string, string>)) {
       if (ftype.startsWith('enum:') || FIELD_TYPES.includes(ftype)) continue;
+      if (/^list<(string|number|bool|uuid|email)>$/.test(ftype)) continue; // a field holding a list of scalars (features, tags) — iterate it with `each item.<field>`
       D.push(diag('unknown-field-type', `entity "${ent}" field "${field}": "${ftype}" isn't a field type — it silently renders as a plain text input. Use one of ${FIELD_DISPLAY.join(' / ')}, an \`a | b\` enum, or a Custom for anything else.`, { from: ftype, suggestion: closest(ftype, FIELD_DISPLAY) }));
     }
   }
@@ -446,7 +454,10 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       if (n.args) {
         D.push(diag('unknown-part', `"${n.type}" is not a known part`, { loc: n.loc, suggestion: closest(n.type, [...(ctx.parts || [])]), from: n.type }));
       } else {
-        D.push(diag('unknown-type', `"${n.type}" is not a known primitive`, { loc: n.loc, suggestion: closest(n.type, [...KNOWN_TYPES]), from: n.type }));
+        const npHint = nonPrimitiveHint(n.type);   // a JS/React/HTML name we KNOW isn't a primitive → hand back the muten way, not a fuzzy typo guess
+        D.push(npHint
+          ? diag('unknown-type', `\`${n.type}\` is not a muten primitive — use ${npHint}.`, { loc: n.loc, from: n.type })
+          : diag('unknown-type', `"${n.type}" is not a known primitive`, { loc: n.loc, suggestion: closest(n.type, [...KNOWN_TYPES]), from: n.type }));
       }
     } else {
       // required props: those NOT ending in "?" in the manifest
@@ -480,8 +491,11 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       const raw = String(props.bind ?? '').replace(/^@/, '');
       const b = raw.split('.')[0];
       const bt = b ? doc.state?.[b]?.type : undefined;
-      if (bt === undefined) D.push(diag('form-bind', `Form must bind a page-local draft (a state typed as an entity)${raw ? `, but "${raw}" is not a state on this page` : ''}${raw.includes('.') ? ' — a Form cannot bind a store field; declare a local `draft = {} : Entity` and submit the store action' : ''}.`, { loc: n.loc }));
-      else if (!doc.entities?.[bt]) D.push(diag('form-bind', `Form must bind a state typed as an entity (a draft): "${b}" is "${bt}". Declare \`entity X { … }\` + \`${b} = {} : X\`, or use SearchField for a single text input.`, { loc: n.loc }));
+      // Any Form bind problem → steer OUT of `Form`, not deeper into it (the draft-entity path is a rabbit hole the
+      // model loops in). muten's forms are just individual inputs; the model already has them inside the `Form {}`.
+      const dropForm = 'Simplest: DON\'T use `Form`. Drop the `Form … { }` wrapper, KEEP the inner inputs (each `bind`s its OWN state — `SearchField bind(name)  SearchField bind(email)`), and add `Button "Save" -> <action>`.';
+      if (bt === undefined) D.push(diag('form-bind', `\`Form\` needs an entity-draft state${raw ? `, and "${raw}" isn't one` : ''}. ${dropForm}`, { loc: n.loc }));
+      else if (!doc.entities?.[bt]) D.push(diag('form-bind', `\`Form\` binds an entity draft; "${b}" is "${bt}". ${dropForm}`, { loc: n.loc }));
     }
     if (n.type === 'DataTable') { // columns + where fields must be real fields of the row entity (else blank column / dead filter / @ref crash)
       const d = String(props.data ?? '').replace(/^@/, '');
@@ -500,7 +514,15 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         }
       }
     }
-    if (n.type === Nt.SearchField || n.type === Nt.Password || n.type === Nt.Select || n.type === Nt.Checkbox || n.type === Nt.Number || n.type === Nt.Range || n.type === Nt.Date) {
+    if (n.type === Nt.Checkbox) {
+      // Checkbox owns a bool via `bind` (two-way page state) OR shows one via `checked(expr)` (one-way; `-> action` toggles).
+      // `checked` is the store/query list-row answer: you can't two-way-bind a row, but you CAN display it + fire an action.
+      const hasBind = props.bind !== undefined, hasChecked = props.checked !== undefined;
+      if (hasBind && hasChecked) D.push(diag('checkbox-prop', 'Checkbox uses either `bind(state)` (you own the bool, two-way) OR `checked(expr)` (display a value you don\'t own) — not both.', { loc: n.loc }));
+      else if (!hasBind && !hasChecked) D.push(diag('missing-prop', 'Checkbox needs `bind(<bool state>)` to own a value, or `checked(<bool>)` to display one (add `-> action` to toggle) — e.g. a list row: `Checkbox checked(t.done) -> todos.toggle(t.id)`.', { loc: n.loc }));
+      if (hasChecked && props.checked && typeof props.checked === 'object' && 'kind' in props.checked) checkExpr(props.checked, n.loc ?? null, scope);
+    }
+    if ((n.type === Nt.SearchField || n.type === Nt.Textarea || n.type === Nt.Password || n.type === Nt.Select || n.type === Nt.Checkbox || n.type === Nt.Number || n.type === Nt.Range || n.type === Nt.Date) && props.bind !== undefined) {
       // A bound input carries one scalar. It binds a page STATE (`bind(q)`), OR — inside an `each` — a FIELD of the
       // row entity (`bind(row.value)`), which two-way-edits that list element. Either way the type must match.
       const raw = String(props.bind ?? '').replace(/^@/, '');
@@ -521,7 +543,10 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         // `head` is an `each` row var, but its element entity didn't resolve — the list is a STORE/query list (or an
         // unknown element type). Its rows are NOT editable through a direct input bind (write-back only works on a
         // settable page list state). Don't say "declare a state" (impossible per-row) — point at the action pattern.
-        D.push(diag('bind-type', `${n.type} binds a field of the \`each\` row "${head}", but rows of a store/query list can't be edited through a direct input bind — change the value with an action (a store \`patch where id == ${head}.id with { ${sub}: … }\`, fired by a Button), or iterate a settable page \`state\` list to bind fields directly.`, { loc: n.loc, from: head }));
+        const rowFix = n.type === Nt.Checkbox
+          ? `for a bool toggle use \`Checkbox checked(${head}.${sub}) -> <action>(${head}.id)\` (checked = display, -> = fire the store patch)`
+          : `change it with an action fired by a Button (\`-> <action>(${head}.id)\` running \`patch where id == ${head}.id with { ${sub}: … }\`)`;
+        D.push(diag('bind-type', `${n.type} binds a field of the \`each\` row "${head}", but rows of a store/query list can't be two-way-bound — ${rowFix}. (Or iterate a settable page \`state\` list to bind fields directly.)`, { loc: n.loc, from: head }));
       } else {
         const bt = head ? doc.state?.[head]?.type : undefined;
         // SearchField stays lenient about existence (legacy); the newer inputs require a real state.
@@ -709,6 +734,12 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       }
       if ('target' in st && st.target && !declared.has(st.target)) {
         D.push(diag('undeclared-mutation', `action "${name}" mutates "${st.target}" but only declares mutates(${[...declared].join(', ') || '∅'})`, { suggestion: closest(st.target, [...declared]), from: st.target }));
+      }
+      // LOCAL mutation ops (push/set/reset/toggle/patch/remove) mutate a PAGE-LOCAL state — the compiler reads doc.state[target].
+      // A STORE can't be mutated this way from a page (compile would crash on `ctx.state[store]` = undefined). Call a store action.
+      if (LOCAL_MUT_OPS.has(st.op) && 'target' in st && st.target && !doc.state?.[st.target]) {
+        if (storeDomains.has(st.target)) D.push(diag('store-local-mutation', `action "${name}": \`${st.target}.${st.op}(…)\` — "${st.target}" is a STORE. A page action can't ${st.op} into a store directly; call a store action (e.g. \`${st.target}.add(…)\`), or ${st.op} into a page-local \`list<…>\`/state.`, { loc: st.loc ?? null, suggestion: closest(`${st.target}.add`, [...(storeMemberMap.get(st.target) || [])].map((m) => `${st.target}.${m}`)), from: st.target }));
+        else D.push(diag('undeclared-mutation', `action "${name}": \`${st.op}\` targets "${st.target}", which is not a declared page state.`, { loc: st.loc ?? null, suggestion: closest(st.target, [...stateKeys]), from: st.target }));
       }
       if (SOURCE_OPS.has(st.op) && 'target' in st && st.target) {            // create/update/delete/refetch hit the backend, so a source is required
         const def = doc.state?.[st.target];

@@ -2,13 +2,14 @@
 // CLI entry point for the `muten` command.
 // Commands: dev, bundle, build, check (lint), map. Delegates to runner.ts, build.ts, lint.ts, and map.js.
 // Consumed by package.json "bin" -> users run `muten dev|bundle|build|check|map|lint [dir] [--json]`.
-import { resolve, join } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { resolve, join, relative } from 'node:path';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { dev, bundle } from '../runner.js';
 import { buildApp } from '../build.js';
 import { lintApp, lintWatch } from '../lint.js';
 import { addComponents } from '../add.js';
 import { mapApp } from '#engine/project/map.js';
+import { ParseError, formatDiagnostic, diag } from '#engine/shared/diagnostics.js';
 
 const args = process.argv.slice(2);
 const cmd = args[0];
@@ -38,6 +39,12 @@ try {
     process.exit(1);
   }
 } catch (e) {
-  console.error('✖ ' + (e instanceof Error ? e.message : String(e)));
+  // a syntax error that escaped validate (a bad .store/part/app.muten) still prints file:line:col + the hint,
+  // never a bare locationless message — that's what left the model regenerating identical output in a loop.
+  if (e instanceof ParseError) {
+    let src: string | undefined; try { if (e.file) src = readFileSync(e.file, 'utf8'); } catch { /* no frame if unreadable */ }
+    console.error(formatDiagnostic(diag(e.code, e.message, { loc: e.loc }), e.file ? relative(root, e.file) : 'src', src));
+  }
+  else console.error('✖ ' + (e instanceof Error ? e.message : String(e)));
   process.exit(1);
 }

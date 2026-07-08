@@ -15,12 +15,12 @@
 // reactive. A page with no reactivity compiles to plain HTML with zero runtime (Astro-like).
 
 import { Nt, Ek, Fmt, Fk } from '#engine/shared/vocab.js';
-import { customValue, CONTAINERS, parseClause, editableFields } from '#engine/compile/helpers.js';
+import { CONTAINERS, parseClause, editableFields } from '#engine/compile/helpers.js';
 import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, emitPatch } from '#engine/compile/emit.js';
 import { inlineSourceMap } from '#engine/compile/sourcemap.js';
 import { Logic } from '#engine/compile/logic.js';
 import type {
-  Doc, NodeProps, Scope, Interp, StringPropValue, Value, Expr,
+  Doc, NodeProps, Scope, Interp, StringPropValue, Value, Expr, ArgValue,
   CompileOpts, CompileCtx, EditableField, FieldConstraint, StoreInput, EmitParts,
 } from '#engine/shared/types.js';
 
@@ -211,7 +211,9 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       // a11y by default (compiler-emitted): <main> is the focus target on navigation + the skip-link anchor.
       if (n.type === Nt.Page) lines.push(`el_${id}.id = 'mu-main'; el_${id}.tabIndex = -1;`);
       // a11y by default: a keyboard skip-link as the shell's first child, so Tab jumps past the chrome to content.
-      if (n.type === Nt.Shell) lines.push(`{ const sk = document.createElement('a'); sk.href = '#mu-main'; sk.className = 'mu-skip-link'; sk.textContent = 'Skip to content'; el_${id}.appendChild(sk); }`);
+      // It ships its OWN hide-until-focus CSS (the compiler emits the element, so it must guarantee it's invisible
+      // until focused — not rely on the app's stylesheet, or a non-scaffolded app shows a naked "Skip to content").
+      if (n.type === Nt.Shell) lines.push(`{ if (!document.getElementById('mu-a11y-css')) { const st = document.createElement('style'); st.id = 'mu-a11y-css'; st.textContent = '.mu-skip-link{position:absolute;left:-9999px;top:8px;z-index:1000;padding:8px 16px;border-radius:6px;background:#111;color:#fff;text-decoration:none}.mu-skip-link:focus{left:8px}#mu-main:focus{outline:none}'; document.head.appendChild(st); } const sk = document.createElement('a'); sk.href = '#mu-main'; sk.className = 'mu-skip-link'; sk.textContent = 'Skip to content'; el_${id}.appendChild(sk); }`);
       appendEl(id, parentVar);
       genDynamics(id, p);
       genChildren(id, `el_${id}`);
@@ -254,6 +256,19 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         break;
       }
 
+      case Nt.Textarea: { // standalone multi-line input, two-way bound to a text state (same wiring as SearchField, a <textarea>)
+        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
+        lines.push(`const el_${id} = document.createElement('textarea');`);
+        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Message')});`); // a11y: an accessible name (a placeholder is not one)
+        lines.push(`el_${id}.className = ${JSON.stringify(classFor('textarea', p))};`);
+        genInterpAttr(id, 'placeholder', p.placeholder);
+        lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // state -> input (so .reset() clears), caret-safe
+        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
+        genDynamics(id, p); // wire on(enter: send) / on(...) + conditional class
+        appendEl(id, parentVar);
+        break;
+      }
+
       case Nt.Password: { // standalone masked input, two-way bound to a text state (same wiring as SearchField, type=password)
         const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
         lines.push(`const el_${id} = document.createElement('input');`);
@@ -282,13 +297,21 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         break;
       }
 
-      case Nt.Checkbox: { // bool-bound checkbox wrapped in a <label> (clickable text + a11y). `disabled` targets the inner input.
-        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.checked');
+      case Nt.Checkbox: { // bool checkbox wrapped in a <label> (clickable text + a11y). `disabled` targets the inner input.
         lines.push(`const el_${id} = document.createElement('label');`);
         lines.push(`el_${id}.className = ${JSON.stringify(classFor('checkbox', p))};`);
         lines.push(`const cb_${id} = document.createElement('input'); cb_${id}.type = 'checkbox';`);
-        lines.push(`effect(() => { cb_${id}.checked = !!${readJS}; });`);
-        if (writeJS) lines.push(`cb_${id}.addEventListener('change', (e) => ${writeJS});`); else lines.push(`cb_${id}.disabled = true;`);
+        if (p.checked !== undefined) { // display a bool one-way; `-> action` toggles it (the store/query list-row pattern)
+          lines.push(`effect(() => { cb_${id}.checked = !!(${logic.compileExpr(p.checked, pageScope)}); });`);
+          if (p.action) {
+            const arg = p.arg !== undefined ? [p.arg, ...(p.argRest || [])].map((e) => logic.compileExpr(e, pageScope)).join(', ') : '';
+            lines.push(`cb_${id}.addEventListener('change', () => ${logic.actionRef(p.action)}(${arg}));`);
+          } else lines.push(`cb_${id}.disabled = true;`); // read-only display: no toggle handler
+        } else { // bind: two-way to a page state
+          const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.checked');
+          lines.push(`effect(() => { cb_${id}.checked = !!${readJS}; });`);
+          if (writeJS) lines.push(`cb_${id}.addEventListener('change', (e) => ${writeJS});`); else lines.push(`cb_${id}.disabled = true;`);
+        }
         lines.push(`el_${id}.appendChild(cb_${id});`);
         if (p.label !== undefined) genTextEl(id + 'l', 'span', 'mu-checkbox-label', p.label, `el_${id}`);
         if (p.disabled !== undefined) { // the <label> can't be disabled — target the control
@@ -338,15 +361,18 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const dataSig = logic.bindSig(p.data);
         const dataExpr = queryStates.has(dataSig) ? `${dataSig}.get().data` : `${dataSig}.get()`;
         declEl(id, 'figure', classFor('chart-wrap', p)); // the wrapper carries class() + sizing; mu-chart-wrap base
+        lines.push(`el_${id}.style.display = 'flex'; el_${id}.style.flexDirection = 'column';`); // the svg grows, an optional legend sits below (so a fixed height() splits between them, not clips)
         if (p.label !== undefined) genTextEl(id + 't', 'figcaption', 'mu-chart-title', p.label, `el_${id}`); // optional title (static or interpolated)
         lines.push(`const svg_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'svg');`);
-        lines.push(`svg_${id}.setAttribute('viewBox', '0 0 320 200'); svg_${id}.setAttribute('class', 'mu-chart'); svg_${id}.setAttribute('role', 'img'); el_${id}.appendChild(svg_${id});`);
+        lines.push(`svg_${id}.setAttribute('viewBox', '0 0 320 200'); svg_${id}.setAttribute('class', 'mu-chart'); svg_${id}.setAttribute('role', 'img'); svg_${id}.style.cssText = 'display:block;width:100%;flex:1 1 auto;min-height:11rem'; el_${id}.appendChild(svg_${id});`);
         let legendArg = 'null';
         if (p.color || p.kind === 'pie' || p.kind === 'donut') { lines.push(`const leg_${id} = document.createElement('ul'); leg_${id}.className = 'mu-chart-legend'; el_${id}.appendChild(leg_${id});`); legendArg = `leg_${id}`; } // color(field) or a pie/donut -> a reactive legend
         appendEl(id, parentVar);
         const xf = p.x && p.x.kind === Ek.Ref ? p.x.name : '', yf = p.y && p.y.kind === Ek.Ref ? p.y.name : ''; // Chart reads x/y as FIELD refs
         const enc = `{ x: ${JSON.stringify(xf)}, y: ${JSON.stringify(yf)}, kind: ${JSON.stringify(p.kind || 'bar')}, color: ${JSON.stringify(p.color || '')} }`;
         lines.push(`effect(() => { __chart(svg_${id}, ${dataExpr}, ${enc}, ${legendArg}); });`); // reactive: redraws marks + legend when the data changes
+        // redraw at the REAL pixel size after layout + on resize, so the SVG renders 1:1 (crisp axis text, no clipping) instead of scaling a fixed viewBox
+        lines.push(`if (typeof ResizeObserver !== 'undefined') { const ro_${id} = new ResizeObserver(() => __chart(svg_${id}, ${dataExpr}, ${enc}, ${legendArg})); ro_${id}.observe(svg_${id}); onCleanup(() => ro_${id}.disconnect()); }`);
         genDynamics(id, p);
         break;
       }
@@ -626,6 +652,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const wrapLi = listItemEach.has(id); // a direct child of a List: each row is its own <li>
         const listJS = logic.compileExpr(p.list, pageScope);
         const filterJS = p.filter ? logic.compileExpr(p.filter, pageScope) : ''; // `where cond`: item var bare inside .filter
+        const takeJS = p.take ? logic.compileExpr(p.take, pageScope) : ''; // `take(n)`: only the first n (after filtering)
         // the body reads the row through its signal: compile refs as `<as>.get()` (restore scope after).
         // an optional index var (`as item, i`) is a second per-row signal, so `i` also compiles as `i.get()`.
         const prevSig = pageScope.sigLocals;
@@ -649,7 +676,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`onCleanup(() => { for (const __e of map_${id}.values()) __e.dispose(); map_${id}.clear(); });`);
         lines.push(`let order_${id} = [];`);
         lines.push(`effect(() => {`);
-        lines.push(`  const __l = ${listJS}; const __rows = (Array.isArray(__l) ? __l : [])${filterJS ? `.filter((${p.as}) => ${filterJS})` : ''};`);   // fail-closed: a non-array never crashes the loop (renders empty)
+        lines.push(`  const __l = ${listJS}; const __rows = (Array.isArray(__l) ? __l : [])${filterJS ? `.filter((${p.as}) => ${filterJS})` : ''}${takeJS ? `.slice(0, ${takeJS})` : ''};`);   // fail-closed: a non-array never crashes the loop (renders empty)
         lines.push(`  const __seen = new Set(); const __next = [];`);
         lines.push(`  for (const __row of __rows) {`);
         lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
@@ -669,7 +696,15 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         // escape hatch: mounts a host-written component (opaque to the IR), wired via inputs/on.
         declEl(id, 'div', classFor('custom', p));
         appendEl(id, parentVar);
-        const ins = Object.entries(p.inputs || {}).map(([k, v]) => `${JSON.stringify(k)}: ${customValue(v)}`).join(', ');
+        // input values resolve through the SAME ref resolver as everything else: a bare/`@` ref (state, get, store
+        // member, or an `each` row field like `a.status`) compiles to its reactive read; a quoted string stays literal.
+        const inputVal = (v: ArgValue): string =>
+          typeof v === 'number' ? String(v)
+            : typeof v === 'string' ? logic.resolveRef(v.startsWith('@') ? v.slice(1) : v, pageScope)
+              : v && typeof v === 'object' && '$lit' in v ? JSON.stringify(v.$lit)
+                : v && typeof v === 'object' && '$param' in v ? logic.resolveRef(v.$param, pageScope)
+                  : JSON.stringify(v);
+        const ins = Object.entries(p.inputs || {}).map(([k, v]) => `${JSON.stringify(k)}: ${inputVal(v)}`).join(', ');
         const ons = Object.entries(p.on || {}).map(([ev, act]) => `${JSON.stringify(ev)}: (...__a) => ${logic.actionRef(typeof act === 'string' ? act : '')}(...__a)`).join(', ');
         // reactive inputs: if mount returns an updater fn, re-call it whenever a bound @state changes (the
         // effect only re-runs when an input actually reads a signal). A mount that returns nothing stays a
@@ -702,10 +737,12 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       }
 
       case Nt.Slot: { // outlet in a shell where the router mounts the active page
-        hasSlot = true;
-        lines.push(`const __outlet = document.createElement('div');`);
-        lines.push(`__outlet.className = 'muten-outlet';`);
+        if (!hasSlot) { // declare the outlet ONCE — a shell with two `slot`s would otherwise emit `const __outlet` twice (bundle crash)
+          lines.push(`const __outlet = document.createElement('div');`);
+          lines.push(`__outlet.className = 'muten-outlet';`);
+        }
         lines.push(`${parentVar}.appendChild(__outlet);`);
+        hasSlot = true;
         break;
       }
 

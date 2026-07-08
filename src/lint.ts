@@ -2,12 +2,13 @@
 // The deterministic oracle for AI agents: `--json` returns structured diagnostics
 // (code, loc, suggestion) in milliseconds. Returns problem count; CLI exits non-zero if > 0.
 
-import { join, relative } from 'node:path';
+import { join, relative, isAbsolute } from 'node:path';
 import { readFileSync, existsSync, watch } from 'node:fs';
 import { readRoutes, readApi, apiClientNames } from '#engine/project/routes.js';
 import { load, loadAllParts, findStores } from '#engine/project/load.js';
 import { storeContext } from '#engine/project/context.js';
 import { validateStoresAndGuards } from '#engine/project/check-app.js';
+import { lintComponents } from '#engine/project/js-antipatterns.js';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { validate } from '#engine/ir/validate.js';
@@ -17,6 +18,15 @@ import type { Diagnostic } from '#engine/shared/types.js';
 
 export async function lintApp(appRoot: string, json = false): Promise<number> {
   const rel = (p: string) => relative(appRoot, p);
+  // read a file's source once (memoized) so the terminal can print a code frame under each diagnostic; `--json`
+  // stays pure data, so only bother when we're printing. A path is relative-to-appRoot or absolute — resolve both.
+  const srcCache = new Map<string, string>();
+  const srcOf = (p: string): string | undefined => {
+    if (json) return undefined;
+    const abs = isAbsolute(p) ? p : join(appRoot, p);
+    if (!srcCache.has(abs)) { try { srcCache.set(abs, readFileSync(abs, 'utf8')); } catch { srcCache.set(abs, ''); } }
+    return srcCache.get(abs) || undefined;
+  };
   const iconExists = getIconChecker(appRoot);                    // `Icon "set:name"` existence, so a typo'd icon fails `check` instead of only the build
   const sharedParts = await loadAllParts(appRoot);               // all src/**/parts + parts imported from plugins (muten.config)
   const storeIRs = findStores(join(appRoot, 'src'));             // store domains + members needed to validate cross-page refs like cart.add / cart.count
@@ -35,7 +45,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
       diagnostics = [{ code: e.code, severity: 'error', message: e.message, loc: e.loc, suggestion: null }];
     }
     for (const d of diagnostics) {
-      if (!json) console.log(formatDiagnostic(d, rel(page.screenPath)));
+      if (!json) console.log(formatDiagnostic(d, rel(page.screenPath), srcOf(page.screenPath)));
       found.push({ file: rel(page.screenPath), ...d });
     }
   }
@@ -46,7 +56,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
       const appIr = parse(readFileSync(appFile, 'utf8'));
       if (appIr.shell) {
         for (const d of validate(toDoc({ ...appIr, tree: appIr.shell }), { stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities }).diagnostics) {
-          if (!json) console.log(formatDiagnostic(d, rel(appFile)));
+          if (!json) console.log(formatDiagnostic(d, rel(appFile), srcOf(appFile)));
           found.push({ file: rel(appFile), ...d });
         }
       }
@@ -55,13 +65,21 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
 
   // .store bodies + route guards: shared with `build` via check-app.ts so check and build never disagree.
   for (const d of validateStoresAndGuards(appRoot, storeIRs, storeMembers)) {
-    if (!json) console.log(formatDiagnostic(d, d.file));
+    if (!json) console.log(formatDiagnostic(d, d.file, srcOf(d.file)));
+    found.push(d);
+  }
+  // the oracle reaches INTO Custom host .js files: warn (never fail) when they hand-roll UI muten already owns
+  for (const d of lintComponents(appRoot)) {
+    if (!json) console.log(formatDiagnostic(d, d.file, srcOf(d.file)));
     found.push(d);
   }
 
+  const errors = found.filter((d) => d.severity === 'error').length;
+  const warnings = found.length - errors;
   if (json) console.log(JSON.stringify(found, null, 2));
-  else console.log(found.length ? `\n✖ ${found.length} problem(s)` : '✓ no problems');
-  return found.length;
+  else if (errors) console.log(`\n✖ ${errors} problem(s)${warnings ? ` · ${warnings} warning(s)` : ''}`);
+  else console.log(`✓ no problems${warnings ? ` · ${warnings} warning(s)` : ''}`);
+  return errors;   // exit code = ERRORS only; warnings inform (e.g. a Custom hand-rolling a socket) but never block the build
 }
 
 // `muten check --watch`: the oracle as a standing gate (CI, agents) without the dev server. Re-lints the whole

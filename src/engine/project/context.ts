@@ -23,8 +23,9 @@ export function storeContext(storeIRs: { [domain: string]: IR }): StoreContext {
   const storesMeta: { [domain: string]: StoreSlice } = {};
   for (const [domain, ir] of Object.entries(storeIRs)) {
     const state = Object.keys(ir.state || {}), gets = Object.keys(ir.gets || {}), actions = Object.keys(ir.actions || {});
+    const queries = state.filter((n) => (ir.state?.[n]?.source || '').startsWith('query:'));
     storeMembers[domain] = [...state, ...gets, ...actions];
-    storesMeta[domain] = { state, gets, actions };
+    storesMeta[domain] = { state, gets, actions, queries };
     for (const [name, a] of Object.entries(ir.actions || {})) if (selfUpdateTargets(a.body || []).length) storeSelfMut.add(`${domain}.${name}`);
   }
   return { stores, storeMembers, storeSelfMut, storeEntities: storeListEntities(storeIRs), storesMeta };

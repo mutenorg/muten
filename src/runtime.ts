@@ -138,6 +138,9 @@ export function __order(parent: Node, ref0: Node, next: { nodes: ChildNode[] }[]
 
 // Native chart: draw bar/line/area/point marks + a y-axis into an <svg> from `rows`, reading the `x`/`y`
 // field encodings. Full redraw per data change — charts are small, so keyed reconciliation isn't worth it.
+// Aesthetic defaults (no config needed): rounded bars, SMOOTH cubic curves (cardinal spline, not jagged
+// polylines), a real accent→transparent gradient area (inline `style` so it beats the CSS fill), round-number
+// axis ticks formatted compactly (3k / 1.2M), and a donut center-total.
 export function __chart(svg: Element, rows: ReadonlyArray<{ [field: string]: unknown }>, enc: { x: string; y: string; kind?: string; color?: string }, legend?: Element | null): void {
   const data = Array.isArray(rows) ? rows : [];
   const NS = 'http://www.w3.org/2000/svg';
@@ -145,9 +148,11 @@ export function __chart(svg: Element, rows: ReadonlyArray<{ [field: string]: unk
   // viewBox, padding, tick count, bar gap and donut thickness — no code change. (Colors already come from CSS.)
   const cs = getComputedStyle(svg);
   const num = (name: string, def: number): number => { const v = parseFloat(cs.getPropertyValue(name)); return isFinite(v) ? v : def; };
-  const W = num('--chart-w', 320), H = num('--chart-h', 200);
-  const pL = num('--chart-pad-left', 38), pR = num('--chart-pad-right', 10), pT = num('--chart-pad-top', 10), pB = num('--chart-pad-bottom', 26);
-  const iw = W - pL - pR, ih = H - pT - pB, TICKS = Math.max(1, Math.round(num('--chart-ticks', 4))), BARGAP = num('--chart-bar-gap', 0.3), DONUT = num('--chart-donut-inner', 0.58);
+  // render at the REAL pixel size (viewBox = client box) so axis text stays crisp at any width and nothing clips —
+  // fall back to the CSS vars only before layout (a ResizeObserver redraws once the element has a measured size).
+  const W = svg.clientWidth || num('--chart-w', 320), H = svg.clientHeight || num('--chart-h', 200);
+  const pL = num('--chart-pad-left', 34), pR = num('--chart-pad-right', 12), pT = num('--chart-pad-top', 12), pB = num('--chart-pad-bottom', 24);
+  const iw = W - pL - pR, ih = H - pT - pB, TICKS = Math.max(1, Math.round(num('--chart-ticks', 4))), BARGAP = num('--chart-bar-gap', 0.42), DONUT = num('--chart-donut-inner', 0.62);
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
   const mk = (t: string, a: { [k: string]: string | number }, tx?: string): Element => {
     const e = document.createElementNS(NS, t);
@@ -157,6 +162,8 @@ export function __chart(svg: Element, rows: ReadonlyArray<{ [field: string]: unk
   };
   while (svg.firstChild) svg.removeChild(svg.firstChild);
   if (!data.length) return;
+  // compact axis number: 3000 -> 3k, 1250000 -> 1.2M (references never show "9000").
+  const fmtN = (v: number): string => { const a = Math.abs(v), r = (x: number): string => { const s = x.toFixed(1); return s.slice(-2) === '.0' ? s.slice(0, -2) : s; }; return a >= 1e9 ? r(v / 1e9) + 'B' : a >= 1e6 ? r(v / 1e6) + 'M' : a >= 1e3 ? r(v / 1e3) + 'k' : String(Math.round(v)); };
   const kind = enc.kind || 'bar', radial = kind === 'pie' || kind === 'donut';
   const cf = enc.color || (radial ? enc.x : ''), six: { [k: string]: number } = {}; let sn = 0;
   const scls = (base: string, r: { [field: string]: unknown }): string => { if (!cf) return base; const k = String(r[cf]); return `${base} mu-chart-s${(k in six) ? six[k] : (six[k] = sn++)}`; };
@@ -177,23 +184,47 @@ export function __chart(svg: Element, rows: ReadonlyArray<{ [field: string]: unk
     const RAD = Math.min(iw, ih) / 2 - 2, RI = kind === 'donut' ? RAD * DONUT : 0, ccx = pL + iw / 2, ccy = pT + ih / 2;
     let a = 0;
     for (const r of data) { const v = Number(r[enc.y]) || 0, a1 = a + v / total * 360; svg.appendChild(mk('path', { d: arc(ccx, ccy, RAD, a, a1, RI), class: scls('mu-chart-slice', r) })); a = a1; }
+    if (kind === 'donut') svg.appendChild(mk('text', { x: ccx, y: ccy, class: 'mu-chart-total', 'text-anchor': 'middle', 'dominant-baseline': 'central' }, fmtN(total))); // center total
     doLegend(); return;
   }
-  let mx = Math.max(0, ...data.map((r) => Number(r[enc.y]) || 0));
-  if (mx <= 0) mx = 1; else { const p = Math.pow(10, Math.floor(Math.log10(mx))); mx = Math.ceil(mx / p) * p; }
+  // round-number axis: pick a "nice" step (1/2/2.5/5 ×10^k), so ticks land on 3k/6k/9k, never 2250.
+  const rawMax = Math.max(0, ...data.map((r) => Number(r[enc.y]) || 0));
+  let step = 1, mx = 1;
+  if (rawMax > 0) { const rough = rawMax / TICKS, mag = Math.pow(10, Math.floor(Math.log10(rough))), norm = rough / mag; step = (norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 2.5 ? 2.5 : norm <= 5 ? 5 : 10) * mag; mx = Math.ceil(rawMax / step) * step; }
   const sy = (v: number): number => pT + ih - (v / mx) * ih;
-  for (let t = 0; t <= TICKS; t++) { const v = mx * t / TICKS, y = sy(v); svg.appendChild(mk('line', { x1: pL, y1: y, x2: W - pR, y2: y, class: 'mu-chart-grid' })); svg.appendChild(mk('text', { x: pL - 6, y: y + 3, class: 'mu-chart-tick', 'text-anchor': 'end' }, String(Math.round(v)))); }
+  for (let v = 0; v <= mx + step / 1e6; v += step) { const y = sy(v); svg.appendChild(mk('line', { x1: pL, y1: y, x2: W - pR, y2: y, class: 'mu-chart-grid' })); svg.appendChild(mk('text', { x: pL - 7, y: y + 3, class: 'mu-chart-tick', 'text-anchor': 'end' }, fmtN(v))); }
   const n = data.length, bw = iw / n;
   if (kind === 'scatter') {
     const xs = data.map((r) => Number(r[enc.x]) || 0), xmax = Math.max(1, ...xs), xmin = Math.min(0, ...xs), xr = (xmax - xmin) || 1;
     data.forEach((r) => svg.appendChild(mk('circle', { cx: pL + ((Number(r[enc.x]) || 0) - xmin) / xr * iw, cy: sy(Number(r[enc.y]) || 0), r: 4, class: scls('mu-chart-dot', r) })));
   } else if (kind === 'line' || kind === 'area' || kind === 'point') {
-    const pts = data.map((r, i) => (pL + bw * (i + 0.5)) + ',' + sy(Number(r[enc.y]) || 0)).join(' ');
-    if (kind === 'area') svg.appendChild(mk('polygon', { points: `${pL + bw * 0.5},${pT + ih} ${pts} ${pL + bw * (n - 0.5)},${pT + ih}`, class: 'mu-chart-area' }));
-    if (kind !== 'point') svg.appendChild(mk('polyline', { points: pts, class: 'mu-chart-line' }));
-    data.forEach((r, i) => svg.appendChild(mk('circle', { cx: pL + bw * (i + 0.5), cy: sy(Number(r[enc.y]) || 0), r: 3, class: scls('mu-chart-dot', r) })));
+    const pts = data.map((r, i): [number, number] => [pL + bw * (i + 0.5), sy(Number(r[enc.y]) || 0)]);
+    // cardinal spline → smooth cubic path (each segment's control points aim along the neighbours), so the line
+    // curves gently like the reference dashboards instead of a jagged polyline.
+    const smooth = (ps: Array<[number, number]>, k: number): string => {
+      if (ps.length < 2) return ps.length ? `M${ps[0][0]},${ps[0][1]}` : '';
+      let d = `M${ps[0][0]},${ps[0][1]}`;
+      for (let i = 0; i < ps.length - 1; i++) {
+        const p0 = ps[i - 1] || ps[i], p1 = ps[i], p2 = ps[i + 1], p3 = ps[i + 2] || p2;
+        d += ` C${p1[0] + (p2[0] - p0[0]) * k},${p1[1] + (p2[1] - p0[1]) * k} ${p2[0] - (p3[0] - p1[0]) * k},${p2[1] - (p3[1] - p1[1]) * k} ${p2[0]},${p2[1]}`;
+      }
+      return d;
+    };
+    const line = smooth(pts, 0.18);
+    if (kind === 'area') { // gradient fill (accent → transparent) via inline style so the CSS `.mu-chart-area` fill never clobbers it
+      const gid = 'mcg' + Math.floor(Math.random() * 1e9);
+      const df = mk('defs', {}), lg = mk('linearGradient', { id: gid, x1: 0, y1: 0, x2: 0, y2: 1 });
+      lg.appendChild(mk('stop', { offset: '0%', 'stop-color': 'currentColor', 'stop-opacity': 0.28 }));
+      lg.appendChild(mk('stop', { offset: '100%', 'stop-color': 'currentColor', 'stop-opacity': 0 }));
+      df.appendChild(lg); svg.appendChild(df);
+      const fill = mk('path', { d: `${line} L${pts[n - 1][0]},${pT + ih} L${pts[0][0]},${pT + ih} Z`, class: 'mu-chart-area' });
+      fill.setAttribute('style', `fill:url(#${gid});fill-opacity:1`);
+      svg.appendChild(fill);
+    }
+    if (kind !== 'point') svg.appendChild(mk('path', { d: line, class: 'mu-chart-line', fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' }));
+    if (kind !== 'area') data.forEach((r, i) => svg.appendChild(mk('circle', { cx: pts[i][0], cy: pts[i][1], r: 3, class: scls('mu-chart-dot', r) })));
   } else {
-    data.forEach((r, i) => { const y = sy(Number(r[enc.y]) || 0); svg.appendChild(mk('rect', { x: pL + bw * i + bw * BARGAP / 2, y, width: bw * (1 - BARGAP), height: (pT + ih) - y, class: scls('mu-chart-bar', r) })); });
+    data.forEach((r, i) => { const y = sy(Number(r[enc.y]) || 0), w = bw * (1 - BARGAP), h = (pT + ih) - y, rx = Math.min(w / 2, h / 2, 6); svg.appendChild(mk('rect', { x: pL + bw * i + bw * BARGAP / 2, y, width: w, height: Math.max(h, 0.01), rx, class: scls('mu-chart-bar', r) })); });
   }
   if (kind !== 'scatter') data.forEach((r, i) => svg.appendChild(mk('text', { x: pL + bw * (i + 0.5), y: H - pB + 15, class: 'mu-chart-xlabel', 'text-anchor': 'middle' }, r[enc.x] == null ? '' : String(r[enc.x]))));
   doLegend();

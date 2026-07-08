@@ -7,6 +7,7 @@ import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { createRequire } from 'node:module';
 import { parse } from '#engine/lang/parse.js';
+import { ParseError } from '#engine/shared/diagnostics.js';
 import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { resolveStyles } from '#engine/project/styles.js';
 import { composeDoc } from '#engine/ir/compose.js';
@@ -14,6 +15,13 @@ import { readMutenConfig } from '#engine/project/config.js';
 import type { PartDef, Value, LoadResult, IR, Entity } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
+
+// Parse a file, tagging a syntax error with its path so the CLI can report file:line:col instead of a bare message
+// (a `.store`/part/route error would otherwise escape validate and print locationless — the "AI loops forever" trap).
+function parseFile(file: string): IR {
+  try { return parse(readFileSync(file, 'utf8')); }
+  catch (e) { if (e instanceof ParseError && !e.file) e.file = file; throw e; }
+}
 
 // A plugin registry's index (registry.json). `file` is the part to import; `component` (if present) names a
 // Custom-backed entry whose host .js sits next to `file` (chart.muten -> chart.js) and is inlined at compile.
@@ -100,7 +108,7 @@ export function findStores(dir: string, out: { [domain: string]: IR } = {}): { [
   for (const entry of entries) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) findStores(full, out);
-    else if (entry.name.endsWith('.store')) out[basename(entry.name, '.store')] = parse(readFileSync(full, 'utf8'));
+    else if (entry.name.endsWith('.store')) out[basename(entry.name, '.store')] = parseFile(full);
   }
   return out;
 }
@@ -112,7 +120,7 @@ export async function loadParts(dir: string): Promise<Parts> {
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.muten')) continue;
     const filePath = join(dir, f);
-    const ir = parse(readFileSync(filePath, 'utf8'));
+    const ir = parseFile(filePath);
     const { css } = await resolveStyles(filePath); // colocated .scss/.css for this part
     for (const [name, def] of Object.entries(ir.parts || {})) {
       parts[name] = { ...def, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css };
@@ -142,7 +150,7 @@ export async function loadAllParts(appRoot: string): Promise<Parts> {
 }
 
 export async function load(screenPath: string, sharedParts: Parts = {}): Promise<LoadResult> {
-  const ir = parse(readFileSync(screenPath, 'utf8'));
+  const ir = parseFile(screenPath);
 
   const localParts = await loadParts(join(dirname(screenPath), 'parts')); // parts local to this page
   const inlineParts: Parts = {};                                          // parts declared inline in the .muten
