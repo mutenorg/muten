@@ -6,6 +6,9 @@ import { join, dirname } from 'node:path';
 
 const cap = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
 const titleOf = (s: string): string => cap(s.replace(/[-_/]+/g, ' ').trim()) || 'Page';
+// Does this app declare the shadcn plugin? If so, `muten new` seeds a shadcn-flavored skeleton (semantic tokens + a hint to
+// use the parts) so the app starts, and stays, in the shadcn idiom. Core stays library-agnostic — a plain app gets a plain stub.
+const usesShadcn = (root: string): boolean => { try { return /plugins\s*\{[\s\S]*?\bshadcn\b/.test(readFileSync(join(root, 'muten.config'), 'utf8')); } catch { return false; } };
 // a route → its page (folder) name: "/" → home, "/dms" → dms, "/product/:id" → product (params drop out of the name).
 const pageName = (route: string): string => route.replace(/^\//, '').replace(/\/:?\w*/g, (m) => (m.startsWith('/:') ? '' : m.replace('/', '-'))).replace(/^:|:/g, '').replace(/-+$/,'') || 'home';
 
@@ -34,7 +37,13 @@ export function newPage(root: string, route: string): string {
   if (!existsSync(f)) {
     mkdirSync(dir, { recursive: true });
     const params = [...r.matchAll(/:(\w+)/g)].map((m) => `param ${m[1]}`).join('\n');
-    writeFileSync(f, `screen ${name}\n${params ? params + '\n' : ''}\nPage class("p-6") {\n  Title "${titleOf(name)}" h1\n  # TODO: build this page\n}\n`);
+    const head = `screen ${name}\n${params ? params + '\n' : ''}`;
+    // shadcn app → seed the shadcn idiom (semantic tokens + a hint to use the parts); plain app → a minimal stub. Both COMPILE
+    // (only core primitives + class strings) and carry the `# TODO` the completeness gate looks for.
+    const body = usesShadcn(root)
+      ? `# TODO: replace this stub — build the real ${titleOf(name)} page in the shadcn idiom (parts: Card/Badge/Avatar/Tabs/Combobox; tokens: bg-card, text-muted-foreground, border-border, bg-primary)\nPage class("min-h-screen bg-background text-foreground") {\n  Stack class("mx-auto max-w-5xl flex flex-col gap-6 p-6") {\n    Title "${titleOf(name)}" h1 class("text-3xl font-semibold tracking-tight")\n  }\n}\n`
+      : `Page class("p-6") {\n  Title "${titleOf(name)}" h1\n  # TODO: replace this stub with the real page content\n}\n`;
+    writeFileSync(f, head + body);
   }
   addRoute(root, r, name);
   return f;
@@ -45,7 +54,7 @@ export function newStore(root: string, name: string): string {
   const f = join(root, 'src', name + '.store');
   if (!existsSync(f)) {
     mkdirSync(dirname(f), { recursive: true });
-    writeFileSync(f, `entity ${Entity} {\n  name text required\n}\n\nstate {\n  items = [ ] : list<${Entity}>\n}\n`);
+    writeFileSync(f, `# TODO: replace with the real entity fields + seed rows\nentity ${Entity} {\n  name text required\n}\n\nstate {\n  items = [ ] : list<${Entity}>\n}\n`);
   }
   return f;
 }
