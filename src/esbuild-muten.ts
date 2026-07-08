@@ -57,7 +57,10 @@ export async function loadModel(root: string): Promise<Model> {
   const parts = await loadAllParts(root);
   const slices = findStores(join(root, 'src'));
   const appFile = join(root, 'src', 'app.muten');
-  const appIr = existsSync(appFile) ? parse(readFileSync(appFile, 'utf8')) : undefined;
+  // Speak like the oracle: without src/app.muten there is no entry, and esbuild would otherwise fail with a cryptic
+  // "Could not resolve …/src/app.muten". Give the SAME clear message `muten check` does (bundle + dev share this loader).
+  if (!existsSync(appFile)) throw new Error(`No app.muten at src/app.muten — every muten app needs a root. Create src/app.muten with:\n  routes {\n    "/" -> home\n  }`);
+  const appIr = parse(readFileSync(appFile, 'utf8'));
   const themeFile = join(root, 'theme.muten');
   const themeRaw = existsSync(themeFile) ? (parse(readFileSync(themeFile, 'utf8')).theme || {}) : {};
   const cfg = readMutenConfig(root);
@@ -188,13 +191,13 @@ function diffDoc(a: Doc, b: Doc): { reload: boolean; patches: string[] } {
 interface TwSource { base: string; pattern: string; negated: boolean; }
 interface TwCompiler { sources: TwSource[]; build(candidates: string[]): string; }
 interface TwNode { compile(css: string, opts: { base: string; onDependency: (p: string) => void }): Promise<TwCompiler>; }
-interface TwScanner { new (opts: { sources: TwSource[] }): { scan(): string[] }; }
+interface TwScanner { new(opts: { sources: TwSource[] }): { scan(): string[] }; }
 
 async function runTailwind(css: string, root: string): Promise<string> {
   const req = createRequire(join(root, 'package.json'));
   const node: TwNode = await import(pathToFileURL(req.resolve('@tailwindcss/node')).href);
   const oxide: { Scanner: TwScanner } = await import(pathToFileURL(req.resolve('@tailwindcss/oxide')).href);
-  const compiler = await node.compile(css, { base: root, onDependency() {} });
+  const compiler = await node.compile(css, { base: root, onDependency() { } });
   // Scan the .muten files AND the escapes' source under src/ (a `Custom` component's .js holds classes too —
   // e.g. the playground's `hidden` tab toggles). Tailwind can't auto-detect .muten, and missing src/*.js would
   // drop those utilities (panels then never hide). src-scoped so node_modules is never scanned.
