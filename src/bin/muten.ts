@@ -8,6 +8,7 @@ import { dev, bundle } from '../runner.js';
 import { buildApp } from '../build.js';
 import { lintApp, lintWatch } from '../lint.js';
 import { addComponents } from '../add.js';
+import { scaffoldNew } from '../scaffold.js';
 import { mapApp } from '#engine/project/map.js';
 import { ParseError, formatDiagnostic, diag } from '#engine/shared/diagnostics.js';
 
@@ -34,8 +35,15 @@ try {
     const names = args.slice(1).filter((a) => !a.startsWith('-'));
     if (!names.length) { console.error('usage: muten add <name...>\n  lowercase  -> a plugin: install @muten/<name> + enable it in muten.config   (e.g. muten add devtools)\n  PascalCase -> a component: copy its source into src/parts/                      (e.g. muten add Button)'); process.exit(1); }
     addComponents(process.cwd(), names);
+  }
+  else if (cmd === 'new') { // scaffold app STRUCTURE (routes entry + route lines + page/store skeletons) so you fill CONTENT, not boilerplate
+    const cwd = process.cwd();   // `new` operates on the cwd (no [dir] arg — the rest are the names to scaffold)
+    const kind = args[1];
+    const names = args.slice(2).filter((a) => !a.startsWith('-'));
+    if (!kind || (kind !== 'app' && !names.length)) { console.error('usage: muten new <page|store|app> <name...>\n  muten new page /  /dms  /settings   -> page skeleton + its route in src/app.muten (each COMPILES)\n  muten new store servers  channels    -> store skeleton (entity + empty list)\n  muten new app                        -> ensure src/app.muten (the routes entry) exists'); process.exit(1); }
+    for (const f of scaffoldNew(cwd, kind, names)) console.log('✓ ' + relative(cwd, f));
   } else {
-    console.error('usage: muten <dev|bundle|build|check|map|lint|add> [dir] [--json]\nto create an app:  npm create muten@latest <dir>');
+    console.error('usage: muten <dev|bundle|build|check|map|lint|add|new> [dir] [--json]\nto create an app:  npm create muten@latest <dir>');
     process.exit(1);
   }
 } catch (e) {
