@@ -11,7 +11,7 @@ import { readMutenConfig } from '#engine/project/config.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { validate } from '#engine/ir/validate.js';
 import { closest, diag, ParseError } from '#engine/shared/diagnostics.js';
-import { readApi, apiClientNames } from '#engine/project/routes.js';
+import { readApi, apiClientNames, readRoutes } from '#engine/project/routes.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { findStores, storeListEntities } from '#engine/project/load.js';
 import { selfUpdateTargets } from '#engine/ir/refs.js';
@@ -201,7 +201,20 @@ export function analyze(filePath: string, text: string): ValidateResult {
   for (const [name, def] of Object.entries(ir.parts || {})) parts[name] = { ...def, state: {}, entities: {}, mock: {}, css: '' }; // the page's OWN inline parts (load() composes these too — without this the IDE falsely flags them unknown)
   const { doc } = composeDoc(ir, parts); // resolve parts (typos flagged) + hoist state -> flat doc
   const storeEntities = appRoot ? storeListEntities(findStores(join(appRoot, 'src'))) : undefined; // element entity of each store list -> cross-store aggregates resolve in the live editor too
-  return validate(doc, { parts: Object.keys(parts), stores: projectStores(filePath), storeMembers: projectStoreMembers(filePath), apiClients, iconExists, storeSelfMut: new Set(projectStoreSelfMut(filePath)), storeEntities });
+  // `readRoutes` throws on a missing/broken app.muten — in the editor that must not blind the page's own linting,
+  // so a failure just leaves the route list unthreaded and the link check silently skips.
+  let routes: string[] | undefined;
+  let selfRoute: string | undefined;
+  try {
+    if (appRoot) {
+      const entries = readRoutes(appRoot);
+      routes = entries.map((p) => '/' + p.route);
+      const pageName = filePath.replace(/\\/g, '/').split('/').slice(-2)[0];   // src/pages/<name>/<name>.muten
+      const own = entries.find((p) => p.page === pageName);
+      selfRoute = own ? '/' + own.route : undefined;
+    }
+  } catch { routes = undefined; selfRoute = undefined; }
+  return validate(doc, { parts: Object.keys(parts), stores: projectStores(filePath), storeMembers: projectStoreMembers(filePath), apiClients, iconExists, storeSelfMut: new Set(projectStoreSelfMut(filePath)), storeEntities, routes, selfRoute });
 }
 
 // Autocomplete context: parts, state, and actions visible to this file across the whole app.

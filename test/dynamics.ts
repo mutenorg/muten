@@ -2,7 +2,7 @@
 // element → addEventListener. Static classes stay in the className; conditionals are toggled at runtime.
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
-import { compileModule } from '#engine/compile/compile.js';
+import { compile, compileModule } from '#engine/compile/compile.js';
 import { validate } from '#engine/ir/validate.js';
 
 let f = 0;
@@ -53,12 +53,13 @@ action t mutates open <- x { open.set(not open) }
 Page { Link "Home" -> "/about"  Button "x" -> t }`)));
 ok('static link → plain href', staticJs.includes('.href = "/about"'));
 
-// synthetic on(enter: action) on an input → a keydown listener firing only on Enter (no Custom for "Enter to send")
+// synthetic on(enter: action) on an input → a keydown listener firing on Enter (no Custom for "Enter to send").
+// Enter without Shift submits and preventDefaults the newline; Shift+Enter falls through as a newline.
 const enterJs = compileModule(toDoc(parse(`screen s
 state { d = "" : text }
 action go mutates d { d.reset() }
 Page { SearchField bind(d) on(enter: go) "x" }`)));
-ok('on(enter:) → keydown + Enter check', enterJs.includes("if (e.key === 'Enter') go()"));
+ok('on(enter:) → keydown + Enter check', enterJs.includes("e.key === 'Enter' && !e.shiftKey") && enterJs.includes('e.preventDefault(); go()'));
 ok('SearchField wires on()', enterJs.includes(".addEventListener('keydown'"));
 
 // `each x as item, i` → a second per-row signal (i) holding the row's position, reindexed on reorder/filter
@@ -116,6 +117,13 @@ get byCat = rows.sortDesc by amount
 Page { Chart @byCat kind(bar) x(nope) y(amount) }`));
 const chartBadV = validate(chartBadDoc, { externs: new Set(), apiClients: [], iconExists: () => true, storeEntities: {}, storeSelfMut: new Set() });
 ok('Chart @get still field-checks (x(nope) → chart-field)', !chartBadV.ok && chartBadV.diagnostics.some((d) => d.code === 'chart-field'));
+
+// id("features") — the anchor target must actually REACH the DOM on BOTH paths, or `Link -> "#features"` scrolls
+// nowhere. A landing with no state compiles down the zero-JS static path, so that one matters most here.
+const anchorJs = compileModule(toDoc(parse('screen s\nstate { open = false : bool }\nPage { Stack id("features") { Text "{open}" }  Link "F" -> "#features" }')));
+ok('id() emits el.id on the reactive path', anchorJs.includes('.id = "features"'), anchorJs.slice(0, 240));
+const anchorHtml = compile(toDoc(parse('screen s\nPage { Stack id("features") { Text "f" } }')));
+ok('id() survives the static HTML path', anchorHtml.includes('id="features"'), anchorHtml.slice(0, 240));
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);

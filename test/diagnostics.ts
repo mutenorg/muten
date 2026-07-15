@@ -191,5 +191,48 @@ const diagsOf = (src, ctx = {}) => validate(toDoc(parse(src)), ctx).diagnostics;
   check('take with a non-number count flagged', !!badN, 'no diagnostic');
 }
 
+// 20. every STATIC link target must land. A navbar link to an undeclared route, or an in-page `#anchor` with no
+// `id()`, used to be lint-green and dead on the page — the whole reason generated landings had no working nav.
+{
+  const noAnchor = diagsOf('screen s\nPage { Link "Features" -> "#features" }').find((d) => d.code === 'unknown-anchor');
+  check('anchor with no id() flagged', !!noAnchor, 'no diagnostic');
+  const withAnchor = diagsOf('screen s\nPage { Stack id("features") { Text "f" }  Link "Features" -> "#features" }');
+  check('anchor with a matching id() is clean', withAnchor.every((d) => d.code !== 'unknown-anchor'), JSON.stringify(withAnchor.map((d) => d.code)));
+
+  const ctx = { routes: ['/', '/docs', '/product/:pid'] };
+  const dangling = diagsOf('screen s\nPage { Link "Nope" -> "/nope" }', ctx).find((d) => d.code === 'unknown-route');
+  check('link to an undeclared route flagged', !!dangling, 'no diagnostic');
+  const declared = diagsOf('screen s\nPage { Link "Docs" -> "/docs" }', ctx);
+  check('link to a declared route is clean', declared.every((d) => d.code !== 'unknown-route'), JSON.stringify(declared.map((d) => d.code)));
+  const param = diagsOf('screen s\nPage { Link "P" -> "/product/42" }', ctx);
+  check('a literal path satisfies a :param route', param.every((d) => d.code !== 'unknown-route'), JSON.stringify(param.map((d) => d.code)));
+  const external = diagsOf('screen s\nPage { Link "X" -> "https://example.com" }', ctx);
+  check('an external href is skipped', external.every((d) => d.code !== 'unknown-route'), JSON.stringify(external.map((d) => d.code)));
+  const unthreaded = diagsOf('screen s\nPage { Link "Nope" -> "/nope" }'); // routes not threaded -> check skipped
+  check('no false positive when routes is absent', unthreaded.every((d) => d.code !== 'unknown-route'), JSON.stringify(unthreaded.map((d) => d.code)));
+
+  const onPage = diagsOf('screen s\nPage id("top") { Text "x" }').find((d) => d.code === 'id-target');
+  check('id() on Page flagged (it already owns mu-main)', !!onPage, 'no diagnostic');
+
+  // A link to the page's OWN route is a declared route, so `unknown-route` misses it — yet `go()` bails when the
+  // target equals the current path, so it is provably dead. This is the navbar-of-no-ops bug, caught statically.
+  const ctxSelf = { routes: ['/landing', '/docs'], selfRoute: '/landing' };
+  const selfLink = diagsOf('screen s\nPage { Link "Features" -> "/landing" }', ctxSelf).find((d) => d.code === 'self-link');
+  check('link to the page\'s own route flagged', !!selfLink, 'no diagnostic');
+  const otherPage = diagsOf('screen s\nPage { Link "Docs" -> "/docs" }', ctxSelf);
+  check('link to another route is clean', otherPage.every((d) => d.code !== 'self-link'), JSON.stringify(otherPage.map((d) => d.code)));
+  const anchorNotSelf = diagsOf('screen s\nPage { Stack id("f") { Text "x" }  Link "F" -> "#f" }', ctxSelf);
+  check('an in-page anchor is not a self-link', anchorNotSelf.every((d) => d.code !== 'self-link'), JSON.stringify(anchorNotSelf.map((d) => d.code)));
+  const shell = diagsOf('screen s\nPage { Link "Home" -> "/landing" }', { routes: ['/landing'] }); // shell: no own route
+  check('no false positive when selfRoute is absent', shell.every((d) => d.code !== 'self-link'), JSON.stringify(shell.map((d) => d.code)));
+
+  // THE INVARIANT: `ok` means "nothing BLOCKING", not "nothing found". It used to be `D.length === 0`, so the first
+  // warning validate ever emitted turned every dev build into a compile error. A warning must never fail a build.
+  const warnOnly = validate(toDoc(parse('screen s\nPage { Link "Home" -> "/landing" }')), ctxSelf);
+  check('a warning-only page still builds (ok = true)', warnOnly.ok && warnOnly.diagnostics.some((d) => d.code === 'self-link'), JSON.stringify({ ok: warnOnly.ok, codes: warnOnly.diagnostics.map((d) => d.code) }));
+  const errPage = validate(toDoc(parse('screen s\nPage { Link "X" -> "/nope" }')), ctxSelf);
+  check('an error-severity page does NOT build (ok = false)', !errPage.ok, 'ok was true');
+}
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nALL OK');
 process.exit(fails ? 1 : 0);

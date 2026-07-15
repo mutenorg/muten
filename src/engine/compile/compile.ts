@@ -20,7 +20,7 @@ import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, e
 import { inlineSourceMap } from '#engine/compile/sourcemap.js';
 import { Logic } from '#engine/compile/logic.js';
 import type {
-  Doc, NodeProps, Scope, Interp, StringPropValue, Value, Expr, ArgValue,
+  Doc, NodeProps, Scope, Interp, StringPropValue, Value, Expr, ArgValue, Loc,
   CompileOpts, CompileCtx, EditableField, FieldConstraint, StoreInput, EmitParts,
 } from '#engine/shared/types.js';
 
@@ -39,7 +39,7 @@ export function compileNodePatch(doc: Doc, nodeId: string, opts: CompileOpts = {
 // Emit one .store domain slice (state + get + actions + effects) as a shared ESM module.
 export function compileStore(input: StoreInput = {}, data: { [name: string]: Value } = {}, sources: { [name: string]: Value } = {}): string {
   const { state = {}, gets = {}, actions = {}, effects = [], entities = {}, imports = [] } = input;
-  return compile({ screen: 'store', entities, state, actions, gets, effects, imports, consts: {}, constraints: {}, rootId: undefined, nodes: {} }, data, '', {}, sources, { format: Fmt.Store, persistScope: input.domain, dev: input.dev });
+  return compile({ screen: 'store', entities, state, actions, gets, effects, imports, consts: {}, constraints: {}, rootId: undefined, nodes: {} }, data, '', {}, sources, { format: Fmt.Store, persistScope: input.domain, dev: input.dev, api: input.api });
 }
 
 export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectCss = '', components: { [name: string]: string } = {}, sources: { [name: string]: Value } = {}, opts: CompileOpts = {}): string {
@@ -82,6 +82,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
 
   // reactive element bits: conditional classes (`class(active when cond)`) + events (`on(keydown: fn)`).
   const genDynamics = (id: string, p: NodeProps): void => {
+    if (p.id) lines.push(`el_${id}.id = ${JSON.stringify(p.id)};`);   // id("features") — the anchor a `-> "#features"` scrolls to
     for (const c of p.class || []) if (typeof c !== 'string') {
       if ('interp' in c) {
         // `class("status-{x}")` — interpolated token, applied reactively: swap the previous computed token(s)
@@ -100,7 +101,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     const EVENT_ARG: { readonly [event: string]: string } = { input: 'e.target.value', change: 'e.target.value', keydown: 'e.key', keyup: 'e.key', keypress: 'e.key' };
     for (const [event, act] of Object.entries(p.on || {})) {
       if (typeof act !== 'string') continue;
-      if (event === 'enter') lines.push(`el_${id}.addEventListener('keydown', (e) => { if (e.key === 'Enter') ${logic.actionRef(act)}(); });`); // synthetic: Enter key only
+      if (event === 'enter') lines.push(`el_${id}.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ${logic.actionRef(act)}(); } });`); // synthetic: Enter submits (no newline); Shift+Enter is a newline
       else if (event === 'drop') { // register a pointer-DnD drop zone (innermost-wins collision → nested-safe)
         const grp = typeof p.dropGroup === 'string' ? ', ' + JSON.stringify(p.dropGroup) : '';
         lines.push(`__drop(el_${id}, ${JSON.stringify(p.dropGroup || '')}, (__dragId) => ${logic.actionRef(act)}(__dragId${grp}));`);
@@ -154,7 +155,13 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   // element primitive at once (no per-type code). Dev/patch only; prod bundles + SSR/static/store omit it (dead there).
   const appendEl = (id: string, parentVar: string): void => {
     lines.push(`${parentVar}.appendChild(el_${id});`);
-    if (opts.dev || opts.format === Fmt.Patch) { const ty = nodes[id]?.type, fp = nodes[id]?.fromPart, pa = nodes[id]?.partArgs, lc = nodes[id]?.loc; lines.push(`__nodes[${JSON.stringify(id)}] = { el: el_${id}, parent: ${parentVar}${ty ? `, type: ${JSON.stringify(ty)}` : ''}${fp ? `, part: ${JSON.stringify(fp)}` : ''}${pa ? `, partArgs: ${JSON.stringify(pa)}` : ''}${lc ? `, loc: ${JSON.stringify({ line: lc.line, col: lc.col })}` : ''} };`); }
+    // `owner`/`oloc` say which PART FILE a node was written in and where — a node inlined from a part has no `loc`,
+    // because that would be a line number belonging to another file. The element picker edits `owner:oloc`, not `loc`.
+    if (opts.dev || opts.format === Fmt.Patch) {
+      const n = nodes[id], ty = n?.type, fp = n?.fromPart, pa = n?.partArgs, lc = n?.loc, ow = n?.ownerPart, ol = n?.partLoc;
+      const at = (l: Loc): string => JSON.stringify({ line: l.line, col: l.col });
+      lines.push(`__nodes[${JSON.stringify(id)}] = { el: el_${id}, parent: ${parentVar}${ty ? `, type: ${JSON.stringify(ty)}` : ''}${fp ? `, part: ${JSON.stringify(fp)}` : ''}${pa ? `, partArgs: ${JSON.stringify(pa)}` : ''}${lc ? `, loc: ${at(lc)}` : ''}${ow ? `, owner: ${JSON.stringify(ow)}` : ''}${ol ? `, oloc: ${at(ol)}` : ''} };`);
+    }
   };
 
   // text-bearing primitives (Text/Span/Title): plain string or a (possibly reactive) interpolation.
@@ -198,6 +205,10 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const listItemEach = new Set<string>();
   for (const lid of Object.keys(nodes)) if (nodes[lid].type === Nt.List) for (const cid of nodes[lid].children || []) if (nodes[cid].type === Nt.Each) listItemEach.add(cid);
 
+  // Cell-ids whose parent Row is a header row (`Row head`): they render as <th> instead of <td>.
+  const headCells = new Set<string>();
+  for (const rid of Object.keys(nodes)) if (nodes[rid].type === Nt.Row && nodes[rid].props?.head) for (const cid of nodes[rid].children || []) if (nodes[cid].type === Nt.Cell) headCells.add(cid);
+
   // Emit one node + its subtree into `parentVar`. Semantic containers share one generic path;
   // every other primitive has a case below. Logic (refs, exprs, actions) is delegated to `logic`.
   function genNode(id: string, parentVar: string): void {
@@ -229,6 +240,35 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
           if (nodes[childId].type === Nt.Each) genNode(childId, `el_${id}`);       // each row wraps itself in <li> (listItemEach)
           else { lines.push(`const li_${childId} = document.createElement('li');`); genNode(childId, `li_${childId}`); lines.push(`el_${id}.appendChild(li_${childId});`); }
         }
+        break;
+      }
+
+      case Nt.Table: { // native <table>: Row children group into a real <thead> (head rows) + <tbody> (the rest)
+        declEl(id, 'table', classFor('table', p));
+        appendEl(id, parentVar);
+        genDynamics(id, p);
+        const kids = nodes[id].children || [];
+        const isHead = (k: string): boolean => nodes[k].type === Nt.Row && !!nodes[k].props?.head;
+        const heads = kids.filter(isHead), body = kids.filter((k) => !isHead(k));
+        if (heads.length) { lines.push(`const thead_${id} = document.createElement('thead'); el_${id}.appendChild(thead_${id});`); for (const k of heads) genNode(k, `thead_${id}`); }
+        if (body.length) { lines.push(`const tbody_${id} = document.createElement('tbody'); el_${id}.appendChild(tbody_${id});`); for (const k of body) genNode(k, `tbody_${id}`); }
+        break;
+      }
+
+      case Nt.Row: { // <tr> inside a Table; its Cell children emit <td>/<th> straight into it
+        declEl(id, 'tr', classFor('row', p));
+        appendEl(id, parentVar);
+        genDynamics(id, p);
+        genChildren(id, `el_${id}`);
+        break;
+      }
+
+      case Nt.Cell: { // <td> (or <th> if its Row is a header row) — text value OR rich children
+        declEl(id, headCells.has(id) ? 'th' : 'td', classFor('cell', p));
+        if (n.children && n.children.length) genChildren(id, `el_${id}`);
+        else if (p.value !== undefined) genInterpAttr(id, 'textContent', p.value);
+        genDynamics(id, p);
+        appendEl(id, parentVar);
         break;
       }
 
@@ -597,6 +637,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
 
       case Nt.Image: {
         declEl(id, 'img', classFor('image', p));
+        if (p.id) lines.push(`el_${id}.id = ${JSON.stringify(p.id)};`); // Image is the one case that skips genDynamics
         genInterpAttr(id, 'src', p.src);
         genInterpAttr(id, 'alt', p.alt ?? ''); // alt required by the manifest; "" = decorative
         appendEl(id, parentVar);
@@ -778,7 +819,9 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   function renderStatic(id: string): string {
     const n = nodes[id]; const p = n.props || {};
     const kids = (): string => (nodes[id].children || []).map(renderStatic).join('');
-    const cls = (base: string): string => ` class="${escAttr(classFor(base, p))}"`;
+    // class + the literal id(): every static tag below routes through this, so an anchor target survives the
+    // zero-JS path too — a page whose only "dynamic" bit is id() stays static.
+    const cls = (base: string): string => ` class="${escAttr(classFor(base, p))}"${p.id ? ` id="${escAttr(p.id)}"` : ''}`;
     const cont = CONTAINERS[n.type];
     if (cont) { const [tag, base] = cont; return `<${tag}${cls(base)}>${kids()}</${tag}>`; }
     switch (n.type) {
@@ -791,6 +834,15 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Link: return `<a${cls('link')} href="${escAttr(strOf(p.to) || '/')}">${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</a>`;
       case Nt.Button: return `<button${cls('button')}>${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</button>`;
       case Nt.List: { const tag = p.ordered ? 'ol' : 'ul'; return `<${tag}${cls('list')}>${(nodes[id].children || []).map((cid) => `<li>${renderStatic(cid)}</li>`).join('')}</${tag}>`; }
+      case Nt.Table: {
+        const rows = nodes[id].children || [];
+        const isHead = (k: string): boolean => nodes[k].type === Nt.Row && !!nodes[k].props?.head;
+        const heads = rows.filter(isHead), body = rows.filter((k) => !isHead(k));
+        const grp = (tag: string, rs: string[]): string => rs.length ? `<${tag}>${rs.map(renderStatic).join('')}</${tag}>` : '';
+        return `<table${cls('table')}>${grp('thead', heads)}${grp('tbody', body)}</table>`;
+      }
+      case Nt.Row: return `<tr${cls('row')}>${kids()}</tr>`;
+      case Nt.Cell: { const tag = headCells.has(id) ? 'th' : 'td'; return `<${tag}${cls('cell')}>${(n.children && n.children.length) ? kids() : escHtml(strOf(p.value))}</${tag}>`; }
       case Nt.Details: return `<details${cls('details')}${p.open ? ' open' : ''}><summary class="mu-summary">${escHtml(strOf(p.summary))}</summary>${kids()}</details>`;
       default: return '';
     }

@@ -57,6 +57,21 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     doc: 'Native disclosure / accordion (<details> + <summary>). The positional string is the summary (the clickable header; it interpolates); the children are the collapsible content. Zero state, zero JS - the browser handles the toggle, keyboard, and a11y. `Details "Shipping & returns" { Text "Free returns within 30 days." }`. Add `open` to start expanded: `Details "FAQ" open { … }`. Use it for FAQs, "show more", optional detail; reach for state + when only when you need a controlled or animated panel.',
     snippet: 'Details "${1:Summary}" {\n\t$0\n}',
   },
+  Table: {
+    props: {}, children: true,
+    doc: 'A native data table (<table>). Its direct children are `Row`s; the compiler groups `Row head` rows into a <thead> and the rest into a <tbody> automatically. Style with class() (a DaisyUI table is `Table class("table")`; or your own CSS). Use it for real tabular data (issues, transactions, a schedule) so it lays out as real columns and is announced as a table; bind dynamic rows with `each`. `Table class("table") { Row head { Cell "Task"  Cell "Status" }  each rows as r { Row { Cell "{r.task}"  Cell "{r.status}" } } }`.',
+    snippet: 'Table class("table") {\n\tRow head { Cell "${1:Column}" }\n\teach ${2:rows} as ${3:r} {\n\t\tRow { Cell "${4:{r.field}}" }\n\t}\n}',
+  },
+  Row: {
+    props: {}, children: true,
+    doc: 'One table row (<tr>) inside a `Table`; its children are `Cell`s. Add the `head` keyword for a header row - its cells render as <th> and the row is placed in <thead>. `Row { Cell "Ana"  Cell "Admin" }` · header: `Row head { Cell "Name"  Cell "Role" }`.',
+    snippet: 'Row { Cell "$0" }',
+  },
+  Cell: {
+    string: 'value', props: { value: 'text?' }, children: true, interp: true,   // value optional: a cell can be text OR rich children OR empty
+    doc: 'One table cell (<td>, or <th> inside a `Row head`) inside a `Row`. The positional string is its text and interpolates (`Cell "{r.total}"`); or give it children for a rich cell - a badge, icon, avatar: `Cell { Span "{o.status}" class("badge") }`.',
+    snippet: 'Cell "$0"',
+  },
   Text: {
     string: 'value', props: { value: 'text' }, children: false, interp: true,
     doc: 'Paragraph text (<p>). Interpolates state reactively: `Text "Hi, {user.name}"`.',
@@ -214,7 +229,7 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
 };
 
-export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step'];
+export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id'];
 export const MODIFIER_DOCS = {
   bind: 'Two-way bind to a @state, e.g. `bind @search`.',
   submit: 'Action to run on form submit, e.g. `submit createUser`.',
@@ -223,6 +238,7 @@ export const MODIFIER_DOCS = {
   options: 'The fixed value list of a standalone `Select`: `Select bind(role) options(admin, member, guest)`.',
   class: 'The ONE way to style: raw CSS class(es) — utility classes (`class("flex flex-row gap-4")`) or your own CSS (`class("card")`, backed by styles.css using theme.muten CSS vars). Muten stays agnostic about appearance: any class string passes straight through.',
   alt: 'Required accessible/SEO text for an Image: `alt "{p.title}"`. Use "" for decorative images.',
+  id: 'A stable DOM id on any node — the target an in-page anchor scrolls to: `Section id("features")` + `Link "Features" -> "#features"`. It is a STATIC literal, so the oracle proves every `#anchor` lands (an anchor with no id() is an error). This is how a one-page landing gets a working navbar/footer. Not allowed on `Page` (it already owns `mu-main`, the skip-link target).',
   inputs: 'Custom component inputs: `inputs(data: @sales)`.',
   on: 'Custom component events wired to actions: `on(select: pick)`.',
   aria: 'Accessibility attributes on ANY node — the bounded way to write `aria-*`/`role` (muten is HTML + logic): `aria(label: "Close", role: "dialog", expanded: menuOpen)`. Each key → `aria-<key>`; `role` → `role`. A literal value is a static attribute; a value that reads state is REACTIVE (e.g. `aria(expanded: open)` keeps aria-expanded in sync). Use this for an accessible interactive widget instead of escaping to Custom.',

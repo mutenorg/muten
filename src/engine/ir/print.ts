@@ -96,6 +96,11 @@ function printNode(n: IRNode, ind: string): string {
       const pos = p.value ?? p.label ?? p.src ?? p.name ?? p.placeholder ?? p.submitLabel; // `name` = Icon's set:name
       if (pos !== undefined) head += ` ${printStringProp(pos)}`;
     }
+    // bare keyword flags (were previously dropped by the printer): List `ordered`, Details `open`, Row `head`, Title level.
+    if (p.ordered) head += ' ordered';
+    if (p.open) head += ' open';
+    if (p.head) head += ' head';
+    if (p.level) head += ` ${p.level}`;
     if (p.to !== undefined) head += ` -> ${printPath(p.to)}`;
     else if (p.action) head += ` -> ${p.action}${p.arg !== undefined ? `(${[p.arg, ...(p.argRest || [])].map(printExpr).join(', ')})` : ''}`;
     if (p.data) head += ` @${p.data}`;

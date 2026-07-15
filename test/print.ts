@@ -5,12 +5,15 @@ import { print } from '#engine/ir/print.js';
 
 let f = 0;
 const ok = (l: string, c: boolean, e = '') => { console.log((c ? '✓' : '✗') + ' ' + l + (c ? '' : '  ← ' + e)); if (!c) f++; };
-// canonicalize: drop `loc`, sort object keys (a props bag is order-independent) — array order is kept.
+// canonicalize: drop source positions (`loc`/`endLoc`), sort object keys (a props bag is
+// order-independent) — array order is kept. Positions are not part of semantic IR equality:
+// print is canonical, so a re-parse lands the same nodes at different offsets.
+const POSITIONS = new Set(['loc', 'endLoc']);
 function norm(o: unknown): unknown {
   if (Array.isArray(o)) return o.map(norm);
   if (o && typeof o === 'object') {
     const out: Record<string, unknown> = {};
-    for (const k of Object.keys(o as object).sort()) if (k !== 'loc') out[k] = norm((o as Record<string, unknown>)[k]);
+    for (const k of Object.keys(o as object).sort()) if (!POSITIONS.has(k)) out[k] = norm((o as Record<string, unknown>)[k]);
     return out;
   }
   return o;

@@ -33,13 +33,14 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
   const { stores, storeMembers, storeSelfMut, storeEntities } = storeContext(storeIRs); // ONE assembly, shared with build + plugin (no drift)
   const apiClients = apiClientNames(readApi(appRoot));           // the app's named api clients, so a `post "client:/x"` prefix is checked
   const pages = readRoutes(appRoot);
+  const routes = pages.map((p) => '/' + p.route);                // declared urls, leading slash restored ("/", "/product/:pid")
 
   const found: Array<{ file: string } & Diagnostic> = [];
   for (const page of pages) {
     let diagnostics: Diagnostic[] = [];
     try {
       const { doc, partNames } = await load(page.screenPath, sharedParts);
-      diagnostics = validate(doc, { parts: partNames, stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities }).diagnostics;
+      diagnostics = validate(doc, { parts: partNames, stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities, routes, selfRoute: '/' + page.route }).diagnostics;
     } catch (e) {
       if (!(e instanceof ParseError)) throw e;             // a syntax error becomes one diagnostic; anything else is a real bug
       diagnostics = [{ code: e.code, severity: 'error', message: e.message, loc: e.loc, suggestion: null }];
@@ -55,7 +56,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
     try {
       const appIr = parse(readFileSync(appFile, 'utf8'));
       if (appIr.shell) {
-        for (const d of validate(toDoc({ ...appIr, tree: appIr.shell }), { stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities }).diagnostics) {
+        for (const d of validate(toDoc({ ...appIr, tree: appIr.shell }), { stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities, routes }).diagnostics) {
           if (!json) console.log(formatDiagnostic(d, rel(appFile), srcOf(appFile)));
           found.push({ file: rel(appFile), ...d });
         }

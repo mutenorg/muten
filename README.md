@@ -104,7 +104,9 @@ that needs the full React ecosystem, and it doesn't pretend to be.
 | **Data** | `query` states over `sources` (full HTTP: method, headers, body, nested `at`) · one `api` block (named multi-backend clients) · optimistic CRUD (`create`/`update`/`delete` + `.pending`/`.error`) · `refetch(q: …, page: …)` · **`query x live`** (WebSocket real-time: the server pushes, only changed rows re-render) · a `post`/`put`/`delete` escape for non-REST |
 | **Routing** | real-path URLs · params (`/product/:id` -> `param id`) · route guards · `/404` catch-all · route paths are **quoted strings**: `routes { "/" -> home  "/404" -> notfound }` · `Link "label" -> "/path"` · guard redirects `else "/login"` (bare paths no longer parse) |
 | **SEO / SSR** | `muten build` pre-renders every route to real HTML (static pages ship zero JS; data pages fetched at build) · per-page `meta { title … description … }` with `og:*` auto-derived |
-| **Interop** (lowest tier first) | `class()` for native HTML + CSS libs · `Custom` for vanilla-JS libs (charts, maps, pickers) · `use fmt from "./lib.ts"` for JS logic · **`use` functions callable as statements** inside `action` or `effect` (side effects: persist, scroll, analytics): `action send { messages.push(m)  persist(messages)  scrollBottom() }` |
+| **Media & widgets** (all native, all oracle-checked) | **`Chart @data kind(bar) x(…) y(…)`** (reactive SVG - no chart library) · `Icon "lucide:check"` (Iconify, inlined at build, tree-shaken) · `Image` / `Video` · standalone inputs: `Select bind(x) options(…)` · `Checkbox` · `Password` · `Number min(0) max(9)` · `Range` (slider) · `Date` (native calendar) · drag-and-drop via `draggable`/`droptarget` with a typed payload |
+| **Interop** (lowest tier first) | `class()` for native HTML + CSS libs · `Custom` for vanilla-JS libs muten has no primitive for (maps, rich-text, canvas/WebGL) · `use fmt from "./lib.ts"` for JS logic · **`use` functions callable as statements** inside `action` or `effect` (side effects: persist, scroll, analytics): `action send { messages.push(m)  persist(messages)  scrollBottom() }` |
+| **Targets** | one `muten bundle` runs everywhere: the web · desktop (Tauri) · an installable app (`public/manifest.webmanifest`, Chrome ▸ Install) · an **`.apk`** (`muten android --build`, or CI with nothing installed). No mobile build, no second renderer - a phone runs the same Chromium your desktop does |
 | **AI-native** | `lint == build` · one source of truth per concept · the full language reference ships in every scaffolded app under `.claude/` (an AGENTS guide + a Claude skill) |
 
 ## Reactivity & reconciliation
@@ -126,13 +128,16 @@ right tier, and the compiler still checks the seam. Reach for the **lowest tier 
 | Tier | What it reaches | Typical examples | The trade |
 |---|---|---|---|
 | **1 · Pure muten** | the declarative 80% - pages, routing (params, guards, `/404`), `state`/`store`/`get`, the **list toolkit**, `Form` (+validation), `query` over REST, SSG + SEO | a whole **CRUD / SaaS / catalog / dashboard / content** app | **zero extra deps** |
-| **2 · muten + the platform** | native HTML + CSS libs via `class()`, **vanilla JS via `Custom`**, JS logic via `use … from "./lib.ts"` | `<dialog>`, Tailwind/DaisyUI, chart.js, Leaflet, flatpickr, Quill, zod, date-fns | a JS dep - **no framework runtime** |
+| **2 · muten + the platform** | native HTML + CSS libs via `class()`, **vanilla JS via `Custom`**, JS logic via `use … from "./lib.ts"` | `<dialog>`, Tailwind/DaisyUI, Leaflet, Quill, zod, date-fns | a JS dep - **no framework runtime** |
 
-Almost every "hard widget" lands at **tier 2**. The language stays small by design; anything beyond pure muten + platform escapes lives in ordinary JS.
+**Check tier 1 first.** Charts, icons, video, sliders, date pickers, dropdowns and drag-and-drop look like tier-2
+widgets and are **native primitives** (`Chart`, `Icon`, `Video`, `Range`, `Date`, `Select`, `draggable`). Escaping
+for one of them ships JS you didn't need, loses the oracle at that seam, and makes the app the opposite of what
+muten is for. Tier 2 is for what muten genuinely has no primitive for: maps, rich-text, canvas/WebGL.
 
 **Why the escapes stay safe.** The compiler validates the *seam* - the `state` props and `action` callbacks
 crossing into a `Custom`, and the call site of a `use` function (an undeclared one is a `check` error). So
-coupling in chart.js or zod never costs you the oracle on the muten side.
+coupling in Leaflet or zod never costs you the oracle on the muten side.
 
 **Deploy - the honest caveat.** Two production paths, both muten's own runner. `muten build` (the CLI SSG)
 **inlines the theme + project `styles.css`** and **pre-renders (SSR) your stores/`query` data**, so each route
@@ -146,6 +151,32 @@ build (per-route chunks + source maps + a ship-size report). `npm run dev` runs 
 | `use` JS functions, `Custom`, or a shared store across pages | **`muten bundle`** (bundles `use` + keeps state across navigations) |
 
 **Most real apps use `muten bundle`.**
+
+## Desktop & mobile - the same bundle
+
+There is **no per-target build and no second renderer**. A phone runs the same Chromium your desktop does, so
+every target below ships the exact `muten bundle` output. Nothing about your `.muten` changes.
+
+| Target | You install | How |
+|---|---|---|
+| **Web** | — | any static host (+ the SPA fallback above) |
+| **Installable app** (icon, fullscreen, offline) | — | `public/manifest.webmanifest` ships by default: open the site on a phone → Chrome ▸ Install |
+| **`.apk`** | — | scaffold `--android`, then push: the generated CI workflow builds it on a runner that already has the Android SDK |
+| **`.apk`, locally** (+ emulator) | a toolchain, into `~/.muten` | `muten android --build` — one command, from anywhere |
+| **Desktop** | the Rust toolchain | scaffold `--tauri` → `npm run tauri:build` (ships the OS webview, not a browser) |
+
+```sh
+muten android --build ~/my-app   # → my-app/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+It checks the toolchain, generates the (gitignored, disposable) `android/`, bundles, syncs and runs Gradle -
+there is no order to learn and nothing to `cd` into. If the toolchain is missing it says so and stops:
+`muten android --install` then fetches a **JDK 21 + the Android SDK into `~/.muten`** - no PATH, no registry, no
+admin, and `rm -rf ~/.muten` is the uninstall - and points the project at them so Gradle needs no env vars.
+
+To iterate on a real phone you don't need any of it: **`muten dev` prints a `/_qr` page**. Scan it and the app
+runs on your phone with live reload, over your wifi, no cable and no SDK. (HMR follows because the dev client
+opens a same-origin `EventSource` - whatever host serves the page serves the reload channel.)
 
 ## The app, by convention
 
@@ -181,6 +212,15 @@ muten check  [dir] [--json]  # parse + validate every page, no compile - the det
 muten map    [dir] [--json]  # emit app.map.json COLD (no build) - the app graph an AI reads FIRST
 muten add    <name...>       # a PLUGIN (lowercase, e.g. `devtools`) → install @muten/<name> + enable it in muten.config;
                              #   a COMPONENT (PascalCase, e.g. `Card`) → copy its source from a registry into src/parts/
+muten new    <page|store|app> <name...>
+                             # scaffold STRUCTURE that already compiles (a page + its route, a store, the routes entry)
+muten android --build [dir]  # THE .apk, in one command, from anywhere: checks the toolchain, generates android/,
+                             #   bundles, syncs, runs Gradle, prints the file. No cd, no Gradle by hand, no order
+                             #   to learn. (`npm run android` in a scaffolded app.)
+muten android         [dir]  # just diagnose: is there a JDK + Android SDK Gradle can actually use? (exit 1 if not)
+muten android --install      #   → get them: a JDK 21 + the SDK into ~/.muten (no PATH, no registry, no admin;
+                             #     `rm -rf ~/.muten` uninstalls), and point android/ at them so nothing needs
+                             #     environment variables. ~800MB, once per machine.
 ```
 
 `check` and `map` are the AI-first feedback loop: an agent asks the compiler "is this valid, and what
@@ -223,8 +263,8 @@ The core ships **no component library and no devtools** — both come from **plu
 
 - **Component registries** (a `registry.json` of muten parts) — e.g. [`@muten/shadcn`](https://www.npmjs.com/package/@muten/shadcn).
   Either **import** parts as-is (`plugins { shadcn {} }`) or **eject** them with `muten add Card Dialog …` (PascalCase),
-  which copies the source into `src/parts/` (the "own the source" model). Custom-backed widgets (sliders, charts) are
-  `muten add`-only, since their host `.js` lives in your `src/components/`.
+  which copies the source into `src/parts/` (the "own the source" model). A part whose behaviour needs a `Custom`
+  is `muten add`-only, since its host `.js` has to land in your `src/components/`.
 - **Dev-boot plugins** (a `muten.devBoot` export in `package.json`) — e.g.
   [`@muten/devtools`](https://www.npmjs.com/package/@muten/devtools). `muten dev` **auto-mounts** them (imports the
   export into the boot); `muten bundle`/`build` never do, so there's **zero production cost**. Add one with
@@ -278,8 +318,15 @@ layout and look - and it composes reactively: toggle a token (`class(active when
 the design values and muten emits them as `:root` CSS custom properties (`--space-md`, `--color-primary`, ...)
 that your CSS consumes. For a CSS value that **changes at runtime** (a progress width, a dynamic transform),
 `style(w: "{pct}%")` binds it to a CSS variable `--w` (the only thing `style()` can set). Common formatting is
-**built in** - `ago` / `date` / `time` / `initial` / `money` / `upper` / `truncate` (no `use` for dates or
-initials). For behavior the primitives can't express, drop to a `Custom` component (`src/components/<Name>.js`).
+**built in**, so a `use` function is almost never the answer for it:
+
+- **text** - `upper` · `lower` · `initial` · `truncate`
+- **numbers** - `money` · `round` · `floor` · `ceil` · `abs` · `min` · `max` · `pow` · `sqrt` · `sin` · `cos` · `pi`
+- **dates** - `now` · `ago` · `date` · `time` · `datetime` · `weekday` · `calendar` · `before` · `after` ·
+  `isToday` · `isPast` · `isFuture` · `daysUntil` · `addDays` · `dayKey`
+- **other** - `map` (value → value lookup) · `isEmail`
+
+For behavior the primitives can't express, drop to a `Custom` component (`src/components/<Name>.js`).
 
 ## Status & roadmap (honest)
 
@@ -296,7 +343,6 @@ Reactivity is keyed and batched: `each`/`DataTable` reconcile rows by `id` with 
 streams real-time updates over a WebSocket (only changed rows re-render).
 
 **Next, toward 1.0:**
-- a `round` formatter for numeric rounding in expressions (currency is already built in via `money`).
 - built-in virtualization for huge lists (today you render only visible rows yourself).
 - richer SSG for stateful multi-page apps (today a shared `.store` across pages deploys via `muten bundle`, not
   the static `muten build`).
@@ -325,9 +371,6 @@ These are honest gaps found during stress-testing. They are known and tracked; n
 - Enum fields cannot be marked `required`.
 - Field types: `text`, `number`, `email`, `bool`, `enum`, `date`, `password`, `textarea`. Anything else (`url`/`tel`/file) is flagged `unknown-field-type` - drop that field to a `Custom`.
 - `Form` renders all entity fields; there is no way to exclude a subset without a `Custom`.
-
-**Select / dropdown outside a Form**
-- No standalone `Select` primitive. A `Form` auto-generates one for enum fields; outside a `Form`, build a button group with `each` + `on(click:)`.
 
 **Custom inputs**
 - A `Custom` receives a snapshot of state at mount by default; for reactivity, its `mount` **returns an updater function** that muten re-runs whenever the bound `@` state changes.

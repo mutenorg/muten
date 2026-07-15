@@ -58,16 +58,16 @@ class Lexer {
       if (char === '$') { this.scanSigil(start, Tk.Param, ''); continue; }  // $partParam
       if (this.scanOperator(start)) continue;                              // ->, <-, ==, =>, !=, <=, >=
       if (isDigit(char) || (char === Pn.Dash && isDigit(source[this.index + 1]))) { this.scanNumber(start); continue; }
-      if (PUNCT_CHARS.includes(char)) { this.push(Tk.Punct, char, start); this.index++; continue; }
+      if (PUNCT_CHARS.includes(char)) { this.push(Tk.Punct, char, start, start + 1); this.index++; continue; }
       if (isWordStart(char)) { this.scanWord(start); continue; }           // ident / keyword
       const hint = JS_OP_HINT[char];                                       // catch JS-isms (! && ||) with the muten word
       throw new ParseError(hint ?? `unexpected character ${JSON.stringify(char)}`, locFromIndex(source, this.index));
     }
-    this.push(Tk.Eof, '', this.index);
+    this.push(Tk.Eof, '', this.index, this.index);
     return this.tokens;
   }
 
-  private push(kind: Tk, value: string, pos: number): void { this.tokens.push({ t: kind, v: value, pos }); }
+  private push(kind: Tk, value: string, pos: number, end: number): void { this.tokens.push({ t: kind, v: value, pos, end }); }
 
   private skipLineComment(): void { while (this.index < this.source.length && this.source[this.index] !== '\n') this.index++; }
   private skipBlockComment(): void { this.index += 2; while (this.index < this.source.length && !(this.source[this.index] === '*' && this.source[this.index + 1] === '/')) this.index++; this.index += 2; } // unterminated → runs to EOF, harmless
@@ -82,14 +82,14 @@ class Lexer {
       else if (source[end] === '}') depth--;
       value += source[end]; end++;
     }
-    this.push(Tk.String, value, start); this.index = end + 1;
+    this.push(Tk.String, value, start, end + 1); this.index = end + 1;
   }
 
   // `@` or `$` followed by an identifier -> a ref or part-param token.
   private scanSigil(start: number, kind: Tk, prefix: string): void {
     const { source } = this; let end = this.index + 1; let name = '';
     while (end < source.length && isWord(source[end])) { name += source[end]; end++; }
-    this.push(kind, prefix + name, start); this.index = end;
+    this.push(kind, prefix + name, start, end); this.index = end;
   }
 
   // Returns false (no advance) if no two-char operator from OPERATORS matches here.
@@ -97,7 +97,7 @@ class Lexer {
     const pair = this.source.slice(this.index, this.index + 2);
     const op = OPERATORS.find(([text]) => text === pair);
     if (!op) return false;
-    this.push(op[1], pair, start); this.index += 2;
+    this.push(op[1], pair, start, start + 2); this.index += 2;
     return true;
   }
 
@@ -106,14 +106,14 @@ class Lexer {
     const { source } = this; let end = this.index + (source[this.index] === Pn.Dash ? 1 : 0);
     while (end < source.length && isDigit(source[end])) end++;
     if (source[end] === Pn.Dot) { end++; while (end < source.length && isDigit(source[end])) end++; }
-    this.push(Tk.Number, source.slice(this.index, end), start); this.index = end;
+    this.push(Tk.Number, source.slice(this.index, end), start, end); this.index = end;
   }
 
   // Identifier or keyword: letters, digits, and `_`.
   private scanWord(start: number): void {
     const { source } = this; let end = this.index;
     while (end < source.length && isWord(source[end])) end++;
-    this.push(Tk.Ident, source.slice(this.index, end), start); this.index = end;
+    this.push(Tk.Ident, source.slice(this.index, end), start, end); this.index = end;
   }
 }
 

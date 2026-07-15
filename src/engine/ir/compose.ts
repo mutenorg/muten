@@ -48,14 +48,30 @@ function composeNode(node: IRNode, parts: Parts, used: Set<string>, chain: Set<s
     if (chain.has(node.type)) throw new Error(`part "${node.type}" references itself (directly or through another part) — parts inline at build, so a cycle can never terminate. Remove the self-reference.`);
     used.add(node.type);
     const kids = (node.children || []).flatMap((c) => composeChild(c, parts, used, chain, slot)); // the call's children become this part's slot content (forwarding any enclosing slot)
-    const inlined = substitute(part.tree, node.args || {});
+    const inlined = substitute(part.tree, node.args || {}, node.type);   // every inlined node remembers which part file it was written in
     const composed = composeNode(inlined, parts, used, new Set([...chain, node.type]), kids);   // resolve nested parts; the part's `slot` fills with kids
+    // The instance root keeps the CALL SITE — the line in the page where this part was written. It is the only line the
+    // app owns for that whole subtree (a plugin part's own file lives in node_modules and must never be edited), and
+    // without it a click on the part's chrome had nothing nearer than the page root to anchor to.
+    if (node.loc) composed.loc = node.loc;
+    if (node.endLoc) composed.endLoc = node.endLoc;   // the call-site span, so the editor can splice the whole `Name(args)` instance
+    // A `class()` written at the CALL SITE appends to the part root's own classes — the same rule two `class()` calls
+    // on a primitive already follow: the second appends, it never overwrites. Nothing else may ride in this way.
+    const callClass = node.props?.class;
+    if (callClass && callClass.length) composed.props = { ...(composed.props || {}), class: [...(composed.props?.class || []), ...callClass] };
     composed.fromPart = node.type;   // dev: tag the part instance's root so the DevTools tree shows the part name
     if (node.args && Object.keys(node.args).length) composed.partArgs = Object.fromEntries(Object.entries(node.args).map(([k, v]) => [k, argToStr(v)])); // dev: the "props" the part was called with
     return composed;
   }
   const out: IRNode = { type: node.type };
   if (node.loc) out.loc = node.loc;   // page's own nodes keep their source position
+  if (node.endLoc) out.endLoc = node.endLoc;   // ...and their span END, paired with loc
+  // An inlined node has no position in the PAGE, but it has one in the part it was written in. Carry both facts through
+  // this branch too — `substitute` stamps them and `composeNode` runs over the result, so dropping them here loses them.
+  if (node.ownerPart) out.ownerPart = node.ownerPart;
+  if (node.partLoc) out.partLoc = node.partLoc;
+  if (node.fromPart) out.fromPart = node.fromPart;
+  if (node.partArgs) out.partArgs = node.partArgs;
   if (node.args) out.args = node.args; // unresolved part instance (typo): validate flags it unknown-part
   if (node.props) out.props = node.props;
   if (node.children) out.children = node.children.flatMap((c) => composeChild(c, parts, used, chain, slot));
@@ -68,12 +84,22 @@ function composeChild(c: IRNode, parts: Parts, used: Set<string>, chain: Set<str
   return [composeNode(c, parts, used, chain, slot)];
 }
 
-// replaces { $param: "x" } with args.x across the part's whole subtree
-function substitute(node: IRNode, args: ArgMap): IRNode {
+// replaces { $param: "x" } with args.x across the part's whole subtree.
+//
+// `owner` is the part whose FILE this subtree was written in. `loc` is deliberately NOT copied onto the inlined node: it
+// is a line in the PART's file, and a diagnostic here names the PAGE — printing one against the other is how you send a
+// reader (or a model) to a line that does not exist. It travels as `partLoc` + `ownerPart` instead, so the element
+// picker can open the right file at the right line while the oracle keeps pointing at the page. Nested parts keep their
+// own owner: the innermost file that actually holds the source wins.
+function substitute(node: IRNode, args: ArgMap, owner: string): IRNode {
   const out: IRNode = { type: node.type };
+  out.ownerPart = node.ownerPart || owner;
+  const src = node.partLoc || node.loc;
+  if (src) out.partLoc = src;
+  if (node.fromPart) out.fromPart = node.fromPart;
   if (node.props) out.props = subProps(node.props, args);
   if (node.args) out.args = subArgs(node.args, args);    // args of nested parts
-  if (node.children) out.children = node.children.map((c) => substitute(c, args));
+  if (node.children) out.children = node.children.map((c) => substitute(c, args, owner));
   return out;
 }
 
@@ -106,7 +132,7 @@ function subProps(props: NodeProps, args: ArgMap): NodeProps {
 // a positional string prop: plain text passes through, { $param } resolves to the arg, interpolation recurses.
 function subStringProp(v: StringPropValue, args: ArgMap): StringPropValue {
   if (typeof v === 'string') return v;
-  if ('$param' in v) { const a = args[v.$param]; return typeof a === 'number' ? String(a) : (typeof a === 'object' && '$lit' in a) ? a.$lit : a; } // {$param} -> arg
+  if ('$param' in v) { const a = args[v.$param]; return typeof a === 'number' ? String(a) : (typeof a === 'object' && '$lit' in a) ? (a.$interp ?? a.$lit) : a; } // {$param} -> arg (an interpolated literal keeps its Interp)
   return subInterp(v, args);                                                                      // interpolation
 }
 
@@ -131,8 +157,18 @@ function subExpr(e: Expr, args: ArgMap): Expr {
 }
 
 // interpolation: its text chunks are literal; only the embedded expressions can hold $params.
+// A bare `$param` slot whose arg is ITSELF an interpolated literal must be SPLICED in: one outer slot holds a
+// single `string | Expr`, so it cannot carry "text + expr" on its own (`Span "{$price}/mo"` with price: "{money(p)}").
 function subInterp(i: Interp, args: ArgMap): Interp {
-  return { kind: Ek.Interp, parts: i.parts.map((p) => typeof p === 'string' ? p : subExpr(p, args)) };
+  const parts: Array<string | Expr> = [];
+  for (const p of i.parts) {
+    if (typeof p !== 'string' && p.kind === Ek.Ref && p.name.startsWith('$') && !p.name.includes('.')) {
+      const a = args[p.name.slice(1)];
+      if (a !== undefined && typeof a === 'object' && '$lit' in a && a.$interp) { parts.push(...a.$interp.parts); continue; }
+    }
+    parts.push(typeof p === 'string' ? p : subExpr(p, args));
+  }
+  return { kind: Ek.Interp, parts };
 }
 
 // args of a part instance / Custom inputs|on.

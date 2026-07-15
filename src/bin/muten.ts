@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // CLI entry point for the `muten` command.
-// Commands: dev, bundle, build, check (lint), map. Delegates to runner.ts, build.ts, lint.ts, and map.js.
-// Consumed by package.json "bin" -> users run `muten dev|bundle|build|check|map|lint [dir] [--json]`.
+// Commands: dev, bundle, build, check (lint), map, android. Delegates to runner.ts, build.ts, lint.ts, map.js
+// and android.ts. Consumed by package.json "bin" -> `muten dev|bundle|build|check|map|lint|add|new|android [dir]`.
 import { resolve, join, relative } from 'node:path';
 import { writeFileSync, readFileSync } from 'node:fs';
 import { dev, bundle } from '../runner.js';
@@ -9,6 +9,7 @@ import { buildApp } from '../build.js';
 import { lintApp, lintWatch } from '../lint.js';
 import { addComponents } from '../add.js';
 import { scaffoldNew } from '../scaffold.js';
+import { androidCommand } from '../android.js';
 import { mapApp } from '#engine/project/map.js';
 import { ParseError, formatDiagnostic, diag } from '#engine/shared/diagnostics.js';
 
@@ -31,6 +32,8 @@ try {
     if (json) console.log(JSON.stringify(map, null, 2));
     else { writeFileSync(join(root, 'app.map.json'), JSON.stringify(map, null, 2)); console.log('✓ app.map.json → the app graph (read this first)'); }
   }
+  // preflight the .apk toolchain (Capacitor+Gradle do the build; we say whether this machine can, and --install makes it so)
+  else if (cmd === 'android') process.exit(await androidCommand(root, args) ? 0 : 1);
   else if (cmd === 'add') { // add a plugin (lowercase -> install + enable) or eject a registry component (PascalCase)
     const names = args.slice(1).filter((a) => !a.startsWith('-'));
     if (!names.length) { console.error('usage: muten add <name...>\n  lowercase  -> a plugin: install @muten/<name> + enable it in muten.config   (e.g. muten add devtools)\n  PascalCase -> a component: copy its source into src/parts/                      (e.g. muten add Button)'); process.exit(1); }
@@ -43,7 +46,7 @@ try {
     if (!kind || (kind !== 'app' && !names.length)) { console.error('usage: muten new <page|store|app> <name...>\n  muten new page /  /dms  /settings   -> page skeleton + its route in src/app.muten (each COMPILES)\n  muten new store servers  channels    -> store skeleton (entity + empty list)\n  muten new app                        -> ensure src/app.muten (the routes entry) exists'); process.exit(1); }
     for (const f of scaffoldNew(cwd, kind, names)) console.log('✓ ' + relative(cwd, f));
   } else {
-    console.error('usage: muten <dev|bundle|build|check|map|lint|add|new> [dir] [--json]\nto create an app:  npm create muten@latest <dir>');
+    console.error('usage: muten <dev|bundle|build|check|map|lint|add|new|android> [dir] [--json]\nto create an app:  npm create muten@latest <dir>');
     process.exit(1);
   }
 } catch (e) {

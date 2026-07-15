@@ -61,6 +61,19 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   const actionNames = new Set(Object.keys(doc.actions || {})); // needed for `action.pending` / `action.error` refs
   const getNames = new Set(Object.keys(doc.gets || {})); // derived values, referenceable like state (page or store)
   const externs = new Set([...BUILTINS, ...(doc.imports || []).flatMap((i) => i.names)]); // built-in formatting fns + use'd logic functions, callable in exprs
+  // Anchor targets this page declares (`Section id("features")`), so a `Link -> "#features"` can be PROVEN to land.
+  const anchorIds = new Set<string>();
+  for (const node of Object.values(doc.nodes || {})) { const nodeId = node.props?.id; if (nodeId) anchorIds.add(nodeId); }
+  const EXTERNAL = /^([a-z][a-z0-9+.-]*:|\/\/)/i;   // http:, mailto:, tel:, protocol-relative — outside the closed world
+  // A static href matches a declared route when the segment counts agree and every declared `:param` acts as a
+  // wildcard — the same rule the runtime's matchRoute applies, so `-> "/product/42"` satisfies `"/product/:pid"`.
+  const routeExists = (href: string): boolean => {
+    const parts = href.replace(/^\//, '').split('/').filter(Boolean);
+    return (ctx.routes || []).some((url) => {
+      const segs = url.replace(/^\//, '').split('/').filter(Boolean);
+      return segs.length === parts.length && segs.every((seg, i) => seg[0] === ':' || seg === parts[i]);
+    });
+  };
   // the SHARED resolver's inputs — the SAME facts the emitter holds, so lint and runtime can't disagree on what resolves.
   const refFacts: RefFacts = { state: doc.state || {}, gets: doc.gets || {}, entities: doc.entities || {}, storeEntities: ctx.storeEntities };
   const knownHeads: KnownHeads = { stateKeys, gets: getNames, stores: storeDomains, consts: constNames, routeParams: paramNames, actions: actionNames };
@@ -549,8 +562,9 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
         D.push(diag('bind-type', `${n.type} binds a field of the \`each\` row "${head}", but rows of a store/query list can't be two-way-bound — ${rowFix}. (Or iterate a settable page \`state\` list to bind fields directly.)`, { loc: n.loc, from: head }));
       } else {
         const bt = head ? doc.state?.[head]?.type : undefined;
-        // SearchField stays lenient about existence (legacy); the newer inputs require a real state.
-        if (n.type !== Nt.SearchField && head && bt === undefined) D.push(diag('bind-type', `${n.type} binds "${head}", which is not a state on this page — declare ${hint}.`, { loc: n.loc, suggestion: closest(head, [...stateKeys]), from: head }));
+        const storeBind = head ? storeDomains.has(head) : false; // a store text field (e.g. `ide.msg`) — two-way bound like SearchField, valid at runtime; a dock/part input needs global state, so binding a store scalar is the intended pattern
+        // SearchField stays lenient about existence (legacy); the newer inputs require a real page state OR a store field.
+        if (n.type !== Nt.SearchField && head && bt === undefined && !storeBind) D.push(diag('bind-type', `${n.type} binds "${head}", which is not a state on this page — declare ${hint}.`, { loc: n.loc, suggestion: closest(head, [...stateKeys]), from: head }));
         else if (bt !== undefined && !want.includes(bt)) D.push(diag('bind-type', `${n.type} binds ${kindWord}, but "${head}" is "${bt}" — bind ${hint}.`, { loc: n.loc }));
       }
     }
@@ -633,10 +647,33 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     for (const v of Object.values(props.on || {})) if (typeof v === 'string' && n.type !== 'Custom') checkAction(v, n); // on(event: action) on any element — the action must exist (Custom's on() is checked above)
     if (props.aria) for (const expr of Object.values(props.aria)) checkExpr(expr, n.loc ?? null, scope);  // `aria(key: expr)` values are real expressions: an unknown/renamed state ref is caught here, not at runtime
     if (props.styleVars) for (const sv of Object.values(props.styleVars)) if (typeof sv !== 'string') for (const pt of sv.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);  // `style(w: "{ref}")` interpolations: an unknown state ref is caught here, not at runtime
+    // Page already carries the compiler-emitted id `mu-main` (the skip-link target); overriding it silently breaks a11y.
+    if (props.id && n.type === Nt.Page) D.push(diag('id-target', `Page already owns the id "mu-main" (the skip-link target) — put id() on a Section/Stack inside it`, { loc: n.loc }));
     const interps: StringPropValue[] = [];
     if ((n.type === Nt.Text || n.type === Nt.Title || n.type === Nt.Span) && props.value) interps.push(props.value);
     if (n.type === Nt.Image) { if (props.src) interps.push(props.src); if (props.alt) interps.push(props.alt); }
     if (n.type === Nt.Link && props.to) interps.push(props.to);
+    // Every STATIC link target must land somewhere. An interpolated href (`/product/{p.id}`) is data-driven and
+    // unknowable at build time, so it is skipped — the same stance as a data-driven Icon name.
+    if (n.type === Nt.Link && typeof props.to === 'string' && props.to && !EXTERNAL.test(props.to)) {
+      const href = props.to;
+      if (href[0] === '#') {                                    // in-page anchor: something must declare id("…")
+        const anchor = href.slice(1);
+        if (anchor && !anchorIds.has(anchor)) D.push(diag('unknown-anchor', `nothing on this page declares id("${anchor}") — the link "${href}" scrolls nowhere`, { loc: n.loc, from: anchor, suggestion: closest(anchor, anchorIds) }));
+      } else if (href[0] === '/' && ctx.routes) {                // a real path: it must be a route declared in app.muten
+        const path = href.split('#')[0].split('?')[0];
+        if (!routeExists(path)) D.push(diag('unknown-route', `no route "${path}" is declared in app.muten — this link goes nowhere`, { loc: n.loc, from: path, suggestion: closest(path, ctx.routes) }));
+        // The router's `go()` bails when the target equals the current path, so a link to THIS page's own route is
+        // provably dead: it renders, it is clickable, and nothing happens. That is the whole reason generated
+        // landings ship a navbar of no-ops — the model has nowhere else to point when it has only one route.
+        // (A persistent `shell` nav is exempt: it has no route of its own, so `selfRoute` is never threaded there
+        //  and the router's `is-active` marking of the current item keeps working.)
+        // TEMPORARILY a WARNING, not an error. It is provably dead and it should be an error — but the showcase corpus
+        // still carries ~458 of these decorative placeholder links, and an error there blocks `muten dev` for the whole
+        // reference library. Promote back to `error` the moment `muten check builder/templates` is green.
+        else if (ctx.selfRoute && path === ctx.selfRoute) D.push(diag('self-link', `this link points at the page it is already on ("${path}") — clicking it does nothing. Pick the one that matches what it really is: (1) a VIEW or filter of this same page (Starred / Sent / a tab) is STATE, not navigation — \`state { view = "inbox" : text }\` + \`Button "Starred" -> pick("starred")\` + \`each mail where folder == view\`; (2) a SECTION of this page is an anchor — \`-> "#pricing"\` with \`Stack id("pricing")\`; (3) another PAGE is its real route, which you must have created; (4) the current page's own nav item is not a link at all — render it as a \`Span\` with your active class.`, { loc: n.loc, from: path, severity: 'warning' }));
+      }
+    }
     if (n.type === Nt.SearchField && props.placeholder) interps.push(props.placeholder); // placeholder interpolates ("Message #{channel}")
     if (props.label) interps.push(props.label); // Link/Button/RowAction labels interpolate too
     for (const ip of interps) {
@@ -820,5 +857,8 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     }
   }
 
-  return { ok: D.length === 0, diagnostics: D };
+  // `ok` means "nothing here BLOCKS a build" — not "nothing was found". A warning is a real finding the author must
+  // see, but it must never fail `muten dev`/`bundle`/`build`. Every consumer keys off this flag, so if severity is not
+  // honoured HERE it is decorative everywhere: the first warning validate ever emitted broke the whole showcase.
+  return { ok: !D.some((d) => d.severity === 'error'), diagnostics: D };
 }

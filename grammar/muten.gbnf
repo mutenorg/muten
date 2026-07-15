@@ -43,7 +43,7 @@ linknode   ::= "Link" (sp (commonpart | "->" ws string))* (ws block)?
 actionnode ::= ("RowAction" | "Button") (sp (commonpart | actionarrow))* (ws block)?
 actionarrow ::= "->" ws dotted (ws "(" ws expr? ws ")")?
 customnode ::= "Custom" sp ident (sp modifier)*
-plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Section" | "Article" | "List" | "Details" | "Text" | "Title" | "Span" | "Image" | "Icon" | "Video" | "SearchField" | "Password" | "Textarea" | "Select" | "Checkbox" | "Number" | "Range" | "Date" | "DataTable" | "Chart" | "Svg" | "Rect" | "Line" | "Circle" | "Path" | "Group" | "Arc" | "Form" | "slot") (sp commonpart)* (ws block)?
+plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Section" | "Article" | "List" | "Details" | "Table" | "Row" | "Cell" | "Text" | "Title" | "Span" | "Image" | "Icon" | "Video" | "SearchField" | "Password" | "Textarea" | "Select" | "Checkbox" | "Number" | "Range" | "Date" | "DataTable" | "Chart" | "Svg" | "Rect" | "Line" | "Circle" | "Path" | "Group" | "Arc" | "Form" | "slot") (sp commonpart)* (ws block)?
 commonpart ::= string | ref | level | modifier
 level      ::= "h" [1-6]
 
@@ -55,7 +55,7 @@ droptargetmod ::= "droptarget" ws "(" ws string ws ")"
 optionsmod ::= "options" ws "(" ws ident (ws "," ws ident)* ws ")"
 chartmod   ::= ("kind" | "color") ws "(" ws ident ws ")"
 geomod     ::= ("x1" | "y1" | "x2" | "y2" | "cx" | "cy" | "rx" | "start" | "end" | "inner" | "x" | "y" | "w" | "h" | "r") ws "(" ws expr ws ")"
-strattrmod ::= ("viewBox" | "transform" | "d") ws "(" ws string ws ")"
+strattrmod ::= ("viewBox" | "transform" | "d" | "id") ws "(" ws string ws ")"
 classmod   ::= "class" ws "(" ws classitem (ws "," ws classitem)* ws ")"
 classitem  ::= (string | ident) (sp "when" sp expr)?
 bindmod    ::= "bind" sp (ref | dotted)

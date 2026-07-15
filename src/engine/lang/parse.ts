@@ -99,6 +99,7 @@ export class Parser extends Grammar {
       [Mod.Step, (props: NodeProps) => { props.step = this.parseExpr(); }], // Number/Range step(5)
       [Mod.Draggable, (props: NodeProps) => { props.draggable = this.parseExpr(); }],                 // draggable(item.id) — the id the drop carries
       [Mod.Droptarget, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.dropGroup = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // droptarget("group")
+      [Mod.Id, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.id = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // id("features") — a STATIC literal, so the oracle can prove every `-> "#features"` lands
     ]);
 
     this.statements = new Map([
@@ -509,7 +510,18 @@ export class Parser extends Grammar {
 
   // `Type <positionals> <modifiers> [{ children }]`, or a part instance `Name(args)`.
   // The inner loop reads by token kind until a sibling bare ident or `}` ends it.
+  // One choke point that stamps every tree node's END position (the offset just
+  // past its last token — the block's `}` for a container, the last prop for a
+  // leaf). All node shapes (leaf/block/when/each/part-instance) flow through here,
+  // so a bidirectional editor can splice a node by its exact `[loc, endLoc)` span.
   private parseNode(): IRNode {
+    const node = this.parseNodeBody();
+    const last = this.toks[this.pos - 1];
+    if (last && node.loc) node.endLoc = this.locOf(last.end);
+    return node;
+  }
+
+  private parseNodeBody(): IRNode {
     if (this.at(Tk.Ident, Kw.When)) return this.parseWhen();   // control-flow nodes look like keywords
     if (this.at(Tk.Ident, Kw.Each)) return this.parseEach();
     // `if <cond> { … }` in the TREE — conditional rendering is `when`, not `if` (`if` is action-body only). Teach it
@@ -524,9 +536,22 @@ export class Parser extends Grammar {
     const head = this.eat(Tk.Ident);
     const type = head.v;
     const loc = this.locOf(head.pos);
-    if (this.at(Tk.Punct, Pn.ParenL)) { // part instance: `Name(arg: value)`, with optional `{ … }` slot content
+    if (this.at(Tk.Punct, Pn.ParenL)) { // part instance: `Name(arg: value)`, optional `class(…)`, optional `{ … }` slot
       const args = this.parseArgs();
       const node: IRNode = { type, args, loc };
+      // `class()` is muten's ONE styling mechanism and a part instance is a node like any other, so it takes one too —
+      // it merges onto the part's root at compose time. Everything else stays out: `id`, `on`, `style`, `disabled`
+      // carry identity and behaviour that belong INSIDE the part, not at its call site.
+      // Before this, `class(` was read as a part instance NAMED `class`, and its string blew up `parseArgs` with
+      // `expected ident, got string` — an error raised from a place the parser had already reached by mistake.
+      const props: NodeProps = {};
+      while (this.at(Tk.Ident)) {
+        const word = this.peek().v;
+        if (word === Mod.Class) { this.next(); (this.modifiers.get(Mod.Class) as (p: NodeProps) => void)(props); continue; }
+        if (this.modifiers.has(word)) throw new ParseError(`\`${word}(…)\` cannot be attached to the part \`${type}\` — only \`class(…)\` can. Put \`${word}\` inside ${type}'s own definition, or wrap the call in a \`Stack ${word}(…) { ${type}(…) }\`.`, this.locOf(this.peek().pos));
+        break;   // an ordinary ident starts the next sibling node
+      }
+      if (props.class) node.props = props;
       if (this.at(Tk.Punct, Pn.BraceL)) node.children = this.parseChildren();
       return node;
     }
@@ -548,6 +573,7 @@ export class Parser extends Grammar {
           if (type === Nt.Video && VIDEO_FLAGS.has(word)) { this.next(); (props.flags = props.flags || []).push(word); break; } // <video> boolean attr
           if (type === Nt.List && word === Kw.Ordered) { this.next(); props.ordered = true; break; }                          // List ordered -> <ol>
           if (type === Nt.Details && word === Kw.Open) { this.next(); props.open = true; break; }                              // Details open -> <details open>
+          if (type === Nt.Row && word === Kw.Head) { this.next(); props.head = true; break; }                                  // Row head -> a header row (cells -> <th>, in <thead>)
           const applyModifier = this.modifiers.get(word);                          // table keys are the valid modifiers
           if (!applyModifier) { reading = false; break; }                          // unknown ident starts a sibling node
           this.next();
@@ -701,7 +727,11 @@ export class Parser extends Grammar {
   }
 
   private parseArgValue(): ArgValue {
-    if (this.at(Tk.String)) return { $lit: this.next().v }; // quoted: literal, not a ref (compose keeps it as text)
+    if (this.at(Tk.String)) {                                // quoted: literal, not a ref (compose keeps it as text)
+      const t = this.next();                                 // …but `{…}` must interpolate here as in every other string
+      const parsed = this.parseInterpolation(t.v, t.pos + 1);
+      return typeof parsed === 'string' ? { $lit: parsed } : { $lit: t.v, $interp: parsed };
+    }
     if (this.at(Tk.Number)) return Number(this.next().v);
     if (this.at(Tk.Ref)) return this.next().v;               // @state
     if (this.at(Tk.Param)) return { $param: this.next().v }; // $param (nested parts)

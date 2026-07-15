@@ -284,8 +284,13 @@ export class Logic {
       }
       case StOp.Refetch: {
         // re-run a query with new query-string params (pagination/search/filters) and update its signal.
+        // The lookup key is the SOURCE name (`query listProjects`), not the state name — they differ when a
+        // state is named apart from its source (`projects = query listProjects`), and __SOURCES is keyed by the
+        // source. Same resolution the query() init uses; the state signal stays the update target.
         const pairs = Object.entries(st.params).map(([k, e]) => `${JSON.stringify(k)}: ${this.compileExpr(e, scope)}`).join(', ');
-        out.push(`__refetch(${JSON.stringify(st.target)}, { ${pairs} }, ${st.target});`);
+        const src = this.ctx.state[st.target];
+        const source = typeof src?.source === 'string' && src.source.startsWith('query:') ? src.source.slice('query:'.length) : st.target;
+        out.push(`__refetch(${JSON.stringify(source)}, { ${pairs} }, ${st.target});`);
         break;
       }
       case StOp.Request: {

@@ -48,8 +48,9 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   // Standalone HTML has no virtual modules, so each .store slice must be inlined into the page.
   // Dev resolves stores via virtual:muten/store/*; the static build has no equivalent, so
   // compileStore output is stripped of import/export and wrapped as a self-contained IIFE namespace.
+  const appApi = readApi(appRoot);   // app-wide backend config, so a store's relative sources/`post` resolve against the base
   const storeCode = Object.entries(storeIRs).map(([domain, ir]) => {
-    const mod = compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports: ir.imports || [], domain }, ir.mock || {}, ir.sources || {});
+    const mod = compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports: ir.imports || [], domain, api: appApi }, ir.mock || {}, ir.sources || {});
     const body = mod.replace(/^[ \t]*import .*$/gm, '').replace(/^([ \t]*)export /gm, '$1'); // strip imports/exports so the body is inlineable (runtime + __id are already in scope)
     return `const __store_${domain} = (function () {\n${body}\nreturn { ${storeMembers[domain].join(', ')} };\n})();`;
   }).join('\n');
@@ -68,7 +69,8 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   const appCss = emitTheme(themeRaw, configThemeAdapter(cfg)) + '\n' + projectStyles;
 
   const pages = readRoutes(appRoot); // throws on missing/duplicate/dangling routes
-  const api = readApi(appRoot);      // app-wide backend config (base + headers) for source fetches
+  const routes = pages.map((p) => '/' + p.route);   // declared urls, leading slash restored — a `Link -> "/x"` must match one
+  const api = appApi;                // app-wide backend config (base + headers) for source fetches
   const appSources = readSources(appRoot); // app-wide `sources` (in app.muten) — merged into each page's queries
   console.log(`Host app: ${appRoot}`);
   console.log(`Pages: ${pages.map((p) => '/' + p.route).join(', ')}\n`);
@@ -96,7 +98,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
     const useFns = (doc.imports || []).flatMap((i) => i.names);
     if (useFns.length) console.log(`  ⚠ /${page.route}: \`use\` function(s) ${useFns.join(', ')} are NOT inlined into the standalone build — they'll throw at runtime. Use \`muten bundle\` for a build that includes them.`);
 
-    const { ok, diagnostics } = validate(doc, { parts: partNames, stores, storeMembers, storeEntities, storeSelfMut, iconExists }); // project-aware validation (FULL parity with `check`)
+    const { ok, diagnostics } = validate(doc, { parts: partNames, stores, storeMembers, storeEntities, storeSelfMut, iconExists, routes, selfRoute: '/' + page.route }); // project-aware validation (FULL parity with `check`)
     if (!ok) throw new Error(`/${page.route}\n` + diagnostics.map((d) => '   ' + formatDiagnostic(d, rel(page.screenPath))).join('\n'));
 
     // host-written Custom components referenced in the tree are opaque and inlined into the output

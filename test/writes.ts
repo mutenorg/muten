@@ -58,6 +58,18 @@ ok('refetch stays sync (a read, not a write)', rjs.includes('function apply(term
 ok('__refetch helper emitted', rjs.includes('function __refetch(name, params, sig)'));
 ok('__refetch url-encodes params', rjs.includes('encodeURIComponent(params[k])'));
 
+// refetch when the STATE name differs from the SOURCE name: the lookup key must be the SOURCE (__SOURCES is
+// keyed by source), the update target the state signal. Previously refetch emitted the state name -> undefined
+// source -> the query silently never refreshed.
+const rjs2 = compileModule(toDoc(parse(`screen r2
+entity Row { name text }
+state { items = query listRows : list<Row> }
+sources { listRows: { url: "/rows", at: "data" } }
+action reload mutates items { items.refetch() }
+Page { Button "Reload" -> reload  each items as o { Text "{o.name}" } }`)));
+ok('refetch resolves the SOURCE name, updates the STATE signal', rjs2.includes('__refetch("listRows", {  }, items)'));
+ok('refetch does NOT key off the state name', !rjs2.includes('__refetch("items"'));
+
 // explicit non-REST request (escape hatch): post/put/delete with a client prefix + interpolated url + body
 const ejs = compileModule(toDoc(parse(`screen e
 entity Order { title text }

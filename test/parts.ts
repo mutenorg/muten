@@ -68,5 +68,44 @@ let guard = false;
 try { parse('part Bad() { Stack { slot  slot } }'); } catch { guard = true; }
 check('slot: >1 slot in a part is rejected', guard);
 
+// A part-arg string INTERPOLATES like every other string. Regression: `Tier(price: "{money(p.amount)}")` used to
+// render the literal braces on the page while `muten check` stayed green (lint pass / runtime broken).
+const tier = parse('part Tier(price: text) { Text $price }').parts.Tier;
+const priced = compose(parse('screen t\neach plans as p { Tier(price: "{money(p.amount)}") }').tree, { Tier: tier }).tree.children?.[0];
+const pv = priced?.props?.value;
+check('part arg "{expr}" → Interp, not a literal string', Array.isArray(pv?.parts) && pv.parts[0]?.fn === 'money', JSON.stringify(pv));
+
+// The nested case: the arg's parts must be SPLICED into the body's own interpolation. One outer slot holds a single
+// `string | Expr`, so nesting it as a Lit would print the braces again.
+const tier2 = parse('part Tier2(price: text) { Span "{$price}/mo" }').parts.Tier2;
+const spliced = compose(parse('screen t\neach plans as p { Tier2(price: "{money(p.amount)}") }').tree, { Tier2: tier2 }).tree.children?.[0]?.props?.value;
+check('nested "{$price}/mo": arg interp spliced into the body interp', spliced?.parts?.length === 2 && spliced.parts[0]?.fn === 'money' && spliced.parts[1] === '/mo', JSON.stringify(spliced));
+
+// A brace-free arg must stay a plain, STATIC string (this is what keeps `Icon $icon` tree-shakeable — see above).
+const plain = compose(parse('screen t\nPage { Tier(price: "$29") }').tree, { Tier: tier }).tree.children?.[0];
+check('brace-free part arg stays a static string', plain?.props?.value === '$29', JSON.stringify(plain?.props));
+
+// `class()` at the CALL SITE. It used to be a parse error: `class(` was read as a part instance NAMED `class`, and its
+// string blew up parseArgs with "expected ident, got string". `class()` is muten's one styling mechanism and a part
+// instance is a node — it takes one, and it APPENDS to the part root's classes, like a second `class()` on a primitive.
+const box = parse('part Box() { Stack class("p-2") { slot } }').parts.Box;
+const styled = compose(parse('screen t\nPage { Box() class("bg-white") { Span "hi" } }').tree, { Box: box }).tree.children?.[0];
+check('class() on a part instance appends to the part root', JSON.stringify(styled?.props?.class) === '["p-2","bg-white"]', JSON.stringify(styled?.props?.class));
+
+const bare = compose(parse('screen t\nPage { Box() { Span "hi" } }').tree, { Box: box }).tree.children?.[0];
+check('no call-site class leaves the part root untouched', JSON.stringify(bare?.props?.class) === '["p-2"]', JSON.stringify(bare?.props?.class));
+
+// The call site styles; it does not reach inside. `id`/`on`/`style` carry identity and behaviour that belong to the
+// part's own definition, so they are refused BY NAME instead of bouncing off "expected ident, got string".
+let modGuard = false;
+try { parse('screen t\nPage { Box() id("hero") }'); } catch (e) { modGuard = /only `class\(…\)` can/.test(String(e)); }
+check('a non-class modifier on a part instance is refused, and says why', modGuard);
+
+// A part instance keeps its CALL SITE line — the only line the app owns for that subtree (a plugin part's own file
+// lives in node_modules). Its inlined nodes carry `ownerPart`/`partLoc` instead, and never a page line number.
+const inst = compose(parse('screen t\nPage {\n  Box() { Span "hi" }\n}').tree, { Box: box }).tree.children?.[0];
+check('part instance root keeps the call-site loc', inst?.loc?.line === 3, JSON.stringify(inst?.loc));
+check('inlined node carries its owner, and leaks no page line', inst?.ownerPart === 'Box' && !!inst?.partLoc, JSON.stringify({ owner: inst?.ownerPart, partLoc: inst?.partLoc }));
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nALL OK');
 process.exit(fails ? 1 : 0);

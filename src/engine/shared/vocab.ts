@@ -38,7 +38,7 @@ export enum Kw {
   Mock = 'mock', Sources = 'sources', Routes = 'routes', Shell = 'shell',
   Part = 'part', Const = 'const', Theme = 'theme', Query = 'query', Every = 'every', Live = 'live', Persist = 'persist', Param = 'param', Api = 'api', Body = 'body', Into = 'into', Meta = 'meta',
   Use = 'use', From = 'from',
-  When = 'when', Each = 'each', Match = 'match', As = 'as', Where = 'where', By = 'by', With = 'with', If = 'if', Else = 'else', Ordered = 'ordered', Open = 'open',
+  When = 'when', Each = 'each', Match = 'match', As = 'as', Where = 'where', By = 'by', With = 'with', If = 'if', Else = 'else', Ordered = 'ordered', Open = 'open', Head = 'head',
   Guard = 'guard', Not = 'not', And = 'and', Or = 'or', Contains = 'contains',
   Required = 'required', Min = 'min', Max = 'max', Pattern = 'pattern',
   True = 'true', False = 'false', Null = 'null',
@@ -49,6 +49,8 @@ export enum Nt {
   // containers (semantic landmarks + layout)
   Shell = 'Shell', Header = 'Header', Nav = 'Nav', Sidebar = 'Sidebar', Footer = 'Footer', Page = 'Page', Stack = 'Stack',
   Section = 'Section', Article = 'Article', List = 'List', Details = 'Details',
+  // native semantic table: Table groups its Row children into <thead>/<tbody>, Row -> <tr>, Cell -> <td>/<th>
+  Table = 'Table', Row = 'Row', Cell = 'Cell',
   // content
   Text = 'Text', Title = 'Title', Span = 'Span', Image = 'Image', Icon = 'Icon', Video = 'Video',
   // interactive
@@ -75,7 +77,9 @@ export const NON_PRIMITIVES: { [name: string]: string } = {
   img: 'an `Image "url" alt("…")`', a: 'a `Link "…" -> "/path"`', button: 'a `Button "…" -> action`',
   input: 'a bound input: `SearchField bind(x)` (text) · `Number bind(n)` · `Date bind(d)` · `Checkbox checked(b) -> t`', textarea: 'a `Textarea bind(x) "…"`',
   select: 'a `Select bind(x) options(A, B)`', option: 'the `options(…)` list on `Select`', form: 'a `Form bind(draft) submit(save)` — or just the inputs + a `Button`',
-  table: 'a `DataTable @rows columns(a, b)`', thead: 'a `DataTable columns(…)`', tbody: 'the `DataTable` rows', tr: 'an `each rows as r { … }`', td: 'a cell inside the `each`',
+  table: 'a `Table { Row head { Cell "…" } Row { Cell "…" } }` (static/authored) — or `DataTable @rows columns(a, b)` (data-bound)',
+  thead: 'a `Row head { Cell … }` inside a `Table`', tbody: 'the body `Row`s inside a `Table`', tfoot: 'the last body `Row`s of a `Table`',
+  tr: 'a `Row { Cell … }` inside a `Table` (add `head` for a header row)', td: 'a `Cell "…"` inside a `Row`', th: 'a `Cell "…"` inside a `Row head`', caption: 'a `Title`/`Text` before the `Table`',
   ul: 'a `List` or `each items as x { … }`', ol: 'an `each items as x { … }`', li: 'the `each` body',
   section: 'a `Section`', nav: 'a `Nav`', header: 'a `Header`', footer: 'a `Footer`', aside: 'a `Sidebar`', main: 'a `Page`', article: 'an `Article`',
   details: 'a `Details`', summary: 'the first child of `Details`', label: 'a `Span` before the input (inputs take a placeholder string)',
@@ -124,6 +128,7 @@ export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle
 export enum Mod {
   Bind = 'bind', Checked = 'checked', Submit = 'submit', Where = 'where', Columns = 'columns',
   Class = 'class', Alt = 'alt', Inputs = 'inputs', On = 'on', Aria = 'aria', Style = 'style', Disabled = 'disabled', Options = 'options',
+  Id = 'id',   // id("features") — a stable DOM id; the target an in-page `Link -> "#features"` anchor scrolls to
   Min = 'min', Max = 'max', Step = 'step',   // Number/Range numeric bounds + step (each takes one number expression)
   Draggable = 'draggable', Droptarget = 'droptarget',   // drag pack: mark an element draggable (carries an id) + a drop zone (fires on(drop: action(id, group)))
   Kind = 'kind', Color = 'color',   // Chart encodings: kind(bar|line|area|point) + color(field)

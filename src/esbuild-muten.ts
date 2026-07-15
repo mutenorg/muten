@@ -11,6 +11,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync, cpSync, rmSync, rea
 import { createServer, type ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { networkInterfaces } from 'node:os';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -38,6 +39,45 @@ const RID = 'virtual:muten/runtime';
 const SHELL = 'virtual:muten/shell';
 const STORE_PREFIX = 'virtual:muten/store/';
 const VNS = 'muten-virtual'; // esbuild namespace for the virtual modules
+
+// The dev server binds EVERY interface (`listen(port)` with no host), so a phone on the same wifi already
+// reaches it — these are the addresses to hand it. HMR follows for free: the client opens EventSource('/_reload'),
+// a same-origin relative path, so it works from whatever host the page was served from. Nothing to configure.
+const lanAddresses = (): string[] => Object.values(networkInterfaces())
+  .flatMap((ifaces) => ifaces ?? [])
+  .filter((iface) => iface.family === 'IPv4' && !iface.internal)
+  .map((iface) => iface.address);
+
+// A QR encoder is Reed-Solomon, not a few lines — so this is the one place a dependency beats owning the code.
+// It stays in the CLI: nothing here ever reaches an app's bundle. Typed structurally (the package is CJS) so the
+// surface we use is honest without pulling @types.
+type QrFactory = (typeNumber: number, errorLevel: string) => {
+  addData(data: string): void;
+  make(): void;
+  createSvgTag(options: { cellSize: number; margin: number }): string;
+};
+const qrcode: QrFactory = createRequire(import.meta.url)('qrcode-generator');
+
+// dev-only: `url` as a scannable code. Scanning opens the REAL app over the LAN, HMR and all — the dev server binds
+// every interface and /_reload is a relative path, so the phone needs no setup. What makes it run as an app rather
+// than a tab (fullscreen, safe areas, an icon) is public/manifest.webmanifest + Chrome's Install.
+const QR_BODY = 'margin:0;height:100vh;display:grid;place-content:center;justify-items:center;gap:20px'
+  + ';background:#1a1a1f;color:#f5f5f5;font:14px/1.6 ui-monospace,monospace;text-align:center';
+function qrPage(lan: string | undefined, port: number): string {
+  if (!lan) return `<!doctype html><title>muten — open on your phone</title><body style="${QR_BODY}">`
+    + '<p>No LAN address found.</p><p style="opacity:.6">Connect this machine to wifi and reload.</p></body>';
+  const url = `http://${lan}:${port}/`;
+  const code = qrcode(0, 'M');
+  code.addData(url);
+  code.make();
+  // `margin` is in PIXELS, not modules: the QR spec wants a 4-module quiet zone, so it has to track cellSize.
+  const cellSize = 6;
+  return `<!doctype html><title>muten — open on your phone</title><body style="${QR_BODY}">`
+    + `<div style="background:#fff;padding:16px;border-radius:12px;line-height:0">${code.createSvgTag({ cellSize, margin: cellSize * 4 })}</div>`
+    + `<div><div style="color:#FF5E00;font-weight:600;font-size:16px">${url}</div>`
+    + '<div style="opacity:.6;margin-top:12px">Scan it — the app runs on your phone with live reload.<br>'
+    + 'To run it as a real app: Chrome ▸ ⋮ ▸ Install app</div></div></body>';
+}
 
 // The whole-app model the compile needs, scanned once (the same facts the Vite plugin's loadProject gathers).
 export interface Model {
@@ -138,28 +178,40 @@ const muError = (path: string, message: string, loc?: { line: number; col: numbe
 
 // Compile a single .muten page (parse -> compose -> flatten -> validate -> emit), the same path the Vite
 // plugin's transform runs. Returns the JS or esbuild-shaped errors from the oracle (syntax + validation).
-async function compilePage(root: string, path: string, model: Model, dev = false): Promise<{ contents?: string; errors?: esbuild.PartialMessage[] }> {
+async function compilePage(root: string, path: string, model: Model, dev = false): Promise<{ contents?: string; errors?: esbuild.PartialMessage[]; warnings?: esbuild.PartialMessage[]; watchFiles?: string[] }> {
   let loaded;
   try { loaded = await load(path, model.parts); }
   catch (e) { if (e instanceof ParseError) return { errors: [muError(path, e.message, e.loc)] }; throw e; } // syntax error -> located message
   const storeMembers = model.store.storeMembers;
-  const { ok, diagnostics } = validate(loaded.doc, {
+  const { diagnostics } = validate(loaded.doc, {   // `ok` is derived below: only ERROR severity blocks the build
     parts: loaded.partNames, stores: model.store.stores, storeMembers,
     storeEntities: model.store.storeEntities, storeSelfMut: model.store.storeSelfMut,
     iconExists: model.iconExists, apiClients: apiClientNames(model.appIr?.api || {}),
+    routes: (model.appIr?.routes || []).map((r) => r.url),   // a static `Link -> "/x"` must match a declared route
+    // `src/pages/<name>/<name>.muten` -> this page's own url, so a link back to itself is caught in dev too
+    selfRoute: (model.appIr?.routes || []).find((r) => r.page === path.replace(/\\/g, '/').split('/').slice(-2)[0])?.url,
   });
-  if (!ok) return { errors: diagnostics.map((d) => muError(path, d.message + (d.suggestion ? ` (did you mean \`${d.suggestion}\`?)` : ''), d.loc)) };
+  // Only ERROR severity stops the build. Split explicitly here so a warning can never masquerade as a compile error
+  // again — `validate` used to report `ok: D.length === 0`, so the first warning it ever emitted broke every page.
+  // Warnings are carried on `result.warnings` for a caller that wants them; the CLI runs esbuild at `logLevel: 'silent'`
+  // and prints nothing today, so they surface through `muten check` (which counts them by severity).
+  const errs = diagnostics.filter((d) => d.severity === 'error');
+  const warns = diagnostics.filter((d) => d.severity !== 'error').map((d) => muError(path, d.message, d.loc));
+  if (errs.length) return { errors: errs.map((d) => muError(path, d.message + (d.suggestion ? ` (did you mean \`${d.suggestion}\`?)` : ''), d.loc)), warnings: warns };
   const customNames = [...new Set(Object.values(loaded.doc.nodes).filter((n) => n.type === Nt.Custom).map((n) => n.props?.component))];
   const components: { [name: string]: string } = {};
+  const watchFiles: string[] = []; // Custom .js files are INLINED (readFileSync), not imported — esbuild can't see them
   const pluginComponents = loadPluginComponents(root); // Custom host .js shipped by imported plugins (Chart, …)
   for (const name of customNames) {
     if (!name) continue;
     const cpath = join(root, 'src', 'components', name + '.js');
-    if (existsSync(cpath)) components[name] = readFileSync(cpath, 'utf8');          // local/ejected wins
-    else if (pluginComponents[name]) components[name] = readFileSync(pluginComponents[name], 'utf8'); // else the plugin's
+    if (existsSync(cpath)) { components[name] = readFileSync(cpath, 'utf8'); watchFiles.push(cpath); }          // local/ejected wins
+    else { const pc = pluginComponents[name]; if (pc) { components[name] = readFileSync(pc, 'utf8'); watchFiles.push(pc); } } // else the plugin's
   }
   const sources = { ...(model.appIr?.sources || {}), ...loaded.sources };
   return {
+    warnings: warns,   // non-blocking findings (a dead `self-link`) travel with the result; they never fail the build
+    watchFiles,        // so an edit to a Custom .js re-runs THIS page's onLoad (else esbuild caches the old inlined copy)
     contents: compileModule(loaded.doc, loaded.data, loaded.styles.css, components, sources, {
       stores: model.store.storesMeta, storeEntities: model.store.storeEntities, api: model.appIr?.api || {},
       iconResolver: model.iconResolver, classes: model.classes, dev, // dev: emit the HMR node registry + el.__muten handle
@@ -264,7 +316,7 @@ export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.P
           const ir = model.slices[domain];
           if (!ir) return { errors: [{ text: `unknown store: ${domain}` }] };
           const imports = (ir.imports || []).map((im) => im.from.startsWith('.') ? { ...im, from: '/' + join('src', im.from).replace(/\\/g, '/') } : im);
-          return { contents: compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports, domain, dev }, ir.mock || {}, ir.sources || {}), loader: 'js', resolveDir: join(root, 'src') };
+          return { contents: compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports, domain, dev, api: model.appIr?.api || {} }, ir.mock || {}, ir.sources || {}), loader: 'js', resolveDir: join(root, 'src') };
         }
         return { errors: [{ text: `unknown virtual module: ${args.path}` }] };
       });
@@ -272,7 +324,7 @@ export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.P
       build.onLoad({ filter: /\.muten$/ }, async (args) => {
         if (args.path.replace(/\\/g, '/').endsWith('/src/app.muten')) return { contents: buildBoot(model, root, dev), loader: 'js', resolveDir: join(root, 'src') };
         const out = await compilePage(root, args.path, model, dev);
-        return out.errors ? { errors: out.errors } : { contents: out.contents, loader: 'js', resolveDir: dirname(args.path) };
+        return out.errors ? { errors: out.errors } : { contents: out.contents, loader: 'js', resolveDir: dirname(args.path), watchFiles: out.watchFiles };
       });
     },
   };
@@ -466,6 +518,12 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
     const url = (req.url || '/').split('?')[0];
     res.setHeader('Cache-Control', 'no-cache'); // dev: assets change on every edit (boot.css has no hash); never let the browser serve a stale copy
     if (url === '/_reload') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); clients.add(res); req.on('close', () => clients.delete(res)); return; }
+    if (url === '/_qr') { // dev-only: the LAN URL as a scannable code — open on the desktop, scan with a phone
+      const addr = httpServer.address(), bound = addr && typeof addr === 'object' ? addr.port : port;
+      res.setHeader('Content-Type', 'text/html');
+      res.end(qrPage(lanAddresses()[0], bound));
+      return;
+    }
     if (url === '/_muten/graph') { // the live app graph (routes/stores/parts) — an AI reads the structure without parsing files
       res.setHeader('Content-Type', 'application/json');
       try { res.end(JSON.stringify(await mapApp(root), null, 2)); }
@@ -493,7 +551,12 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
   // the configured port may be taken (another app, a stale server) — fall back to a free OS-assigned port instead of
   // crashing, and ALWAYS print the port actually bound so a parent process can read it back.
   httpServer.on('error', (e: NodeJS.ErrnoException) => { if (e.code === 'EADDRINUSE') { console.log(`  port ${port} is busy — using a free port instead`); httpServer.listen(0); } else throw e; });
-  httpServer.on('listening', () => { const a = httpServer.address(); const bound = a && typeof a === 'object' ? a.port : port; console.log(`  muten dev (esbuild) → http://localhost:${bound}/`); });
+  httpServer.on('listening', () => {
+    const a = httpServer.address(); const bound = a && typeof a === 'object' ? a.port : port;
+    console.log(`  muten dev (esbuild) → http://localhost:${bound}/`);
+    for (const lan of lanAddresses()) console.log(`                      → http://${lan}:${bound}/  (phone, same wifi)`);
+    if (lanAddresses().length) console.log(`  on your phone       → http://localhost:${bound}/_qr  (scan it)`);
+  });
   httpServer.listen(port);
 
   let timer: ReturnType<typeof setTimeout> | null = null;

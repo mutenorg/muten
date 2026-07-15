@@ -50,11 +50,13 @@ export interface Loc {
 
 // ── 3. Tokenizer ─────────────────────────────────────────────────────────────
 
-/** A token stores `pos` = its start index in the source (line/col resolved on demand). */
+/** A token stores `pos` = its start index in the source, `end` = one past its
+ *  last char (so `[pos, end)` is the token's exact source span, quotes included). */
 export interface Token {
   t: Tk;
   v: string;   // raw text value (numbers are kept as their source text)
   pos: number;
+  end: number;
 }
 
 /** A cursor over a token stream — shared by the main parser and { } interpolation. */
@@ -164,8 +166,11 @@ export interface StateDef {
 }
 
 /** A quoted literal passed as a part/Custom arg. Kept distinct from a bare ref string so compose
- *  substitutes "Send" as text, not as a dangling reference to a variable named Send. */
-export interface LitRef { $lit: string; }
+ *  substitutes "Send" as text, not as a dangling reference to a variable named Send.
+ *  `$interp` is set when the literal contains `{…}` (`price: "{money(p.amount)}"`): TEXT positions render it
+ *  reactively, while every other sink (icon names, refs, Custom inputs, DevTools) keeps reading the raw,
+ *  static `$lit`. Carrying both is what keeps the change from rippling through those sinks. */
+export interface LitRef { $lit: string; $interp?: Interp; }
 /** The value of a part-instance arg: a quoted literal, a bare ref string, a number, or a $param. */
 export type ArgValue = string | number | ParamRef | LitRef;
 /** key → arg value, for part instances and Custom inputs/on. */
@@ -239,6 +244,7 @@ export interface NodeProps {
   flags?: string[];         // Video boolean attrs: controls / autoplay / loop / muted / playsinline
   ordered?: boolean;        // List `ordered` -> <ol> instead of <ul>
   open?: boolean;           // Details `open` -> <details open> (expanded by default)
+  head?: boolean;           // Row `head` -> a header row (its cells become <th>, grouped into <thead>)
   summary?: StringPropValue; // Details summary text -> <summary>
   placeholder?: StringPropValue;
   submitLabel?: StringPropValue;
@@ -246,6 +252,7 @@ export interface NodeProps {
   level?: Level;
   component?: string;
   data?: string;
+  id?: string;           // id("features") — a stable DOM id; what an in-page `Link -> "#features"` anchor scrolls to
   to?: string | Interp;  // route path; interpolated (e.g. `/product/{p.id}`) for dynamic navigation
   action?: string;
   arg?: Expr;
@@ -291,8 +298,14 @@ export interface IRNode {
   children?: IRNode[];
   args?: ArgMap;   // unresolved part instance args: Name(arg: value)
   loc?: Loc;
+  endLoc?: Loc;    // 1-based line/col one past the node's last token — its source span END, for a bidirectional editor that splices by node
   fromPart?: string;   // dev: the part this node's subtree was inlined from (DevTools component tree)
   partArgs?: { [name: string]: string };  // dev: the args the part was called with (Name(a: v)) — DevTools "props"
+  // Parts are inlined at build, so a node from a part has no position in the PAGE. `loc` must stay unset for it, or a
+  // diagnostic would print the page's filename against a line number from the part. These two say where it really lives:
+  // which part file owns it, and where inside that file. The element picker reads them to edit the right line.
+  ownerPart?: string;  // dev: the part file this node's source lives in (the innermost one, for nested parts)
+  partLoc?: Loc;       // dev: the node's position inside `ownerPart`'s own file
 }
 
 /** The nested IR the parser produces. Optional members are populated as the grammar encounters them. */
@@ -329,8 +342,11 @@ export interface FlatNode {
   props: NodeProps;
   children: string[];
   loc?: Loc;
+  endLoc?: Loc;   // paired with `loc`: the node's source span END (own-file nodes only, like `loc`)
   fromPart?: string;   // dev: source part (DevTools component tree)
   partArgs?: { [name: string]: string };  // dev: readable part-call args -> DevTools "props"
+  ownerPart?: string;  // dev: the part file this node's source lives in (see IRNode) — the picker's real target
+  partLoc?: Loc;       // dev: the node's position inside `ownerPart`'s own file
   args?: ArgMap;  // unresolved part instance args (live-lint path, before compose)
 }
 
@@ -440,6 +456,7 @@ export interface StoreInput {
   imports?: ImportDef[];                          // `use fmt from "./lib.ts"` -> without this, use'd calls in a store have no import (ReferenceError)
   domain?: string;                                // the store's domain (filename) -> namespaces its `persist` localStorage keys so two stores' same-named state don't collide
   dev?: boolean;                                  // dev build: self-register the store on window.__muten_stores for the DevTools
+  api?: { [name: string]: Value };                // app-wide backend config (base URL + default headers) so a store's sources/`post` resolve relative URLs, same as a page
 }
 
 /** The pre-computed pieces an emit target assembles into the final output (HTML/module/store). */
@@ -488,6 +505,8 @@ export interface ValidateCtx {
   iconExists?: (ref: string) => string | null;     // `Icon "set:name"` existence check (reads the set's icons.json). null -> ok; a string -> the error. undefined -> not threaded (skip)
   storeSelfMut?: Set<string>;                       // "domain.action" of store actions that update a signal from its own value -> an `effect { domain.action() }` loops forever
   storeEntities?: { [domainDotMember: string]: Entity };  // element entity of each store list ("orders.items" -> Order fields), so a page can aggregate over a store list (`orders.items.count where …`)
+  routes?: string[];   // every declared route url ("/", "/product/:pid"); a static `Link -> "/x"` must match one. undefined -> not threaded (skip)
+  selfRoute?: string;  // THIS page's own url. A link to it is provably dead: the router's `go()` ignores a nav to the current path
 }
 
 /** A lexical scope while compiling expressions: lambda locals + the action input. */
@@ -545,7 +564,10 @@ export interface EffectRun { (): void; deps: Set<Set<EffectRun>>; disposed: bool
 /** One mounted node, addressable by id for surgical HMR: its element and the parent it lives under (so a patch
  *  can rebuild + swap it in place). `dispose` is set only by a prior patch — the initial mount's per-node effects
  *  live in the page scope (cleaned on navigation), so a first patch just leaves them on the detached old node. */
-export interface MountedNode { el: Element; parent: Element; dispose?: () => void; type?: string; part?: string; partArgs?: { [name: string]: string }; loc?: { line: number; col: number }; }
+// `loc` is the node's line in the PAGE. A node inlined from a part has none — `owner`/`oloc` say which part file its
+// source lives in and where. The element picker climbs to the nearest `loc` (a line the app owns) and reports `owner`
+// as a hint; it must never turn `owner` into a path, because a plugin part's file lives in node_modules.
+export interface MountedNode { el: Element; parent: Element; dispose?: () => void; type?: string; part?: string; partArgs?: { [name: string]: string }; loc?: { line: number; col: number }; owner?: string; oloc?: { line: number; col: number }; }
 export type NodeRegistry = { [id: string]: MountedNode };
 /** The live HMR handle stashed on a mounted page's root element (`el.__muten`): the reactive context (state/
  *  actions as addressable data, so a patch can rebuild a node against the SAME signals) + the node registry. */
