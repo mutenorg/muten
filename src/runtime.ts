@@ -243,16 +243,116 @@ export function __arc(cx: number, cy: number, r: number, a0: number, a1: number,
 }
 
 // ── Pointer-based drag & drop (dnd-kit-inspired, NOT flaky HTML5 DnD) ──────────────────────────────────
-// A floating overlay clone follows the pointer; collision = the INNERMOST registered zone under the pointer,
-// so NESTED drop zones never double-fire (the outer never steals an inner drop). Pointer events → touch works;
-// transforms → no layout thrash / no re-render. All visuals are CSS: .mu-dnd-overlay / .mu-dnd-ghost / .mu-dnd-over.
-interface DndZone { group: string; onDrop: (id: string) => void; }
+// Two shapes, one engine. PLAIN: a floating clone follows the pointer, the INNERMOST zone under it
+// highlights, and on drop that zone fires (kanban: a card into a column). SORTABLE (a list whose
+// container carries `.mu-sortable`): the dragged row is lifted out and a real PLACEHOLDER element is
+// slotted where it will land — the browser's own layout reflows the rest as you move over them, so
+// what you see is exactly the final order. On drop the placeholder's neighbour tells us the sort to
+// land before. Pointer events → touch; the clone is a 1:1 copy grabbed at the exact point you took it.
+interface DndZone { group: string; onDrop: (id: string, before?: string) => void; }
 const __dndZones = new Map<Element, DndZone>();
-let __dndActive: { id: string; overlay: HTMLElement; src: HTMLElement; dx: number; dy: number; over: Element | null } | null = null;
+const SORTABLE_MARK = 'mu-sortable';
+
+interface DragBase { id: string; overlay: HTMLElement; item: HTMLElement; dx: number; dy: number; }
+interface PlainDrag extends DragBase { mode: 'plain'; over: Element | null; }
+interface SortDrag extends DragBase { mode: 'sort'; container: HTMLElement; placeholder: HTMLElement; onDrop: (id: string, before?: string) => void; seen: Set<HTMLElement>; }
+type Drag = PlainDrag | SortDrag;
+let __dndActive: Drag | null = null;
+
+// nearest ancestor (incl. el) that is a registered drop zone
+function __zoneOf(el: Element | null): HTMLElement | null {
+  for (let n: Element | null = el; n; n = n.parentElement) if (__dndZones.has(n) && n instanceof HTMLElement) return n;
+  return null;
+}
+// the zones inside a sortable container, in DOM order, skipping the hidden source and the placeholder
+function __zonesIn(d: SortDrag): HTMLElement[] {
+  const out: HTMLElement[] = [];
+  for (const c of Array.from(d.container.children))
+    if (c instanceof HTMLElement && __dndZones.has(c) && c !== d.item) out.push(c);
+  return out;
+}
+
+// A sortable container under the pointer that belongs to the SAME family as `like` — both item lists
+// (`mu-sort-items`) or both the groups list — so a dragged item lands in an item list, never in the
+// list of groups. This is what lets a row cross from one group (or the ungrouped list) into another.
+// The drag "family" is a container's `mu-sort-<name>` class: a row only crosses into another sortable
+// of the SAME family (items into item lists; groups among groups). Generic and reusable — a new
+// draggable section just gives its lists a shared `mu-sortable mu-sort-<name>` and cross-list drag works.
+function __family(el: HTMLElement): string {
+  for (const c of Array.from(el.classList)) if (c.startsWith('mu-sort-')) return c;
+  return '';
+}
+function __sortableFor(x: number, y: number, like: HTMLElement): HTMLElement | null {
+  const fam = __family(like);
+  for (const el of document.elementsFromPoint(x, y))
+    for (let n: Element | null = el; n; n = n.parentElement)
+      if (n instanceof HTMLElement && n.classList.contains(SORTABLE_MARK) && __dndZones.has(n) && __family(n) === fam) return n;
+  return null;
+}
+
+// SORTABLE: slot the placeholder where the pointer sits, and let native layout reflow the rest — then
+// FLIP the rows that moved (measure before/after, invert with a transform, play back to 0) so the
+// reorganisation glides instead of snapping. If the pointer is over a DIFFERENT sortable of the same
+// family, the row crosses into it (the placeholder moves there and the drop targets that list).
+function __dndSort(d: SortDrag, pointerX: number, pointerY: number): void {
+  d.overlay.style.visibility = 'hidden';
+  const target = __sortableFor(pointerX, pointerY, d.container);
+  d.overlay.style.visibility = 'visible';
+  const switching = target !== null && target !== d.container;
+  const oldC = d.container;
+  if (switching && target) { d.container = target; d.seen.add(target); }
+  const newZones = __zonesIn(d);                                   // cells of the list we're now over
+  // WHERE THE POINTER LANDS. A column compares against each row's vertical middle (the classic list). A
+  // flex-row or a wrapping grid reads left-to-right, top-to-bottom: land before the first cell the
+  // pointer is ahead of in that order (an earlier row, or the same row but left of the cell's middle).
+  // This is what gives a gallery grid the same auto-sorting a list has.
+  const flow = getComputedStyle(d.container);
+  const horizontal = flow.display.includes('grid') || (flow.display.includes('flex') && flow.flexDirection.startsWith('row'));
+  let before: Element | null = null;
+  for (const z of newZones) {
+    const r = z.getBoundingClientRect();
+    const hit = horizontal
+      ? (pointerY < r.top || (pointerY <= r.bottom && pointerX < r.left + r.width / 2))
+      : (pointerY < r.top + r.height / 2);
+    if (hit) { before = z; break; }
+  }
+  // The first trailing child that is NOT a sortable cell — an «Add» tile, an upload skeleton, a note.
+  // Landing goes before it, so those never become a drop slot and a piece can't end up «behind» them.
+  let tail: Element | null = null;
+  for (const c of Array.from(d.container.children)) {
+    if (c === d.item || c === d.placeholder) continue;
+    if (c instanceof HTMLElement && __dndZones.has(c)) continue;   // a real cell
+    tail = c; break;
+  }
+  const anchor = before ?? tail;
+  const moves = switching || (anchor ? d.placeholder.nextElementSibling !== anchor : d.container.lastElementChild !== d.placeholder);
+  if (!moves) return;
+  // FIRST — measure BOTH lists so the one we leave closes its gap and the one we enter opens for the cell.
+  const oldZones = switching
+    ? Array.from(oldC.children).filter((c): c is HTMLElement => c instanceof HTMLElement && __dndZones.has(c) && c !== d.item && c !== d.placeholder)
+    : [];
+  // FLIP on BOTH axes: in a grid a cell shifts sideways as well as down; in a column dx is simply 0.
+  const first = new Map<HTMLElement, { x: number; y: number }>();
+  for (const z of [...oldZones, ...newZones]) { const r = z.getBoundingClientRect(); first.set(z, { x: r.left, y: r.top }); }
+  if (anchor) d.container.insertBefore(d.placeholder, anchor);
+  else d.container.appendChild(d.placeholder);
+  const all = [...oldZones, ...newZones];
+  for (const z of all) {                                           // INVERT: jump each moved cell back to where it was
+    const f = first.get(z);
+    const r = z.getBoundingClientRect();
+    const dx = (f ? f.x : 0) - r.left;
+    const dy = (f ? f.y : 0) - r.top;
+    if (dx || dy) { z.style.transition = 'none'; z.style.transform = `translate(${dx}px, ${dy}px)`; }
+  }
+  requestAnimationFrame(() => {                                    // PLAY: release to the new spot, animated
+    for (const z of all) if (z.style.transform) { z.style.transition = 'transform .18s cubic-bezier(.2,.8,.2,1)'; z.style.transform = ''; }
+  });
+}
 
 function __dndMove(e: PointerEvent): void {
   const d = __dndActive; if (!d) return;
   d.overlay.style.transform = `translate(${e.clientX - d.dx}px, ${e.clientY - d.dy}px)`;
+  if (d.mode === 'sort') { __dndSort(d, e.clientX, e.clientY); return; }
   d.overlay.style.visibility = 'hidden';                                   // don't let the overlay eat the hit-test
   const stack = document.elementsFromPoint(e.clientX, e.clientY);
   d.overlay.style.visibility = 'visible';
@@ -260,16 +360,39 @@ function __dndMove(e: PointerEvent): void {
   for (const el of stack) { if (__dndZones.has(el)) { zone = el; break; } } // top-of-stack first → innermost zone wins
   if (zone !== d.over) { if (d.over) d.over.classList.remove('mu-dnd-over'); if (zone) zone.classList.add('mu-dnd-over'); d.over = zone; }
 }
+
 function __dndEnd(): void {
   window.removeEventListener('pointermove', __dndMove);
   window.removeEventListener('pointerup', __dndEnd);
   const d = __dndActive; __dndActive = null; if (!d) return;
-  d.overlay.remove(); d.src.classList.remove('mu-dnd-ghost');
-  if (d.over) { d.over.classList.remove('mu-dnd-over'); const z = __dndZones.get(d.over); if (z) z.onDrop(d.id); }
+  document.body.style.cursor = '';
+  document.documentElement.classList.remove('mu-dnd-on');
+  d.overlay.remove();
+  d.item.classList.remove('mu-dnd-ghost');
+  if (d.mode === 'plain') {
+    if (d.over) { d.over.classList.remove('mu-dnd-over'); const z = __dndZones.get(d.over); if (z) z.onDrop(d.id); }
+    return;
+  }
+  // sortable: the zone right after the placeholder is what the dropped row lands BEFORE; none → the end.
+  let before: string | undefined;
+  let n: Element | null = d.placeholder.nextElementSibling;
+  while (n && (!__dndZones.has(n) || n === d.item)) n = n.nextElementSibling;
+  if (n) before = __dndZones.get(n)?.group;
+  else { let max = 0; for (const z of __zonesIn(d)) { const v = Number(__dndZones.get(z)?.group); if (Number.isFinite(v) && v > max) max = v; } before = String(max + 1); }
+  for (const c of d.seen) for (const z of Array.from(c.children)) {   // drop the FLIP leftovers on every list touched
+    if (z instanceof HTMLElement) { z.style.transition = ''; z.style.transform = ''; }
+  }
+  d.placeholder.remove();
+  d.item.style.display = '';                                               // restore the lifted row before re-render
+  // The drop belongs to the container the row LANDED in (it may have crossed into another list), which
+  // carries the group + the action. Its onDrop closure adds the container's group as the third arg.
+  const landed = __dndZones.get(d.container)?.onDrop ?? d.onDrop;
+  landed(d.id, before);
 }
-// register a drag source. Config from CSS custom props (nothing hardcoded): `--mu-dnd-z` (overlay stacking) and
-// `--mu-dnd-activation` (px the pointer must move before a drag starts — so a plain click never drags; the dnd-kit
-// "activation constraint"). getId is read live, at grab time.
+
+// register a drag source. Config from CSS custom props: `--mu-dnd-z` (overlay stacking) and
+// `--mu-dnd-activation` (px the pointer must move before a drag starts — so a click never drags). The
+// handle may be the item itself or a grip inside it; the id is read live, at grab time.
 export function __drag(el: HTMLElement, getId: () => string): void {
   el.style.touchAction = 'none'; el.classList.add('mu-dnd-item');
   el.addEventListener('pointerdown', (e: PointerEvent) => {
@@ -279,19 +402,42 @@ export function __drag(el: HTMLElement, getId: () => string): void {
     const z = cs.getPropertyValue('--mu-dnd-z').trim() || '99999';
     const sx = e.clientX, sy = e.clientY;
     const begin = (ev: PointerEvent): void => {
-      const clone = el.cloneNode(true); if (!(clone instanceof HTMLElement)) return;
-      const r = el.getBoundingClientRect();
-      clone.classList.add('mu-dnd-overlay');
-      clone.style.cssText += `;position:fixed;left:0;top:0;width:${r.width}px;height:${r.height}px;margin:0;pointer-events:none;z-index:${z};`;
-      document.body.appendChild(clone);
-      el.classList.add('mu-dnd-ghost');
-      __dndActive = { id: getId(), overlay: clone, src: el, dx: sx - r.left, dy: sy - r.top, over: null };
+      const zone = __zoneOf(el);
+      const item = zone ?? el;                                             // the ROW lifts, not the little grip
+      const container = item.parentElement;
+      const sortable = zone !== null && container instanceof HTMLElement && container.classList.contains(SORTABLE_MARK);
+      const r = item.getBoundingClientRect();
+      const clone = item.cloneNode(true); if (!(clone instanceof HTMLElement)) return;
+      clone.classList.add('mu-dnd-overlay'); clone.style.animation = 'none';
+      clone.style.cssText += `;position:fixed;left:0;top:0;width:${r.width}px;height:${r.height}px;margin:0;pointer-events:none;z-index:${z};animation:none;`;
+      // Keep the clone under the SAME ancestors so scoped CSS still matches (a 1:1 copy of the row).
+      (item.parentElement ?? document.body).appendChild(clone);
+      item.classList.add('mu-dnd-ghost');
+      document.body.style.cursor = 'grabbing';
+      document.documentElement.classList.add('mu-dnd-on');   // a hook for enlarging drop zones while dragging
+      // Grab point stays exactly under the cursor — the row hangs from where you took it.
+      const base = { id: getId(), overlay: clone, item, dx: sx - r.left, dy: sy - r.top };
+      if (sortable && container instanceof HTMLElement) {
+        const placeholder = document.createElement(item.tagName);
+        placeholder.className = 'mu-dnd-placeholder';
+        // Width AND height, so the gap is a true copy of the item — a full-width slot in a column, a
+        // proper cell in a grid or row (without the width, a grid placeholder collapsed and the preview
+        // looked broken).
+        placeholder.style.cssText = `box-sizing:border-box;width:${r.width}px;height:${r.height}px;flex:0 0 auto;`;
+        container.insertBefore(placeholder, item);
+        item.style.display = 'none';                                       // lift it out; native layout closes up
+        // The drop action comes from the CONTAINER (the list), not the row — so a row landing in a
+        // different list uses that list's action + group. The row's own droptarget only marks position.
+        __dndActive = { ...base, mode: 'sort', container, placeholder, seen: new Set([container]), onDrop: __dndZones.get(container)?.onDrop ?? __dndZones.get(item)?.onDrop ?? (() => {}) };
+      } else {
+        __dndActive = { ...base, mode: 'plain', over: null };
+      }
       __dndMove(ev);
       window.addEventListener('pointermove', __dndMove);
       window.addEventListener('pointerup', __dndEnd);
     };
     if (threshold <= 0) { e.preventDefault(); begin(e); return; }
-    const pre = (ev: PointerEvent): void => {                               // activation constraint: click-safe
+    const pre = (ev: PointerEvent): void => {                              // activation constraint: click-safe
       if (Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < threshold) return;
       window.removeEventListener('pointermove', pre); window.removeEventListener('pointerup', cancel);
       ev.preventDefault(); begin(ev);
@@ -300,8 +446,8 @@ export function __drag(el: HTMLElement, getId: () => string): void {
     window.addEventListener('pointermove', pre); window.addEventListener('pointerup', cancel);
   });
 }
-// register a drop zone; on drop the innermost zone under the pointer fires onDrop(draggedId).
-export function __drop(el: Element, group: string, onDrop: (id: string) => void): void { __dndZones.set(el, { group, onDrop }); }
+// register a drop zone; on drop the zone reports the dragged id and (sortable) the sort it lands before.
+export function __drop(el: Element, group: string, onDrop: (id: string, before?: string) => void): void { __dndZones.set(el, { group, onDrop }); }
 
 // Derived/memoized value (a store `get`): recomputes when the signals it reads change.
 // Seeded eagerly, then kept current by a sync effect that tracks its dependencies.

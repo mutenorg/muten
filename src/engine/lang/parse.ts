@@ -98,7 +98,7 @@ export class Parser extends Grammar {
       [Mod.Max, (props: NodeProps) => { props.max = this.parseExpr(); }],   // Number/Range max(100)
       [Mod.Step, (props: NodeProps) => { props.step = this.parseExpr(); }], // Number/Range step(5)
       [Mod.Draggable, (props: NodeProps) => { props.draggable = this.parseExpr(); }],                 // draggable(item.id) — the id the drop carries
-      [Mod.Droptarget, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.dropGroup = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // droptarget("group")
+      [Mod.Droptarget, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); const t = this.eat(Tk.String); props.dropGroup = this.parseInterpolation(t.v, t.pos + 1); if (p) this.eat(Tk.Punct, Pn.ParenR); }], // droptarget("group") — the group interpolates, so `droptarget("{row.id}")` makes each row carry its own id (list reorder), while a static `droptarget("done")` is unchanged
       [Mod.Id, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.id = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // id("features") — a STATIC literal, so the oracle can prove every `-> "#features"` lands
     ]);
 

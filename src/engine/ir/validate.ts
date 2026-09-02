@@ -644,6 +644,8 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       if (!DISABLEABLE.has(n.type)) D.push(diag('disabled-target', `\`disabled\` does nothing on ${n.type} — it applies to form controls (Button, RowAction, SearchField, Password, Select, Checkbox, Form).`, { loc: n.loc, from: n.type }));
     }
     if (props.draggable) checkExpr(props.draggable, n.loc ?? null, scope); // `draggable(item.id)` — the id expression is real
+    if (props.dropGroup && typeof props.dropGroup !== 'string' && 'kind' in props.dropGroup) // `droptarget("{row.id}")` — the interpolated refs are real
+      for (const part of props.dropGroup.parts) if (typeof part !== 'string') checkExpr(part, n.loc ?? null, scope);
     for (const v of Object.values(props.on || {})) if (typeof v === 'string' && n.type !== 'Custom') checkAction(v, n); // on(event: action) on any element — the action must exist (Custom's on() is checked above)
     if (props.aria) for (const expr of Object.values(props.aria)) checkExpr(expr, n.loc ?? null, scope);  // `aria(key: expr)` values are real expressions: an unknown/renamed state ref is caught here, not at runtime
     if (props.styleVars) for (const sv of Object.values(props.styleVars)) if (typeof sv !== 'string') for (const pt of sv.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);  // `style(w: "{ref}")` interpolations: an unknown state ref is caught here, not at runtime

@@ -91,7 +91,10 @@ export class Logic {
 
   // does the body contain a server write (create/update/delete)? recurses into if-branches.
   private bodyHasWrite(body: Stmt[]): boolean {
-    return body.some((st) => st.op === StOp.Create || st.op === StOp.Update || st.op === StOp.Delete || st.op === StOp.Request
+    // A Call counts: a store action may itself write, and a caller that has statements AFTER it needs
+    // them to run after the write, not during it. Without this a page could sign in and create the
+    // first row in the same action, and the create would leave before the session existed.
+    return body.some((st) => st.op === StOp.Create || st.op === StOp.Update || st.op === StOp.Delete || st.op === StOp.Request || st.op === StOp.Call
       || (st.op === StOp.If && (this.bodyHasWrite(st.then || []) || this.bodyHasWrite(st.else || []))));
   }
   // write actions become async and expose live `.pending` / `.error` signals. Memoized.
@@ -303,11 +306,16 @@ export class Logic {
         else out.push(isAsync ? `await ${send};` : `${send}.catch(() => {});`);
         break;
       }
-      case StOp.Call:
+      case StOp.Call: {
         // page action calling a store action: `shop.addProduct(draft)` -> call the imported store fn.
+        // AWAITED inside an async action: a store action that writes returns a promise, and the
+        // statements after the call are written expecting it to have happened. Awaiting a plain value
+        // is a no-op, so a read-only store action costs nothing here.
         this.ctx.usedStores.add(st.target);
-        out.push(`__store_${st.target}.${st.method}(${st.args.map((a) => this.compileExpr(a, scope)).join(', ')});`);
+        const call = `__store_${st.target}.${st.method}(${st.args.map((a) => this.compileExpr(a, scope)).join(', ')})`;
+        out.push(isAsync ? `await ${call};` : `${call};`);
         break;
+      }
       case StOp.Extern:
         // calling a use'd function as a side-effect: `persist(messages)` -> the imported fn, args compiled like any expr.
         out.push(`${st.fn}(${st.args.map((a) => this.compileExpr(a, scope)).join(', ')});`);

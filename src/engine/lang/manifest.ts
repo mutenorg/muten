@@ -103,8 +103,8 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     snippet: 'Video "${1:clip.mp4}" controls',
   },
   SearchField: {
-    string: 'placeholder', props: { bind: 'state', placeholder: 'text?' }, children: false, interp: true,
-    doc: 'Search input two-way bound to a text state. The placeholder interpolates: `SearchField bind @draft "Message #{channel}"`.',
+    string: 'placeholder', props: { bind: 'state', max: 'expr?', placeholder: 'text?' }, children: false, interp: true,
+    doc: 'Search input two-way bound to a text state. The placeholder interpolates: `SearchField bind @draft "Message #{channel}"`. Optional `max(n)` caps the LENGTH natively (maxlength): the browser refuses the n+1 character, no JS needed.',
     snippet: 'SearchField bind(${1:search}) "${2:Search by name}"',
   },
   Password: {
@@ -198,7 +198,10 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     snippet: 'Button "${1:label}" -> ${2:action}($3)',
   },
   Form: {
-    string: 'submitLabel', props: { bind: 'state', submit: 'action', submitLabel: 'text?' }, children: false,
+    // `interp: true` because the submit label is COPY, and copy in a translated app is an
+    // interpolation. Without it `Form … "{t(ui.lang, "id.in")}"` printed the braces on the button:
+    // the source of the app, in front of the user, on the screen before the login.
+    string: 'submitLabel', props: { bind: 'state', submit: 'action', submitLabel: 'text?' }, children: false, interp: true,
     doc: 'Auto-form: one field per entity field, two-way bound to a draft state.',
     snippet: 'Form bind(${1:draft}) submit(${2:createItem}) "${3:Save}"',
   },

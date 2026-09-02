@@ -280,7 +280,7 @@ export interface NodeProps {
   styleVars?: { [name: string]: string | Interp };   // style(w: "{pct}%") → sets CSS custom property `--w` (reactive when interpolated); CSS reads it via var(--w)
   disabled?: Expr;   // `disabled when <cond>` → reactive `el.disabled` on Button/inputs (bare `disabled` = always). A literal is set once; a state-reading cond is wrapped in an effect.
   draggable?: Expr;  // `draggable(item.id)` → el.draggable + dragstart carrying the id (HTML5 DnD); the drop target reads it
-  dropGroup?: string; // `droptarget("done")` → a drop zone; `on(drop: move)` fires move(draggedId, "done")
+  dropGroup?: StringPropValue; // `droptarget("done")` → a drop zone; `on(drop: move)` fires move(draggedId, "done"). Interpolates: `droptarget("{row.id}")` carries the row's own id, so a list can be reordered by dropping onto a row.
   // control flow (When/Each)
   cond?: Expr;
   list?: Expr;

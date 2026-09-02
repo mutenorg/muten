@@ -103,8 +103,19 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       if (typeof act !== 'string') continue;
       if (event === 'enter') lines.push(`el_${id}.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ${logic.actionRef(act)}(); } });`); // synthetic: Enter submits (no newline); Shift+Enter is a newline
       else if (event === 'drop') { // register a pointer-DnD drop zone (innermost-wins collision → nested-safe)
-        const grp = typeof p.dropGroup === 'string' ? ', ' + JSON.stringify(p.dropGroup) : '';
-        lines.push(`__drop(el_${id}, ${JSON.stringify(p.dropGroup || '')}, (__dragId) => ${logic.actionRef(act)}(__dragId${grp}));`);
+        // The group interpolates: `droptarget("{row.id}")` compiles to `String(row.id ?? '')`, so each row in a
+        // list is a zone that passes its OWN id as the drop's second arg → `reorder(draggedId, targetId)`.
+        let groupJs = "''"; let arg = '';
+        if (p.dropGroup !== undefined) {
+          groupJs = typeof p.dropGroup === 'string' ? JSON.stringify(p.dropGroup)
+            : 'kind' in p.dropGroup ? interpConcat(p.dropGroup) : "''";
+          // Second arg: where the row LANDS in a sortable (`__before`), else the zone's own group.
+          // Third arg: ALWAYS the zone's group — so a nested sortable can get BOTH the landing
+          // position AND which group it landed in (`move(id, before, group)`). Actions that take two
+          // args ignore it, so this stays backward compatible with `reorder(id, target)`.
+          arg = ', (__before !== undefined ? __before : ' + groupJs + '), ' + groupJs;
+        }
+        lines.push(`__drop(el_${id}, ${groupJs}, (__dragId, __before) => ${logic.actionRef(act)}(__dragId${arg}));`);
       }
       else lines.push(`el_${id}.addEventListener(${JSON.stringify(event)}, (e) => ${logic.actionRef(act)}(${EVENT_ARG[event] || ''}));`);
     }
@@ -289,6 +300,10 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Search')});`); // a11y: an accessible name (a placeholder is not one)
         lines.push(`el_${id}.className = ${JSON.stringify(classFor('search', p))};`);
         genInterpAttr(id, 'placeholder', p.placeholder); // static OR interpolated ("Message #{channel}" stays reactive)
+        if (p.max !== undefined) { // `max(n)` on a text input caps its LENGTH natively (maxlength): the browser refuses the n+1 char, no JS truncation to race
+          const mj = logic.compileExpr(p.max, pageScope);
+          lines.push(p.max.kind === Ek.Lit ? `el_${id}.maxLength = ${mj};` : `effect(() => { el_${id}.maxLength = ${mj}; });`);
+        }
         lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // two-way: state->input so `.reset()` clears the box; guarded to avoid yanking the caret
         if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
         genDynamics(id, p); // wire on(enter: send) / on(...) + conditional class on the input
@@ -411,8 +426,15 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const xf = p.x && p.x.kind === Ek.Ref ? p.x.name : '', yf = p.y && p.y.kind === Ek.Ref ? p.y.name : ''; // Chart reads x/y as FIELD refs
         const enc = `{ x: ${JSON.stringify(xf)}, y: ${JSON.stringify(yf)}, kind: ${JSON.stringify(p.kind || 'bar')}, color: ${JSON.stringify(p.color || '')} }`;
         lines.push(`effect(() => { __chart(svg_${id}, ${dataExpr}, ${enc}, ${legendArg}); });`); // reactive: redraws marks + legend when the data changes
-        // redraw at the REAL pixel size after layout + on resize, so the SVG renders 1:1 (crisp axis text, no clipping) instead of scaling a fixed viewBox
-        lines.push(`if (typeof ResizeObserver !== 'undefined') { const ro_${id} = new ResizeObserver(() => __chart(svg_${id}, ${dataExpr}, ${enc}, ${legendArg})); ro_${id}.observe(svg_${id}); onCleanup(() => ro_${id}.disconnect()); }`);
+        // Redraw at the REAL pixel size after layout + on resize, so the SVG renders 1:1 (crisp axis text, no
+        // clipping) instead of scaling a fixed viewBox. Two guards, because a naive observer here is the classic
+        // "ResizeObserver loop completed with undelivered notifications":
+        //   · redrawing writes viewBox and rebuilds the marks (and the legend, a SIBLING that can change the
+        //     card's height and hand the flexed SVG a new one) — so a redraw can resize what is being observed.
+        //     Bail out when the measured box has not actually changed, which is most deliveries.
+        //   · run the redraw in the NEXT frame, never inside the observer's own delivery cycle, so a size change
+        //     it does cause is delivered normally instead of overflowing the current one.
+        lines.push(`if (typeof ResizeObserver !== 'undefined') { let rw_${id} = -1, rh_${id} = -1, rf_${id} = 0; const ro_${id} = new ResizeObserver(() => { const w = svg_${id}.clientWidth, h = svg_${id}.clientHeight; if (w === rw_${id} && h === rh_${id}) return; rw_${id} = w; rh_${id} = h; if (rf_${id}) return; rf_${id} = requestAnimationFrame(() => { rf_${id} = 0; __chart(svg_${id}, ${dataExpr}, ${enc}, ${legendArg}); }); }); ro_${id}.observe(svg_${id}); onCleanup(() => { if (rf_${id}) cancelAnimationFrame(rf_${id}); ro_${id}.disconnect(); }); }`);
         genDynamics(id, p);
         break;
       }
@@ -532,6 +554,22 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       }
 
       case Nt.Form: {
+        // The built-in validation copy, in the language the PAGE declares (`meta { lang "es" }`).
+        // These strings are the engine's, not the author's — there is nowhere in a `.muten` file to
+        // translate them — so a Spanish app showed "Required" under a field labelled "Correo".
+        // English is the fallback for any language not carried here.
+        const FORM_COPY: { [lang: string]: { [key: string]: string } } = {
+          es: { required: 'Obligatorio', email: 'Escribe un correo válido', pattern: 'Formato no válido',
+                min: 'Mínimo {0}', max: 'Máximo {0}', minChars: 'Mínimo {0} caracteres', maxChars: 'Máximo {0} caracteres' },
+          en: { required: 'Required', email: 'Enter a valid email', pattern: 'Invalid format',
+                min: 'Min {0}', max: 'Max {0}', minChars: 'Min {0} characters', maxChars: 'Max {0} characters' },
+        };
+        const formLang = (doc.meta?.lang || 'en').slice(0, 2).toLowerCase();
+        const msg = (key: string, n?: number): string => {
+          const table = FORM_COPY[formLang] ?? FORM_COPY.en;
+          const line = (table?.[key] ?? FORM_COPY.en?.[key] ?? key).replace('{0}', String(n ?? ''));
+          return JSON.stringify(line);
+        };
         const sig = logic.bindSig(p.bind);
         const entityName = state[sig]?.type; // validate rejects a non-local/non-entity bind; guard so a gap never throws a raw TypeError
         if (!entityName || !entities[entityName]) throw new Error(`Form must bind a page-local entity draft, not "${p.bind}"`);
@@ -587,7 +625,15 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
           lines.push(`el_${id}.appendChild(${grp});`);
         }
 
-        lines.push(`{ const sb = document.createElement('button'); sb.type = 'submit'; sb.className = ${JSON.stringify(slot('submit', 'mu-submit'))}; sb.textContent = ${JSON.stringify(typeof p.submitLabel === 'string' ? p.submitLabel : 'Submit')}; el_${id}.appendChild(sb); }`);
+        // The submit label goes through the SAME interpolation as any other text. It used to be
+        // JSON.stringify'd, so a `Form … "{t(ui.lang, "id.in")}"` put the braces on the button —
+        // the literal source, in front of the user, on the first screen of the app.
+        const submitLabel = p.submitLabel;
+        const submitText = typeof submitLabel === 'string' ? JSON.stringify(submitLabel)
+          : submitLabel && 'parts' in submitLabel
+            ? submitLabel.parts.map((pt: string | Expr) => typeof pt === 'string' ? JSON.stringify(pt) : `String(${logic.compileExpr(pt, pageScope)})`).join(' + ')
+            : JSON.stringify('Submit');
+        lines.push(`{ const sb = document.createElement('button'); sb.type = 'submit'; sb.className = ${JSON.stringify(slot('submit', 'mu-submit'))}; el_${id}.appendChild(sb); effect(() => { sb.textContent = ${submitText}; }); }`);
         // submit: validate against schema constraints; only call the action when every field passes.
         const vChecks: string[] = [];
         for (const fv of fieldVars) {
@@ -595,19 +641,19 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
           const err = `err_${fv.var}`, val = `String(__d[${JSON.stringify(fv.name)}] ?? '')`;
           vChecks.push(`${err}.textContent = '';`);
           if (fv.c?.required) vChecks.push(fv.kind === Fk.Bool
-            ? `if (!__d[${JSON.stringify(fv.name)}]) { ${err}.textContent = 'Required'; __ok = false; }`   // a required checkbox must be CHECKED (String(false) is truthy — the old guard let it through)
-            : `if (!${val}.trim()) { ${err}.textContent = 'Required'; __ok = false; }`);
+            ? `if (!__d[${JSON.stringify(fv.name)}]) { ${err}.textContent = ${msg('required')}; __ok = false; }`   // a required checkbox must be CHECKED (String(false) is truthy — the old guard let it through)
+            : `if (!${val}.trim()) { ${err}.textContent = ${msg('required')}; __ok = false; }`);
           // email type now ACTUALLY validates format (was cosmetic): a non-empty value must look like an email.
-          if (fv.kind === Fk.Email) vChecks.push(`if (${val} && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(${val})) { ${err}.textContent = 'Enter a valid email'; __ok = false; }`);
+          if (fv.kind === Fk.Email) vChecks.push(`if (${val} && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(${val})) { ${err}.textContent = ${msg('email')}; __ok = false; }`);
           // `pattern:"<regex>"`: a non-empty value must match the author's regex (phone / zip / SKU / …).
-          if (fv.c?.pattern) vChecks.push(`if (${val} && !new RegExp(${JSON.stringify(fv.c.pattern)}).test(${val})) { ${err}.textContent = 'Invalid format'; __ok = false; }`);
+          if (fv.c?.pattern) vChecks.push(`if (${val} && !new RegExp(${JSON.stringify(fv.c.pattern)}).test(${val})) { ${err}.textContent = ${msg('pattern')}; __ok = false; }`);
           // number field: min/max is a value bound; text field: min/max is a character-length bound.
           if (fv.c?.min != null) vChecks.push(fv.kind === Fk.Number
-            ? `if (${val} !== '' && Number(${val}) < ${fv.c.min}) { ${err}.textContent = 'Min ${fv.c.min}'; __ok = false; }`
-            : `if (${val} && ${val}.length < ${fv.c.min}) { ${err}.textContent = 'Min ${fv.c.min} characters'; __ok = false; }`);
+            ? `if (${val} !== '' && Number(${val}) < ${fv.c.min}) { ${err}.textContent = ${msg('min', fv.c.min)}; __ok = false; }`
+            : `if (${val} && ${val}.length < ${fv.c.min}) { ${err}.textContent = ${msg('minChars', fv.c.min)}; __ok = false; }`);
           if (fv.c?.max != null) vChecks.push(fv.kind === Fk.Number
-            ? `if (${val} !== '' && Number(${val}) > ${fv.c.max}) { ${err}.textContent = 'Max ${fv.c.max}'; __ok = false; }`
-            : `if (${val}.length > ${fv.c.max}) { ${err}.textContent = 'Max ${fv.c.max} characters'; __ok = false; }`);
+            ? `if (${val} !== '' && Number(${val}) > ${fv.c.max}) { ${err}.textContent = ${msg('max', fv.c.max)}; __ok = false; }`
+            : `if (${val}.length > ${fv.c.max}) { ${err}.textContent = ${msg('maxChars', fv.c.max)}; __ok = false; }`);
         }
         // pass the bound draft to the submit action: a `<- item` action receives it (the Form's point);
         // an action that reads the draft by name ignores the extra arg. Mirrors `Button -> a(x)`.
