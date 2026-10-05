@@ -65,11 +65,39 @@ export class Logic {
   bindWrite(ref: string | undefined, scope: Scope, valJs: string): string {
     const it = this.itemBind(ref, scope);
     if (it) {
-      if (!it.src) return '';
+      // A query-backed row is read-only through this path (Select/Checkbox/Date/…); a TEXT input edits it
+      // inline instead via `bindRowWrite` (local patch on `input` + a `PUT` on `change`). A derived/non-state
+      // list has no `src` and is read-only too.
+      if (!it.src || this.ctx.queryStates.has(it.src)) return '';
       const s = this.cx(it.src);   // patch the matching element immutably so the keyed `each` reconciles just that row
       return `${s}.set((${s}.get() || []).map((__r) => __r && __r.id === ${it.row}.get().id ? { ...__r, [${JSON.stringify(it.field)}]: ${valJs} } : __r))`;
     }
     return `${this.bindSig(ref)}.set(${valJs})`;
+  }
+
+  // `bind(row.field)` where `row` is a QUERY-backed each row: a text input edits the server row IN PLACE. While
+  // the user types, the input stays UNCONTROLLED (no signal writes), so the `each` reconcile never disrupts the
+  // focused field and typing never reverts. On `change` (blur) it COMMITS: patch the query's `.data` immutably by
+  // id, then persist with a `PUT`, reconciling with the returned row and reverting on failure — the same
+  // optimistic contract as `list.update`. null when the bind is not a query row (caller uses `bindWrite`/read-only).
+  // `__write` triggers the source-layer prelude (see emit.ts).
+  bindRowWrite(ref: string | undefined, scope: Scope, valJs: string): { commit: string } | null {
+    const it = this.itemBind(ref, scope);
+    if (!it || !it.src || !this.ctx.queryStates.has(it.src)) return null;
+    const s = this.cx(it.src);
+    const rid = `${it.row}.get().id`;
+    const data = `${s}.get().data`;
+    const field = JSON.stringify(it.field);
+    const src = JSON.stringify(it.src);
+    const commit =
+      `{ const __v = ${valJs}; const __prev = ${data}; ` +
+      `const __next = (${data} || []).map((__r) => __r && __r.id === ${rid} ? { ...__r, [${field}]: __v } : __r); ` +
+      `${s}.set({ ...${s}.get(), data: __next }); ` +
+      `const __row = __next.find((__r) => __r && __r.id === ${rid}); ` +
+      `if (__row) { try { const __srv = await __write(${src}, 'PUT', __row.id, __row); ` +
+      `${s}.set({ ...${s}.get(), data: (${data} || []).map((__r) => __r && __r.id === __row.id ? __srv : __r) }); } ` +
+      `catch (__e) { ${s}.set({ ...${s}.get(), data: __prev }); } } }`;
+    return { commit };
   }
 
   // uuid fields of an entity: auto-filled whenever an item is pushed onto a list<Entity>.
@@ -364,9 +392,17 @@ export class Logic {
 
   // declared actions -> functions. An action whose input names a state reads it directly (no param).
   // Exported for a .store slice so pages can import them.
+  // the live `.pending` / `.error` signals of the backend-write actions. Emitted with the state, BEFORE the gets:
+  // a `get saving = save.pending or …` is a computed that reads them as soon as it is created.
+  genActionSignals(): string {
+    const exp = this.ctx.format === Fmt.Store ? 'export ' : '';
+    const writes = this.writeActions();
+    return Object.keys(this.ctx.actions).filter((name) => writes.has(name))
+      .flatMap((name) => [`${exp}const __pending_${name} = signal(false);`, `${exp}const __error_${name} = signal(null);`]).join('\n  ');
+  }
+
   genActions(): string {
     const exp = this.ctx.format === Fmt.Store ? 'export ' : '';
-    const decls: string[] = []; // .pending/.error signals for write actions, hoisted above the fns
     const out: string[] = [];
     for (const [name, action] of Object.entries(this.ctx.actions)) {
       // multi-param form `action f(a: T, b: T)`: params become the signature AND scope locals,
@@ -380,24 +416,25 @@ export class Logic {
       // dev: announce the action to the DevTools so the History labels it by NAME (app-fired actions can't be
       // intercepted post-mount — handlers call this local fn, not ctx[name] — so the compiler emits the hook).
       const announce = this.ctx.dev ? `if (typeof window !== 'undefined' && window.__muten_rt && window.__muten_rt.__dispatch) window.__muten_rt.__dispatch(${JSON.stringify(name)});` : '';
+      // EVERY ACTION RUNS UNTRACKED: called from an `effect`, what it reads must not subscribe that effect (runtime
+      // `untrack`), or an effect that calls an action bumping a counter re-runs itself for ever.
       if (this.writeActions().has(name)) { // backend write -> async, with live .pending / .error
-        decls.push(`${exp}const __pending_${name} = signal(false);`, `${exp}const __error_${name} = signal(null);`);
-        out.push(`${exp}async function ${name}(${param}) {`);
+        out.push(`${exp}function ${name}(${param}) { return untrack(async () => {`);
         if (announce) out.push('  ' + announce);
         out.push(`  __pending_${name}.set(true); __error_${name}.set(null);`);
         out.push('  try {');
         for (const st of action.body || []) for (const l of this.stmtLines(st, scope, true)) out.push('    ' + l);
         out.push(`  } catch (__e) { __error_${name}.set(String(__e)); }`);
         out.push(`  __pending_${name}.set(false);`);
-        out.push('}');
+        out.push('}); }');
       } else {
-        out.push(`${exp}function ${name}(${param}) {`);
+        out.push(`${exp}function ${name}(${param}) { return untrack(() => {`);
         if (announce) out.push('  ' + announce);
         for (const st of action.body || []) for (const l of this.stmtLines(st, scope)) out.push('  ' + l);
-        out.push('}');
+        out.push('}); }');
       }
     }
-    return [...decls, ...out].join('\n  ');
+    return out.join('\n  ');
   }
 
   // .store reactive side-effects -> effect(() => { ... }), re-running when the state they read changes.

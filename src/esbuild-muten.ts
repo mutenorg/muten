@@ -29,6 +29,7 @@ import { compileModule, compileStore, compileNodePatch } from '#engine/compile/c
 import { emitTheme } from '#engine/style/tokens.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { makeIconResolver } from './icons.js';
+import { LAYOUT_PREFIX, layoutDoc, layoutLoaders } from './layout-modules.js';
 import { Nt } from '#engine/shared/vocab.js';
 import type { IR, PartDef, ThemeAdapter, Doc } from '#engine/shared/types.js';
 
@@ -125,12 +126,13 @@ function buildBoot(model: Model, root: string, dev: boolean): string {
     if (seen.has(path)) throw new Error(`[muten] duplicate route ${path} in app.muten`);
     seen.add(path);
     const imp = `() => import(${JSON.stringify('/src/pages/' + r.page + '/' + r.page + '.muten')})`;
+    const inLayout = r.layout ? `, layout: ${JSON.stringify(r.layout)}` : '';
     if (r.guard) {
       const [domain, field] = r.guard.split('.');
       guardDomains.add(domain);
-      return `  ${path}: { load: ${imp}, guard: () => ${r.guardNeg ? '!' : ''}__store_${domain}.${field}.get(), redirect: ${JSON.stringify(r.redirect)} },`;
+      return `  ${path}: { load: ${imp}, guard: () => ${r.guardNeg ? '!' : ''}__store_${domain}.${field}.get(), redirect: ${JSON.stringify(r.redirect)}${inLayout} },`;
     }
-    return `  ${path}: { load: ${imp} },`;
+    return `  ${path}: { load: ${imp}${inLayout} },`;
   }).join('\n');
   const guardImports = [...guardDomains].map((d) => `import * as __store_${d} from '${STORE_PREFIX}${d}';`).join('\n');
   // dev-only: auto-mount any enabled plugin that declares a `muten.devBoot` export (e.g. @muten/devtools). The
@@ -143,11 +145,12 @@ ${devPlugins.map((p) => `import { ${p.fn} as __devboot_${p.name} } from '@muten/
 const routes = {
 ${routes}
 };
+${layoutLoaders(appIr)}
 const root = document.getElementById('app');
 if (root) {
   injectCss(__shell.css);
   const outlet = __shell.mount(root);
-  route(outlet, routes);
+  route(outlet, routes, layouts);
 }
 ${devPlugins.map((p) => `try { __devboot_${p.name}(); } catch (__e) { console.warn('[muten] dev plugin @muten/${p.name} failed to mount', __e); }`).join('\n')}`;
   return bootCode;
@@ -198,16 +201,7 @@ async function compilePage(root: string, path: string, model: Model, dev = false
   const errs = diagnostics.filter((d) => d.severity === 'error');
   const warns = diagnostics.filter((d) => d.severity !== 'error').map((d) => muError(path, d.message, d.loc));
   if (errs.length) return { errors: errs.map((d) => muError(path, d.message + (d.suggestion ? ` (did you mean \`${d.suggestion}\`?)` : ''), d.loc)), warnings: warns };
-  const customNames = [...new Set(Object.values(loaded.doc.nodes).filter((n) => n.type === Nt.Custom).map((n) => n.props?.component))];
-  const components: { [name: string]: string } = {};
-  const watchFiles: string[] = []; // Custom .js files are INLINED (readFileSync), not imported — esbuild can't see them
-  const pluginComponents = loadPluginComponents(root); // Custom host .js shipped by imported plugins (Chart, …)
-  for (const name of customNames) {
-    if (!name) continue;
-    const cpath = join(root, 'src', 'components', name + '.js');
-    if (existsSync(cpath)) { components[name] = readFileSync(cpath, 'utf8'); watchFiles.push(cpath); }          // local/ejected wins
-    else { const pc = pluginComponents[name]; if (pc) { components[name] = readFileSync(pc, 'utf8'); watchFiles.push(pc); } } // else the plugin's
-  }
+  const { components, watchFiles } = customComponents(root, loaded.doc);
   const sources = { ...(model.appIr?.sources || {}), ...loaded.sources };
   return {
     warnings: warns,   // non-blocking findings (a dead `self-link`) travel with the result; they never fail the build
@@ -292,6 +286,23 @@ async function buildCss(root: string, model: Model): Promise<string> {
   return css;
 }
 
+// The host Custom components a doc uses, read to be INLINED (not imported — esbuild can't see them), with
+// the files to watch so an edit re-runs the module. Pages AND the shell go through here: the shell used to
+// be compiled with no components at all, so a Custom in it called an undefined mount and rendered nothing.
+function customComponents(root: string, doc: Doc): { components: { [name: string]: string }; watchFiles: string[] } {
+  const customNames = [...new Set(Object.values(doc.nodes).filter((n) => n.type === Nt.Custom).map((n) => n.props?.component))];
+  const components: { [name: string]: string } = {};
+  const watchFiles: string[] = [];
+  const pluginComponents = loadPluginComponents(root); // Custom host .js shipped by imported plugins (Chart, …)
+  for (const name of customNames) {
+    if (typeof name !== 'string' || !name) continue;
+    const cpath = join(root, 'src', 'components', name + '.js');
+    if (existsSync(cpath)) { components[name] = readFileSync(cpath, 'utf8'); watchFiles.push(cpath); }          // local/ejected wins
+    else { const pc = pluginComponents[name]; if (pc) { components[name] = readFileSync(pc, 'utf8'); watchFiles.push(pc); } } // else the plugin's
+  }
+  return { components, watchFiles };
+}
+
 // The esbuild plugin: virtual modules (runtime/shell/store), the `~/` and `/src/` path roots, and the
 // .muten -> JS loader (with the oracle). CSS is handled separately (buildCss), not here.
 export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.Plugin {
@@ -309,14 +320,21 @@ export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.P
         if (args.path === SHELL) {
           const tree = model.appIr?.shell || { type: Nt.Shell, props: {}, children: [{ type: Nt.Slot, props: {} }] };
           const doc = toDoc({ ...(model.appIr || {}), screen: 'shell', entities: {}, state: {}, actions: {}, tree });
-          return { contents: compileModule(doc, {}, '', {}, {}, { stores: model.store.storesMeta, storeEntities: model.store.storeEntities, iconResolver: model.iconResolver, classes: model.classes }), loader: 'js', resolveDir: join(root, 'src') };
+          const { components, watchFiles } = customComponents(root, doc);
+          return { contents: compileModule(doc, {}, '', components, {}, { stores: model.store.storesMeta, storeEntities: model.store.storeEntities, iconResolver: model.iconResolver, classes: model.classes }), loader: 'js', resolveDir: join(root, 'src'), watchFiles };
+        }
+        if (args.path.startsWith(LAYOUT_PREFIX)) {
+          const built = layoutDoc(model.appIr, model.parts, args.path.slice(LAYOUT_PREFIX.length));
+          if (!built) return { errors: [{ text: `unknown layout: ${args.path.slice(LAYOUT_PREFIX.length)}` }] };
+          const { components, watchFiles } = customComponents(root, built.doc);
+          return { contents: compileModule(built.doc, {}, built.css, components, {}, { stores: model.store.storesMeta, storeEntities: model.store.storeEntities, api: model.appIr?.api || {}, iconResolver: model.iconResolver, classes: model.classes, dev }), loader: 'js', resolveDir: join(root, 'src'), watchFiles: [...watchFiles, join(root, 'src', 'app.muten')] };
         }
         if (args.path.startsWith(STORE_PREFIX)) {
           const domain = args.path.slice(STORE_PREFIX.length);
           const ir = model.slices[domain];
           if (!ir) return { errors: [{ text: `unknown store: ${domain}` }] };
           const imports = (ir.imports || []).map((im) => im.from.startsWith('.') ? { ...im, from: '/' + join('src', im.from).replace(/\\/g, '/') } : im);
-          return { contents: compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports, domain, dev, api: model.appIr?.api || {} }, ir.mock || {}, ir.sources || {}), loader: 'js', resolveDir: join(root, 'src') };
+          return { contents: compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports, domain, dev, api: model.appIr?.api || {}, stores: model.store.storesMeta }, ir.mock || {}, ir.sources || {}), loader: 'js', resolveDir: join(root, 'src') };
         }
         return { errors: [{ text: `unknown virtual module: ${args.path}` }] };
       });

@@ -140,7 +140,7 @@ const printAction = (name: string, a: ActionDef): string => {
   return `${head} {\n${a.body.map((s) => IND + printStmt(s, IND)).join('\n')}\n}`;
 };
 const printRoute = (r: Route): string =>
-  `${JSON.stringify(r.url)} -> ${r.page}${r.guard ? ` guard ${r.guardNeg ? 'not ' : ''}${r.guard}${r.redirect ? ` else ${JSON.stringify(r.redirect)}` : ''}` : ''}`;
+  `${JSON.stringify(r.url)} -> ${r.page}${r.layout ? ` in ${r.layout}` : ''}${r.guard ? ` guard ${r.guardNeg ? 'not ' : ''}${r.guard}${r.redirect ? ` else ${JSON.stringify(r.redirect)}` : ''}` : ''}`;
 const printPart = (name: string, part: PartDef): string =>
   `part ${name}(${part.params.map((pp) => `${pp.name}: ${pp.type}`).join(', ')}) {\n${printNode(part.tree, IND)}\n}`;
 const block = (kw: string, body: string): string => `${kw} {\n${body}\n}`;
@@ -169,6 +169,7 @@ export function print(ir: IR): string {
   if (ir.effects) for (const body of ir.effects) push(block('effect', body.map((s) => IND + printStmt(s, IND)).join('\n')));
   if (ir.parts) for (const [n, part] of Object.entries(ir.parts)) push(printPart(n, part));
   if (ir.shell) push(block('shell', (ir.shell.children || []).map((c) => printNode(c, IND)).join('\n')));
+  for (const [name, tree] of Object.entries(ir.layouts || {})) push(block(`layout ${name}`, (tree.children || []).map((c) => printNode(c, IND)).join('\n')));
   if (ir.tree) push(printNode(ir.tree, ''));
   if (ir.routes) push(block('routes', ir.routes.map((r) => IND + printRoute(r)).join('\n')));
 

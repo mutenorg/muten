@@ -125,5 +125,37 @@ ok('id() emits el.id on the reactive path', anchorJs.includes('.id = "features"'
 const anchorHtml = compile(toDoc(parse('screen s\nPage { Stack id("features") { Text "f" } }')));
 ok('id() survives the static HTML path', anchorHtml.includes('id="features"'), anchorHtml.slice(0, 240));
 
+// group("faq") — sibling Details share a native name, so the browser keeps one open; both paths must carry it.
+const faqJs = compileModule(toDoc(parse('screen s\nstate { open = false : bool }\nPage { Details "A" group("faq") open { Text "{open}" }  Details "B" group("faq") { Text "b" } }')));
+ok('group() emits el.name on the reactive path', faqJs.includes('.name = "faq"'), faqJs.slice(0, 240));
+const faqHtml = compile(toDoc(parse('screen s\nPage { Details "A" group("faq") open { Text "a" } }')));
+ok('group() survives the static HTML path', faqHtml.includes('name="faq"'), faqHtml.slice(0, 240));
+
+// A `when` owns everything between its two markers, not a snapshot of the nodes it had when built: a nested
+// `when`/`each` at its root inserts nodes LATER (rows that load, a branch that turns on), and a snapshot left
+// those on screen after the outer block turned off. Same for an `each` row whose root holds a nested block.
+const nestJs = compileModule(toDoc(parse(`screen s
+entity T { id text  label text }
+state { open = true : bool  more = false : bool  items = query items : list<T> }
+sources { items: { url: "/x" } }
+Page {
+  when open {
+    Text "head"
+    when more { Text "late" }
+    each items as it { Text "{it.label}" when more { Text "row-late" } }
+  }
+}`)));
+ok('when hides by clearing its marker range', /__leave\(start_\w+, anchor_\w+\)/.test(nestJs));
+ok('when no longer removes a build-time snapshot', !/for \(const __n of shown_\w+\.value\) __n\.remove\(\)/.test(nestJs));
+ok('a hidden block leaves through __leave, which the page imports from the runtime', nestJs.includes('__leave') && /import \{[^}]*__leave[^}]*\} from 'virtual:muten\/runtime'/.test(nestJs) || nestJs.includes('function __leave('));
+ok('each row reads its nodes live between row markers', nestJs.includes("createComment('row')") && nestJs.includes('get nodes()'));
+
+// `disabled when` on a Link: an <a> has no `disabled`, so it must leave the Tab order, say aria-disabled and
+// refuse the click — a card that is a call to action only while there is something to do.
+const linkJs = compileModule(toDoc(parse('screen s\nstate { calm = true : bool }\nPage { Link "" -> "/close" disabled when calm { Text "Cerrar el día" } }')));
+ok('disabled Link: out of the Tab order while the condition holds', linkJs.includes('.tabIndex = __off ? -1 : 0'));
+ok('disabled Link: announced as aria-disabled', linkJs.includes(".setAttribute('aria-disabled', 'true')"));
+ok('disabled Link: a click does not navigate', linkJs.includes("getAttribute('aria-disabled') === 'true') { e.preventDefault(); e.stopImmediatePropagation(); }"));
+
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);

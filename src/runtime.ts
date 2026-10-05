@@ -2,7 +2,7 @@
 // Shared by every compiled .muten module. The runner serves it as the `virtual:muten/runtime`
 // module (imported per-use, tree-shaken); the standalone HTML format inlines an equivalent. No dependencies.
 
-import type { Signal, EffectRun, PageModule, RouteDef, PageInstance, NodeRegistry } from '#engine/shared/types.js';
+import type { Signal, EffectRun, PageModule, RouteDef, LayoutDefs, PageInstance, NodeRegistry } from '#engine/shared/types.js';
 
 // The HMR handle lives on the mounted page element (`el.__muten`); the dev client reaches it + the runtime via window.
 declare global {
@@ -45,6 +45,11 @@ export function effect(fn: () => void, sync?: boolean): EffectRun {
   run();
   return run;
 }
+
+// Runs `fn` without subscribing the effect that called it. Every action runs this way: an action is a command, so
+// what it reads (a counter it bumps, a list it appends to) must never make the calling `effect` depend on it, or an
+// effect that calls an action re-runs itself for ever (notice.error bumping its own counter froze the page).
+export function untrack<T>(fn: () => T): T { const prev = current; current = null; try { return fn(); } finally { current = prev; } }
 
 // Runs `fn`, collecting every effect it creates, and returns a disposer that stops them all.
 // The router uses this so an unmounted page's effects stop firing on shared store signals,
@@ -116,6 +121,61 @@ function __lisSet(arr: number[]): Set<number> {
   let u = result.length, v = result[u - 1];
   while (u-- > 0) { result[u] = v; v = p[v]; }
   return new Set(result);
+}
+
+// Take out every node between two block markers. An element the app gives an animation on `.mu-leave` stays
+// until that animation ends, so a hidden block can fade or collapse instead of vanishing; `--mu-h` carries its
+// height for a collapse. Anything without such an animation goes at once, exactly as before.
+function isHtml(node: ChildNode): node is HTMLElement {
+  return typeof HTMLElement !== 'undefined' && node instanceof HTMLElement;
+}
+
+// THE LEAVES OF ONE UPDATE GO TOGETHER. Each asks the page for heights and animations, and every question asked
+// after another block's class changed makes the browser recompute all styles again: an editor opening with
+// thirteen blocks swapped paid twenty-six full recalculations. Queued to the end of the update, they cost two.
+// The nodes are listed now (the markers are about to receive the new content) and stay in place until then.
+let leaving: ChildNode[] | null = null;
+
+function isCssAnimation(animation: Animation): boolean {
+  return typeof CSSAnimation !== 'undefined' && animation instanceof CSSAnimation;
+}
+
+export function __leave(start: Node, end: Node): void {
+  const nodes: ChildNode[] = [];
+  for (let node = start.nextSibling; node && node !== end; node = node.nextSibling) nodes.push(node);
+  if (!leaving) {
+    leaving = [];
+    queueMicrotask(leaveTogether);
+  }
+  leaving.push(...nodes);
+}
+
+function leaveTogether(): void {
+  const nodes = leaving ?? [];
+  leaving = null;
+  const elements = nodes.filter(isHtml);
+  // Only an animation that STARTS with the leave counts: one already running (a looping shimmer) would never
+  // end, and waiting on it would leave the node on screen for good.
+  const before = new Set(elements.flatMap((element) => element.getAnimations()));
+  // Measure, then mark ALL of them before asking which animate: the CSS can then tell a lone element leaving
+  // from a whole block leaving together (`:has(.x.mu-leave)`), and skip the animation for the latter.
+  const heights = elements.map((element) => element.offsetHeight);
+  elements.forEach((element, index) => {
+    element.style.setProperty('--mu-h', `${heights[index]}px`);
+    element.classList.add('mu-leave');
+  });
+  // Ask every node before removing any: removing one first would change what the others' CSS matches.
+  // And only a CSS ANIMATION the app put on `.mu-leave` holds the node: a transition the class change happens to start
+  // (a button's `scrollbar-color`, an inherited color) is not a way out, and waiting on it left the old button on
+  // screen beside its replacement.
+  const endsOnItsOwn = (animation: Animation): boolean =>
+    isCssAnimation(animation) && !before.has(animation) && animation.effect?.getComputedTiming().iterations !== Infinity;
+  const running = nodes.map((node) => isHtml(node) ? node.getAnimations().filter(endsOnItsOwn) : []);
+  nodes.forEach((node, index) => {
+    const animations = running[index];
+    if (!animations.length) { node.remove(); return; }
+    Promise.all(animations.map((animation) => animation.finished)).then(() => node.remove(), () => node.remove());
+  });
 }
 
 // Reorder `next` (new row entries) under `parent` with the fewest DOM moves; `prev` is the old order.
@@ -253,7 +313,12 @@ interface DndZone { group: string; onDrop: (id: string, before?: string) => void
 const __dndZones = new Map<Element, DndZone>();
 const SORTABLE_MARK = 'mu-sortable';
 
-interface DragBase { id: string; overlay: HTMLElement; item: HTMLElement; dx: number; dy: number; }
+// `ox`/`oy` correct for a transformed ancestor: the overlay is `position:fixed` but lives under the item's
+// parent (to keep scoped CSS matching), and a `transform`/`filter`/`will-change` on any ancestor makes
+// `fixed` resolve against THAT box, not the viewport — which threw the clone far from the finger on mobile,
+// where such transforms are common. We measure the containing-block origin once and subtract it from the
+// viewport pointer coords, so the clone sits under the finger regardless.
+interface DragBase { id: string; overlay: HTMLElement; item: HTMLElement; dx: number; dy: number; ox: number; oy: number; }
 interface PlainDrag extends DragBase { mode: 'plain'; over: Element | null; }
 interface SortDrag extends DragBase { mode: 'sort'; container: HTMLElement; placeholder: HTMLElement; onDrop: (id: string, before?: string) => void; seen: Set<HTMLElement>; }
 type Drag = PlainDrag | SortDrag;
@@ -349,9 +414,35 @@ function __dndSort(d: SortDrag, pointerX: number, pointerY: number): void {
   });
 }
 
+// EDGE SCROLL. Near the top or bottom of its scroll box a drag scrolls it, faster the closer it gets, so a
+// target out of view can be reached — on a phone the grip takes the finger, and the finger cannot also scroll.
+const DND_EDGE = 64;
+let __dndPoint = { x: 0, y: 0 };
+let __dndTick = 0;
+function __scrollerOf(el: Element): HTMLElement {
+  for (let n = el.parentElement; n; n = n.parentElement) {
+    const overflow = getComputedStyle(n).overflowY;
+    if ((overflow === 'auto' || overflow === 'scroll') && n.scrollHeight > n.clientHeight) return n;
+  }
+  const page = document.scrollingElement;
+  return page instanceof HTMLElement ? page : document.documentElement;
+}
+function __dndEdge(): void {
+  const d = __dndActive; if (!d) { __dndTick = 0; return; }
+  const box = __scrollerOf(d.mode === 'sort' ? d.container : d.item);
+  const whole = box === document.scrollingElement || box === document.documentElement;
+  const top = whole ? 0 : box.getBoundingClientRect().top;
+  const bottom = whole ? window.innerHeight : box.getBoundingClientRect().bottom;
+  const y = __dndPoint.y;
+  const step = y < top + DND_EDGE ? -Math.ceil((top + DND_EDGE - y) / 4) : (y > bottom - DND_EDGE ? Math.ceil((y - bottom + DND_EDGE) / 4) : 0);
+  if (step !== 0) { box.scrollTop += step; if (d.mode === 'sort') __dndSort(d, __dndPoint.x, __dndPoint.y); }
+  __dndTick = requestAnimationFrame(__dndEdge);
+}
+
 function __dndMove(e: PointerEvent): void {
   const d = __dndActive; if (!d) return;
-  d.overlay.style.transform = `translate(${e.clientX - d.dx}px, ${e.clientY - d.dy}px)`;
+  __dndPoint = { x: e.clientX, y: e.clientY };
+  d.overlay.style.transform = `translate(${e.clientX - d.dx - d.ox}px, ${e.clientY - d.dy - d.oy}px)`;
   if (d.mode === 'sort') { __dndSort(d, e.clientX, e.clientY); return; }
   d.overlay.style.visibility = 'hidden';                                   // don't let the overlay eat the hit-test
   const stack = document.elementsFromPoint(e.clientX, e.clientY);
@@ -365,6 +456,7 @@ function __dndEnd(): void {
   window.removeEventListener('pointermove', __dndMove);
   window.removeEventListener('pointerup', __dndEnd);
   const d = __dndActive; __dndActive = null; if (!d) return;
+  cancelAnimationFrame(__dndTick); __dndTick = 0;
   document.body.style.cursor = '';
   document.documentElement.classList.remove('mu-dnd-on');
   d.overlay.remove();
@@ -415,8 +507,11 @@ export function __drag(el: HTMLElement, getId: () => string): void {
       item.classList.add('mu-dnd-ghost');
       document.body.style.cursor = 'grabbing';
       document.documentElement.classList.add('mu-dnd-on');   // a hook for enlarging drop zones while dragging
-      // Grab point stays exactly under the cursor — the row hangs from where you took it.
-      const base = { id: getId(), overlay: clone, item, dx: sx - r.left, dy: sy - r.top };
+      // Grab point stays exactly under the cursor — the row hangs from where you took it. The clone is at
+      // left:0;top:0 with no transform yet, so its rect gives the containing-block origin (0,0 unless a
+      // transformed ancestor shifted it); we subtract that in __dndMove so the clone tracks the finger.
+      const o = clone.getBoundingClientRect();
+      const base = { id: getId(), overlay: clone, item, dx: sx - r.left, dy: sy - r.top, ox: o.left, oy: o.top };
       if (sortable && container instanceof HTMLElement) {
         const placeholder = document.createElement(item.tagName);
         placeholder.className = 'mu-dnd-placeholder';
@@ -433,6 +528,7 @@ export function __drag(el: HTMLElement, getId: () => string): void {
         __dndActive = { ...base, mode: 'plain', over: null };
       }
       __dndMove(ev);
+      if (!__dndTick) __dndTick = requestAnimationFrame(__dndEdge);
       window.addEventListener('pointermove', __dndMove);
       window.addEventListener('pointerup', __dndEnd);
     };
@@ -488,7 +584,9 @@ export function applyMeta(meta: { [key: string]: string }): void {
 // popstate, scrolls to top, applies each page's <head> meta, and falls back to the first route as a
 // soft 404. A guard is a () => boolean over a store signal; when it flips the tracking effect re-runs,
 // so routes + navbar react to auth automatically. (Deploy: serve index.html for any path.)
-export function route(outlet: Element, routes: { [path: string]: RouteDef }): void {
+// A route `in` a layout mounts inside that layout's `slot`. The layout is mounted once and KEPT while the user moves
+// between its routes: only the page is swapped, so the chrome (a sidebar, a tab bar) is never rebuilt on navigation.
+export function route(outlet: Element, routes: { [path: string]: RouteDef }, layouts: LayoutDefs = {}): void {
   const keys = Object.keys(routes);
   // pre-split each route key into segments; a ":x" segment matches any value and captures it as x.
   const patterns = keys.map((key) => ({ key, segs: key.replace(/^\//, '').split('/').filter(Boolean) }));
@@ -509,6 +607,23 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }): vo
   };
   let mounted: string | null = null;        // path currently shown, to avoid re-mounting on every auth tick
   let disposePage: (() => void) | null = null;
+  let layoutName: string | null = null;     // the layout currently mounted in the outlet (null = the page sits there directly)
+  let layoutOutlet: Element | null = null;  // that layout's `slot`, where its routes' pages mount
+  let disposeLayout: (() => void) | null = null;
+  // mount the layout a route asks for, reusing the one on screen when it is the same; returns where the page goes
+  const pageTarget = (want: string | null, layoutModule: PageModule | null): Element => {
+    if (want === layoutName && (layoutOutlet || !want)) return layoutOutlet || outlet;
+    if (disposeLayout) disposeLayout();
+    disposeLayout = null; layoutOutlet = null; layoutName = null;
+    outlet.replaceChildren();
+    if (want && layoutModule) {
+      const chrome = layoutModule;
+      injectCss(chrome.css);
+      disposeLayout = scope(() => { layoutOutlet = chrome.mount(outlet); });
+      layoutName = want;
+    }
+    return layoutOutlet || outlet;
+  };
   // mark the current nav link: any internal `<a>` whose href equals the path gets `aria-current="page"` + `.is-active`
   // (shell nav + page links). So `class(active when …)` isn't needed for nav highlight, and the a11y state is real.
   const markActive = (): void => {
@@ -521,32 +636,40 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }): vo
       a.classList.toggle('is-active', on);
     });
   };
-  const go = (to: string): void => { if (to !== location.pathname) { history.pushState({}, '', to); mounted = null; render(); } };
+  // every in-app entry carries how many steps into the app it is (`history.state.muDepth`): 0 on the page the visitor
+  // landed on, +1 per navigation. A back button reads it to know whether «back» stays inside the app; at 0 it goes to
+  // the app's default screen instead of doing nothing (a page opened from a link) or leaving the app.
+  const depth = (): number => { const state: { muDepth?: number } | null = history.state; return state && typeof state.muDepth === 'number' ? state.muDepth : 0; };
+  const go = (to: string): void => { if (to !== location.pathname) { history.pushState({ muDepth: depth() + 1 }, '', to); mounted = null; render(); } };
   const render = (): void => {
     const path = location.pathname || keys[0];
     const { def, params } = matchRoute(path);
     if (def.guard && !def.guard()) {          // unauthorized: redirect (replaceState, then re-render)
       const to = def.redirect ?? '/';
-      if (location.pathname !== to) { history.replaceState({}, '', to); mounted = null; render(); }
+      if (location.pathname !== to) { history.replaceState({ muDepth: depth() }, '', to); mounted = null; render(); }
       return;
     }
     if (path === mounted) return;
     mounted = path;
     // load-then-swap: keep the current page on screen until the next one is ready, then replace in ONE frame.
     // (Clearing before the async load left a blank gap that made the whole UI flash/jump on every navigation.)
-    def.load().then((module: PageModule) => {
+    const want = def.layout && layouts[def.layout] ? def.layout : null;
+    const layoutLoad: Promise<PageModule | null> = want && want !== layoutName ? layouts[want]() : Promise.resolve(null);
+    Promise.all([def.load(), layoutLoad]).then(([module, layoutModule]) => {
       if (mounted !== path) return;            // a newer navigation superseded this load — drop the stale result
       if (disposePage) disposePage();          // stop the previous page's effects to avoid stale-DOM crashes
+      disposePage = null;
+      const target = pageTarget(want, layoutModule);
       injectCss(module.css);
       if (module.meta) applyMeta(module.meta);
       disposePage = scope(() => {
-        outlet.replaceChildren();
-        const pageEl = module.mount(outlet, params); // atomic swap: no blank frame
+        target.replaceChildren();
+        const pageEl = module.mount(target, params); // atomic swap: no blank frame
         if (typeof window !== 'undefined') { window.__muten_page = pageEl.__muten; window.__muten_screen = module.screen; } // dev HMR target
       });
       scrollTo(0, 0);
       markActive(); // shell nav + page links reflect the new path (aria-current + .is-active)
-      const main = outlet.querySelector('main'); if (main instanceof HTMLElement) main.focus(); // a11y: move focus to content on nav (the <main> is tabIndex -1)
+      const main = target.querySelector('main'); if (main instanceof HTMLElement) main.focus(); // a11y: move focus to content on nav (the <main> is tabIndex -1)
     });
   };
   // intercept internal link clicks for client-side navigation (external/new-tab/downloads pass through)
@@ -560,7 +683,10 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }): vo
     e.preventDefault();
     go(href);
   });
-  addEventListener('popstate', () => { mounted = null; render(); });
+  // Back/forward re-renders only when the PATH changed. A step that only moves the query or the hash (a page keeping
+  // its open tab or section in `?s=…`) stays on the same mounted page: re-mounting it would re-run every query of
+  // the page for a change the page itself already reflects (it listens to popstate for its own state).
+  addEventListener('popstate', () => { if (location.pathname !== mounted) render(); });
   // tracking every guard signal ensures logging in/out re-renders the active route automatically.
   effect(() => { for (const key of keys) { const guard = routes[key].guard; if (guard) guard(); } render(); });
 }
@@ -573,4 +699,4 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }): vo
 declare const __MUTEN_DEV__: boolean;
 // `typeof window` FIRST so an unbundled consumer (a Node import of runtime.js, where __MUTEN_DEV__ is undefined)
 // short-circuits before touching it — no ReferenceError. In a browser bundle the `define` folds `… && false` → DCE.
-if (typeof window !== 'undefined' && __MUTEN_DEV__) window.__muten_rt = { patchNode, signal, computed, effect, root, onCleanup, __eq, __order, __has, __id, __chart, __arc, __drag, __drop };
+if (typeof window !== 'undefined' && __MUTEN_DEV__) window.__muten_rt = { patchNode, signal, computed, effect, root, onCleanup, __eq, __order, __leave, __has, __id, __chart, __arc, __drag, __drop };

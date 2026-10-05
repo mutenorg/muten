@@ -11,6 +11,7 @@ import { ParseError } from '#engine/shared/diagnostics.js';
 import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { resolveStyles } from '#engine/project/styles.js';
 import { composeDoc } from '#engine/ir/compose.js';
+import { anchorImports } from '#engine/project/imports.js';
 import { readMutenConfig } from '#engine/project/config.js';
 import type { PartDef, Value, LoadResult, IR, Entity } from '#engine/shared/types.js';
 
@@ -123,7 +124,7 @@ export async function loadParts(dir: string): Promise<Parts> {
     const ir = parseFile(filePath);
     const { css } = await resolveStyles(filePath); // colocated .scss/.css for this part
     for (const [name, def] of Object.entries(ir.parts || {})) {
-      parts[name] = { ...def, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css };
+      parts[name] = { ...def, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css, imports: anchorImports(filePath, ir.imports || []) };
     }
   }
   return parts;

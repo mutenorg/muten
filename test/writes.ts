@@ -29,7 +29,7 @@ ok('write failure captured to action .error', js.includes('__error_buy.set(Strin
 ok('__write helper emitted', js.includes('function __write(name, method, id, body)'));
 ok('__write JSON-encodes the body', js.includes('init.body = JSON.stringify(body)'));
 ok('__write appends /:id', js.includes('encodeURIComponent(id)'));
-ok('__write throws on !ok', js.includes("if (!r.ok) throw new Error('HTTP '"));
+ok('__write throws on !ok', js.includes("if (!r.ok) return r.json().catch(() => null).then((j) => {") && js.includes("throw new Error('HTTP ' + r.status + why)"));
 ok('actions are generated', js.includes('function buy(item)') && js.includes('function drop(item)'));
 
 // write status: an action that writes is async and exposes reactive .pending / .error
@@ -39,7 +39,9 @@ state { orders = query orders : list<Order> }
 sources { orders: { url: "/orders" } }
 action buy mutates orders <- item { orders.create(item) }
 Page { when buy.pending { Text "Saving" } when buy.error { Text "{buy.error}" } each orders as o { Text "{o.title}" } }`)));
-ok('write action is async', sjs.includes('async function buy(item)'));
+ok('write action is async', sjs.includes('function buy(item) { return untrack(async () =>'));
+// An action never subscribes the effect that calls it (an effect calling notice.error re-ran itself for ever).
+ok('actions run untracked (and untrack is imported)', sjs.includes('untrack') && /import \{[^}]*\buntrack\b/.test(sjs));
 ok('write is awaited', sjs.includes('await __write("orders", \'POST\', null, __i)'));
 ok('.pending / .error signals declared', sjs.includes('const __pending_buy = signal(false)') && sjs.includes('const __error_buy = signal(null)'));
 ok('pending toggles around the write', sjs.includes('__pending_buy.set(true)') && sjs.includes('__pending_buy.set(false)'));
@@ -57,6 +59,12 @@ ok('refetch builds N params (input+state+literal)', rjs.includes('__refetch("pro
 ok('refetch stays sync (a read, not a write)', rjs.includes('function apply(term)') && !rjs.includes('async function apply'));
 ok('__refetch helper emitted', rjs.includes('function __refetch(name, params, sig)'));
 ok('__refetch url-encodes params', rjs.includes('encodeURIComponent(params[k])'));
+// The first load of a query must not land over a refetch that started after it (slow network: the bare request
+// answered after the keyed one had begun, cleared `loading` and drew «not found»). Both sides use sig.__tok.
+// A failed request says WHY, not only the status: «HTTP 409 card-policy-required». The status stays first, so a
+// screen that reads only the number still does; one that knows the server's code can say the right thing.
+ok('a failed request carries the server\'s error code after its status', rjs.includes("throw new Error('HTTP ' + r.status + why)") && rjs.includes("typeof j.error === 'string'"));
+ok('first load drops its answer once a refetch took over', rjs.includes('const tok = sig.__tok || 0; __fetch(name)') && rjs.includes('if ((sig.__tok || 0) === tok) sig.set({ data: d, loading: false'));
 
 // refetch when the STATE name differs from the SOURCE name: the lookup key must be the SOURCE (__SOURCES is
 // keyed by source), the update target the state signal. Previously refetch emitted the state name -> undefined
@@ -80,7 +88,7 @@ action cancel <- o { delete "shop:/orders/{o.id}/cancel" }
 Page { each orders as x { Text "{x.title}" } }`)), {}, '', {}, { orders: { url: '/orders' } }, { api: { shop: { base: 'http://x' } } });
 ok('explicit post + body', ejs.includes('await __send("shop:/orders", "POST", item)'));
 ok('explicit delete + interpolated url', ejs.includes('await __send("shop:/orders/" + String(o.id) + "/cancel", "DELETE", null)'));
-ok('explicit request → async (a write)', ejs.includes('async function buy(item)'));
+ok('explicit request → async (a write)', ejs.includes('function buy(item) { return untrack(async () =>'));
 ok('pure command needs no mutates (.pending wired)', ejs.includes('__pending_buy'));
 ok('__send helper emitted', ejs.includes('function __send(url, method, body)'));
 
@@ -113,7 +121,7 @@ sources { receipt: { url: "/r" } }
 action pay <- cart { post "/checkout" body cart into receipt }
 Page { Text "{receipt.code}" }`)), {}, '', {}, {}, { api: {} });
 ok('post into → captures the response into the state', ijs.includes('receipt.set(await __send("/checkout", "POST", cart))'));
-ok('post-into action is async (awaits the response)', ijs.includes('async function pay(cart)'));
+ok('post-into action is async (awaits the response)', ijs.includes('function pay(cart) { return untrack(async () =>'));
 const ibad = compileModule(toDoc(parse(`screen e
 state { x = "" : text }
 action pay <- c { post "/c" body c }
@@ -148,6 +156,60 @@ ok('page persist key namespaced by screen', pPage.includes('"muten:home:draft"')
 const tkjs = compileModule(toDoc(parse('screen s\nentity P { t text }\nstate { posts = [] : list<P>  limit = 3 : number }\nget top = posts.take(limit)\nPage { each posts.take(2) as p { Text "{p.t}" } }')));
 ok('take(n) literal compiles to slice(0, n)', tkjs.includes('.slice(0, 2)'));
 ok('take(state) compiles to slice(0, state.get())', tkjs.includes('.slice(0, limit.get())'));
+
+// Inline editing of a QUERY row: a text input `bind(x.field)` over a query-backed list edits the server row in
+// place — patch `.data` locally on `input` (instant, caret-safe), persist with a PUT on `change` (blur),
+// reconcile/revert like `list.update`. Non-text inputs over a query row stay read-only (no regression).
+const rowEdit = compileModule(toDoc(parse(`screen s
+entity Msg { name text  body text  done bool }
+state { msgs = query msgs : list<Msg> }
+sources { msgs: { url: "/msgs" } }
+Page { each msgs as m { SearchField bind(m.name) "n"  Textarea bind(m.body) "b"  Checkbox bind(m.done) } }`)));
+ok('query row: commits (patch .data) on change', rowEdit.includes('data: __next') && rowEdit.includes('__r && __r.id === m.get().id ? { ...__r, ["name"]: __v }'));
+ok('query row: commit runs on change (blur), never on input', rowEdit.includes(".addEventListener('change', async (e) =>") && !rowEdit.includes(".addEventListener('input'"));
+ok('query row: persists with a PUT', rowEdit.includes('__write("msgs", \'PUT\', __row.id, __row)'));
+ok('query row: reconciles with the server row', rowEdit.includes('__r && __r.id === __row.id ? __srv : __r'));
+ok('query row: reverts on failure', rowEdit.includes('data: __prev'));
+ok('query row: __write prelude included', rowEdit.includes('function __write(name, method, id, body)'));
+// a non-text input (Checkbox) over the query row must NOT get a text write path — it stays read-only.
+ok('query row: Checkbox stays read-only (only the 2 text inputs PUT)', (rowEdit.match(/'PUT'/g) || []).length === 2);
+
+// A SETTABLE local list keeps its old inline patch (no __write, no change listener) — unchanged behavior.
+const localEdit = compileModule(toDoc(parse(`screen s
+entity Todo { title text }
+state { rows = [] : list<Todo> }
+Page { each rows as x { SearchField bind(x.title) "t" } }`)));
+ok('settable local row still patches the signal on input', localEdit.includes("addEventListener('input', (e) => rows.set((rows.get() || []).map("));
+ok('settable local row does NOT PUT', !localEdit.includes("'PUT'"));
+
+// A store reading and calling ANOTHER store (auth.store sending `ui.lang` and calling `ui.setLang`). Without the
+// other stores' map, `ui.lang` compiled to a bare `ui.lang` and `__store_ui` was never imported: the action threw
+// ReferenceError before its `post` left, and sign-up read it as «no connection».
+const authIr = parse(`state { token = "" : text }
+action signUp(mail: text) mutates token {
+  post "/auth/register" body { email: mail, lang: ui.lang } into token
+  ui.setLang("es")
+}`);
+const uiMeta = { ui: { state: ['lang'], gets: [], actions: ['setLang'], queries: [] } };
+const authJs = compileStore({ state: authIr.state, actions: authIr.actions, domain: 'auth', stores: { ...uiMeta, auth: { state: ['token'], gets: [], actions: ['signUp'], queries: [] } } });
+ok('a store reads another store\'s state through its import', authJs.includes('__store_ui.lang.get()') && !/[^_]ui\.lang/.test(authJs));
+ok('a store imports the other stores it uses', authJs.includes("import * as __store_ui from 'virtual:muten/store/ui'"));
+ok('a store never imports itself', !authJs.includes("virtual:muten/store/auth'"));
+
+// a `get` that reads an action's `.pending` is a computed evaluated as soon as it is created, so the action's
+// signals must already exist: they used to be declared with the actions, AFTER the gets, and the page threw
+// «Cannot access '__pending_save' before initialization» on mount while `muten check` stayed green.
+const pendJs = compileModule(toDoc(parse(`screen shop
+entity Order { title text }
+state { orders = query orders : list<Order> }
+sources { orders: { url: "/orders", at: "data" } }
+action save mutates orders <- item { orders.create(item) }
+get saving = save.pending or orders.loading
+Page { when saving { Text "…" } }`)));
+const pendAt = pendJs.indexOf('const __pending_save = signal(false)');
+const getAt = pendJs.indexOf('const saving = computed(');
+ok('an action\'s .pending signal is declared before a get that reads it', pendAt >= 0 && getAt > pendAt, `pending@${pendAt} get@${getAt}`);
+ok('the .pending signal is declared once', pendJs.split('const __pending_save = signal(false)').length === 2);
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);

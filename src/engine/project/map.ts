@@ -27,7 +27,9 @@ export async function mapApp(appRoot: string): Promise<AppMap> {
   const map: AppMap = { app: appRoot.split(/[\\/]/).pop() || '', parts: Object.keys(parts), stores: storesMeta, routes: {} };
   for (const page of pages) {
     const { doc, sources } = await load(page.screenPath, parts);
-    map.routes['/' + page.route] = routeEntry(relative(appRoot, page.screenPath), doc, sources);
+    map.routes['/' + page.route] = { ...routeEntry(relative(appRoot, page.screenPath), doc, sources), ...(page.layout ? { layout: page.layout } : {}) };
   }
+  const layouts = [...new Set(pages.flatMap((page) => (page.layout ? [page.layout] : [])))];
+  if (layouts.length) map.layouts = layouts;
   return map;
 }

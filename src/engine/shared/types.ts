@@ -186,6 +186,7 @@ export interface PartDef {
   entities?: { [name: string]: Entity };
   mock?: { [name: string]: Value };
   css?: string;
+  imports?: ImportDef[];   // the part file's own `use` lines, anchored to src/ so they resolve from any page
 }
 
 /** A declared action: which state it may mutate, its input name, and its body.
@@ -205,6 +206,7 @@ export interface Route {
   guardNeg?: boolean;
   guard?: string;
   redirect?: string;
+  layout?: string;   // `-> page in pro`: the route mounts inside the named `layout`, which stays mounted across its routes
 }
 
 /** A theme scale: step name (md/lg/…) → its CSS value ("16px", "1.5", "768px"). */
@@ -244,6 +246,7 @@ export interface NodeProps {
   flags?: string[];         // Video boolean attrs: controls / autoplay / loop / muted / playsinline
   ordered?: boolean;        // List `ordered` -> <ol> instead of <ul>
   open?: boolean;           // Details `open` -> <details open> (expanded by default)
+  group?: string;           // Details group("faq") -> <details name="faq">: the browser keeps one of the group open
   head?: boolean;           // Row `head` -> a header row (its cells become <th>, grouped into <thead>)
   summary?: StringPropValue; // Details summary text -> <summary>
   placeholder?: StringPropValue;
@@ -324,6 +327,7 @@ export interface IR {
   api?: { [name: string]: Value };               // app-wide backend config (base URL + default headers)
   routes?: Route[];
   shell?: IRNode;
+  layouts?: { [name: string]: IRNode };          // `layout pro { … slot … }` in app.muten: chrome shared by a group of routes
   parts?: { [name: string]: PartDef };
   consts?: { [name: string]: Scalar };           // compile-time immutable scalars
   theme?: { [scale: string]: ThemeScale };       // project theme (raw blocks)
@@ -457,6 +461,7 @@ export interface StoreInput {
   domain?: string;                                // the store's domain (filename) -> namespaces its `persist` localStorage keys so two stores' same-named state don't collide
   dev?: boolean;                                  // dev build: self-register the store on window.__muten_stores for the DevTools
   api?: { [name: string]: Value };                // app-wide backend config (base URL + default headers) so a store's sources/`post` resolve relative URLs, same as a page
+  stores?: { [domain: string]: StoreSlice };      // the OTHER stores, so `ui.lang` / `ui.setLang()` inside this store resolve to their imports
 }
 
 /** The pre-computed pieces an emit target assembles into the final output (HTML/module/store). */
@@ -527,6 +532,7 @@ export interface RouteEntry {
   route: string;
   page: string;
   screenPath: string;
+  layout?: string;   // the `layout` the route mounts inside, when it declares `in name`
 }
 
 /** The project stylesheet resolved for a screen (CSS text + the file it came from). */
@@ -575,7 +581,9 @@ export interface PageInstance { el: Element; ctx: { [name: string]: unknown }; n
 /** A compiled page/shell module: its scoped CSS + a mount() that builds it into a root element (returning it). */
 export interface PageModule { css: string; mount(root: Element, params?: { [key: string]: string }): Element; meta?: { [key: string]: string }; screen?: string; }
 /** One route's lazy loader + optional guard/redirect (the hash router consumes a map of these). */
-export interface RouteDef { load(): Promise<PageModule>; guard?: () => boolean; redirect?: string; }
+export interface RouteDef { load(): Promise<PageModule>; guard?: () => boolean; redirect?: string; layout?: string; }
+/** The lazy loaders of the app's layouts, by name (a layout module mounts like the shell and returns its outlet). */
+export interface LayoutDefs { [name: string]: () => Promise<PageModule>; }
 
 // ── 14. Build / plugin shapes ────────────────────────────────────────────────
 
@@ -590,7 +598,8 @@ export interface AppMap {
   app: string;
   parts: string[];
   stores: { [domain: string]: StoreSlice };
-  routes: { [url: string]: { file: string; models: string[]; state: { [name: string]: Value }; sources: { [name: string]: string } } };
+  routes: { [url: string]: { file: string; models: string[]; state: { [name: string]: Value }; sources: { [name: string]: string }; layout?: string } };
+  layouts?: string[];   // the app's `layout` names (routes point at them through their `layout` field)
 }
 
 /** Ambient shape for the OPTIONAL `sass` dependency — only imported when a .scss exists. */

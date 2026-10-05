@@ -13,7 +13,7 @@ export const customValue = (v: ArgValue): string =>
 // regions (landmarks), so compile.ts doesn't need a case per region type. The base class is bare here;
 // classFor() prepends `mu-` to EVERY primitive's base, so muten never collides with a framework class.
 export const CONTAINERS: { [type: string]: [string, string] } = {
-  [Nt.Shell]: ['div', 'shell'], [Nt.Header]: ['header', 'header'], [Nt.Nav]: ['nav', 'nav'],
+  [Nt.Shell]: ['div', 'shell'], [Nt.Layout]: ['div', 'layout'], [Nt.Header]: ['header', 'header'], [Nt.Nav]: ['nav', 'nav'],
   [Nt.Sidebar]: ['aside', 'sidebar'], [Nt.Footer]: ['footer', 'footer'],
   [Nt.Page]: ['main', 'page'], [Nt.Stack]: ['div', 'stack'], // Page maps to <main>, the content landmark
   [Nt.Section]: ['section', 'section'], [Nt.Article]: ['article', 'article'], // sectioning content (List is its own case: <ul>/<ol> + <li> children)

@@ -82,8 +82,8 @@ ecosystem wins. So:
    ⏳ still open: active-link highlighting (router current-path signal), richer inputs.
 4. **Forms/inputs vocabulary + richer validation** - declarative fields; cross-field/async rules.
 5. **Query-strings / refetch** ✅ - `products.refetch(q: term, page: n, …)` in an action re-runs a query with N
-   url-encoded params (search / pagination / filters), updating its signal. Verified live. *(Nested layouts +
-   keyed `each` still open.)*
+   url-encoded params (search / pagination / filters), updating its signal. Verified live. *(Route-group layouts ✅ - `layout name { … slot … }` + `"/x" -> page in name`,
+   mounted once and kept across its routes. Keyed `each` still open.)*
 
 ## The moat - protect AND grow it (this is *why* the AI is faster here)
 

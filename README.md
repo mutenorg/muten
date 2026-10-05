@@ -183,7 +183,7 @@ opens a same-origin `EventSource` - whatever host serves the page serves the rel
 ```
 my-app/
 ├─ src/
-│  ├─ app.muten            # the ROOT: routes (+ optional persistent shell)
+│  ├─ app.muten            # the ROOT: routes (+ optional persistent shell, + layouts for route groups)
 │  ├─ pages/
 │  │  └─ home/home.muten   # a page; the folder name is its route target
 │  ├─ parts/               # reusable .muten components (object + action params)
@@ -376,4 +376,4 @@ These are honest gaps found during stress-testing. They are known and tracked; n
 - A `Custom` receives a snapshot of state at mount by default; for reactivity, its `mount` **returns an updater function** that muten re-runs whenever the bound `@` state changes.
 
 **Composition**
-- `slot` composes muten primitives inside reusable **`parts`** and the **`shell`** (a Container/Presentational split). There is no `slot` *inside a `Custom`* (it's vanilla JS, outside muten's type system) - compose with a part, or do DOM composition in the Custom.
+- `slot` composes muten primitives inside reusable **`parts`**, the **`shell`** and **`layout`s** (a Container/Presentational split). A `layout name { … slot … }` in app.muten is chrome for a group of routes (`"/x" -> page in name`): mounted once, kept across them, and it may call parts. There is no `slot` *inside a `Custom`* (it's vanilla JS, outside muten's type system) - compose with a part, or do DOM composition in the Custom.

@@ -214,6 +214,11 @@ const diagsOf = (src, ctx = {}) => validate(toDoc(parse(src)), ctx).diagnostics;
   const onPage = diagsOf('screen s\nPage id("top") { Text "x" }').find((d) => d.code === 'id-target');
   check('id() on Page flagged (it already owns mu-main)', !!onPage, 'no diagnostic');
 
+  const groupOff = diagsOf('screen s\nPage { Stack group("faq") { Text "x" } }').find((d) => d.code === 'group-target');
+  check('group() off a Details flagged', !!groupOff, 'no diagnostic');
+  const groupOn = diagsOf('screen s\nPage { Details "Q" group("faq") { Text "a" } }').filter((d) => d.code === 'group-target');
+  check('group() on a Details is clean', groupOn.length === 0, JSON.stringify(groupOn));
+
   // A link to the page's OWN route is a declared route, so `unknown-route` misses it — yet `go()` bails when the
   // target equals the current path, so it is provably dead. This is the navbar-of-no-ops bug, caught statically.
   const ctxSelf = { routes: ['/landing', '/docs'], selfRoute: '/landing' };

@@ -20,6 +20,10 @@ class SNode {
     if (i >= 0) parent.children.splice(i, 1);
     this.parentNode = null;
   }
+  get nextSibling(): SNode | null {
+    const siblings = this.parentNode ? this.parentNode.children : [];
+    return siblings[siblings.indexOf(this) + 1] ?? null;
+  }
 }
 
 class SText extends SNode { constructor(public text: string) { super(); } }

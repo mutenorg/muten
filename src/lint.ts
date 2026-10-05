@@ -11,6 +11,7 @@ import { validateStoresAndGuards } from '#engine/project/check-app.js';
 import { lintComponents } from '#engine/project/js-antipatterns.js';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
+import { composeDoc } from '#engine/ir/compose.js';
 import { validate } from '#engine/ir/validate.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { formatDiagnostic, ParseError } from '#engine/shared/diagnostics.js';
@@ -57,6 +58,14 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
       const appIr = parse(readFileSync(appFile, 'utf8'));
       if (appIr.shell) {
         for (const d of validate(toDoc({ ...appIr, tree: appIr.shell }), { stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities, routes }).diagnostics) {
+          if (!json) console.log(formatDiagnostic(d, rel(appFile), srcOf(appFile)));
+          found.push({ file: rel(appFile), ...d });
+        }
+      }
+      // each layout composes like a page (it may call parts), keeping its `slot` as the page outlet
+      for (const tree of Object.values(appIr.layouts || {})) {
+        const { doc } = composeDoc({ ...appIr, tree }, sharedParts, true);
+        for (const d of validate(doc, { parts: Object.keys(sharedParts), stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities, routes }).diagnostics) {
           if (!json) console.log(formatDiagnostic(d, rel(appFile), srcOf(appFile)));
           found.push({ file: rel(appFile), ...d });
         }

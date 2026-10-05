@@ -50,7 +50,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   // compileStore output is stripped of import/export and wrapped as a self-contained IIFE namespace.
   const appApi = readApi(appRoot);   // app-wide backend config, so a store's relative sources/`post` resolve against the base
   const storeCode = Object.entries(storeIRs).map(([domain, ir]) => {
-    const mod = compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports: ir.imports || [], domain, api: appApi }, ir.mock || {}, ir.sources || {});
+    const mod = compileStore({ state: ir.state || {}, gets: ir.gets || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports: ir.imports || [], domain, api: appApi, stores: storesMeta }, ir.mock || {}, ir.sources || {});
     const body = mod.replace(/^[ \t]*import .*$/gm, '').replace(/^([ \t]*)export /gm, '$1'); // strip imports/exports so the body is inlineable (runtime + __id are already in scope)
     return `const __store_${domain} = (function () {\n${body}\nreturn { ${storeMembers[domain].join(', ')} };\n})();`;
   }).join('\n');

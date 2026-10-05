@@ -3,6 +3,8 @@
 // and bad store refs are caught in context. Runs in both the extension host and Node (uses node:fs).
 // Consumed by extension.js and the CLI `muten lint` command.
 
+import { layoutDiagnostics } from '#engine/project/layouts.js';
+import { anchorImports } from '#engine/project/imports.js';
 import fs from 'node:fs';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -30,7 +32,7 @@ function loadPartsLite(dir: string): Parts {
     let ir;
     try { ir = parse(fs.readFileSync(join(dir, f), 'utf8')); } catch { continue; }
     for (const [name, def] of Object.entries(ir.parts || {})) {
-      parts[name] = { ...def, state: ir.state || {}, entities: ir.entities || {} };
+      parts[name] = { ...def, state: ir.state || {}, entities: ir.entities || {}, imports: anchorImports(join(dir, f), ir.imports || []) };
     }
   }
   return parts;
@@ -189,7 +191,11 @@ export function analyze(filePath: string, text: string): ValidateResult {
     if (e instanceof ParseError && e.loc) return { ok: false, diagnostics: [diag('syntax', e.message, { loc: e.loc })] };
     return { ok: true, diagnostics: [] };
   }
-  if (ir.routes) return analyzeRoutes(filePath, ir.routes); // app.muten: route-level checks only
+  if (ir.routes) { // app.muten: route-level checks + its layouts
+    const routeCheck = analyzeRoutes(filePath, ir.routes);
+    const diagnostics = [...routeCheck.diagnostics, ...layoutDiagnostics(ir)];
+    return { ok: !diagnostics.some((d) => d.severity === 'error'), diagnostics };
+  }
   if (ir.theme) return { ok: true, diagnostics: [] };       // theme.muten: config only, nothing to validate
   const appRoot = findAppRoot(filePath);
   const apiClients = appRoot ? apiClientNames(readApi(appRoot)) : undefined; // the app's named api clients, so a `post "client:/x"` prefix is checked

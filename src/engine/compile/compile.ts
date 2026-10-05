@@ -39,7 +39,9 @@ export function compileNodePatch(doc: Doc, nodeId: string, opts: CompileOpts = {
 // Emit one .store domain slice (state + get + actions + effects) as a shared ESM module.
 export function compileStore(input: StoreInput = {}, data: { [name: string]: Value } = {}, sources: { [name: string]: Value } = {}): string {
   const { state = {}, gets = {}, actions = {}, effects = [], entities = {}, imports = [] } = input;
-  return compile({ screen: 'store', entities, state, actions, gets, effects, imports, consts: {}, constraints: {}, rootId: undefined, nodes: {} }, data, '', {}, sources, { format: Fmt.Store, persistScope: input.domain, dev: input.dev, api: input.api });
+  // A store reads and calls the OTHER stores exactly like a page does; its own name stays local.
+  const others = Object.fromEntries(Object.entries(input.stores || {}).filter(([domain]) => domain !== input.domain));
+  return compile({ screen: 'store', entities, state, actions, gets, effects, imports, consts: {}, constraints: {}, rootId: undefined, nodes: {} }, data, '', {}, sources, { format: Fmt.Store, persistScope: input.domain, dev: input.dev, api: input.api, stores: others });
 }
 
 export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectCss = '', components: { [name: string]: string } = {}, sources: { [name: string]: Value } = {}, opts: CompileOpts = {}): string {
@@ -98,10 +100,15 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     }
     // on(event: action): table-driven event PAYLOAD → the natural scalar flows to the action (value / key). An
     // action that takes no arg simply ignores it. `drop` is the drag-pack target (fires action(draggedId, group)).
-    const EVENT_ARG: { readonly [event: string]: string } = { input: 'e.target.value', change: 'e.target.value', keydown: 'e.key', keyup: 'e.key', keypress: 'e.key' };
+    // `scroll` hands over how many pixels are left below the fold, so a list can ask for its next page as it
+    // nears the end: `on(scroll: more)` + `action more(left: number) { if left < 200 { … } }`.
+    const EVENT_ARG: { readonly [event: string]: string } = { input: 'e.target.value', change: 'e.target.value', keydown: 'e.key', keyup: 'e.key', keypress: 'e.key', scroll: 'Math.round(e.target.scrollHeight - e.target.scrollTop - e.target.clientHeight)' };
     for (const [event, act] of Object.entries(p.on || {})) {
       if (typeof act !== 'string') continue;
       if (event === 'enter') lines.push(`el_${id}.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ${logic.actionRef(act)}(); } });`); // synthetic: Enter submits (no newline); Shift+Enter is a newline
+      // synthetic: `typed` fires ONCE the user stops typing (300ms after the last key), with the value — a search
+      // asks the server once per pause instead of once per keystroke.
+      else if (event === 'typed') lines.push(`{ let __pause = 0; el_${id}.addEventListener('input', (e) => { const __v = e.target.value; clearTimeout(__pause); __pause = setTimeout(() => ${logic.actionRef(act)}(__v), 300); }); }`);
       else if (event === 'drop') { // register a pointer-DnD drop zone (innermost-wins collision → nested-safe)
         // The group interpolates: `droptarget("{row.id}")` compiles to `String(row.id ?? '')`, so each row in a
         // list is a zone that passes its OWN id as the drop's second arg → `reorder(draggedId, targetId)`.
@@ -172,6 +179,22 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       const n = nodes[id], ty = n?.type, fp = n?.fromPart, pa = n?.partArgs, lc = n?.loc, ow = n?.ownerPart, ol = n?.partLoc;
       const at = (l: Loc): string => JSON.stringify({ line: l.line, col: l.col });
       lines.push(`__nodes[${JSON.stringify(id)}] = { el: el_${id}, parent: ${parentVar}${ty ? `, type: ${JSON.stringify(ty)}` : ''}${fp ? `, part: ${JSON.stringify(fp)}` : ''}${pa ? `, partArgs: ${JSON.stringify(pa)}` : ''}${lc ? `, loc: ${at(lc)}` : ''}${ow ? `, owner: ${JSON.stringify(ow)}` : ''}${ol ? `, oloc: ${at(ol)}` : ''} };`);
+    }
+  };
+
+  // Wire a TEXT input's write path (SearchField/Textarea). A settable-list row or a plain state patches on
+  // `input`; a QUERY-backed row edits the server row IN PLACE — patch `.data` locally on `input` (instant,
+  // caret-safe) and persist with a `PUT` on `change` (blur). A read-only bind marks the control readOnly.
+  const emitTextWrite = (id: string, bind: string | undefined, writeJS: string): void => {
+    const rowW = logic.bindRowWrite(bind, pageScope, 'e.target.value');
+    if (rowW) {
+      // Query row: leave the field uncontrolled while typing, commit (patch + PUT) on blur. No `input` listener,
+      // so the each reconcile never fires mid-keystroke and the focused field is never disrupted.
+      lines.push(`el_${id}.addEventListener('change', async (e) => ${rowW.commit});`);
+    } else if (writeJS) {
+      lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`);
+    } else {
+      lines.push(`el_${id}.readOnly = true;`);
     }
   };
 
@@ -286,6 +309,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Details: { // native disclosure: <details> + <summary>, the browser owns the toggle (no JS, no state)
         declEl(id, 'details', classFor('details', p));
         if (p.open) lines.push(`el_${id}.open = true;`);
+        if (p.group) lines.push(`el_${id}.name = ${JSON.stringify(p.group)};`); // one open at a time, native
         appendEl(id, parentVar);
         genDynamics(id, p);
         genTextEl(id + 's', 'summary', 'mu-summary', p.summary, `el_${id}`); // <summary> is the first child (the clickable header)
@@ -305,7 +329,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
           lines.push(p.max.kind === Ek.Lit ? `el_${id}.maxLength = ${mj};` : `effect(() => { el_${id}.maxLength = ${mj}; });`);
         }
         lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // two-way: state->input so `.reset()` clears the box; guarded to avoid yanking the caret
-        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
+        emitTextWrite(id, p.bind, writeJS);
         genDynamics(id, p); // wire on(enter: send) / on(...) + conditional class on the input
         appendEl(id, parentVar);
         break;
@@ -317,8 +341,12 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Message')});`); // a11y: an accessible name (a placeholder is not one)
         lines.push(`el_${id}.className = ${JSON.stringify(classFor('textarea', p))};`);
         genInterpAttr(id, 'placeholder', p.placeholder);
+        if (p.max !== undefined) { // `max(n)` caps the textarea LENGTH natively (maxlength), same as SearchField
+          const mj = logic.compileExpr(p.max, pageScope);
+          lines.push(p.max.kind === Ek.Lit ? `el_${id}.maxLength = ${mj};` : `effect(() => { el_${id}.maxLength = ${mj}; });`);
+        }
         lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // state -> input (so .reset() clears), caret-safe
-        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
+        emitTextWrite(id, p.bind, writeJS);
         genDynamics(id, p); // wire on(enter: send) / on(...) + conditional class
         appendEl(id, parentVar);
         break;
@@ -718,14 +746,17 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`function build_${id}(__p) {`);
         for (const l of body) lines.push('  ' + l);
         lines.push(`}`);
-        lines.push(`const anchor_${id} = document.createComment('when');`);
-        lines.push(`${parentVar}.appendChild(anchor_${id});`);
+        // The block owns EVERYTHING between its two markers, not the nodes it had when it was built: a nested
+        // `when`/`each` at the root inserts its nodes later, and a snapshot would leave those behind on hide.
+        lines.push(`const start_${id} = document.createComment('when');`);
+        lines.push(`const anchor_${id} = document.createComment('/when');`);
+        lines.push(`${parentVar}.appendChild(start_${id}); ${parentVar}.appendChild(anchor_${id});`);
         lines.push(`let shown_${id} = null;`);
         lines.push(`onCleanup(() => { if (shown_${id}) shown_${id}.dispose(); });`);
         lines.push(`effect(() => {`);
         lines.push(`  if (${condJS}) {`);
-        lines.push(`    if (!shown_${id}) { const __r = root(() => { const __f = document.createDocumentFragment(); build_${id}(__f); return [...__f.childNodes]; }); for (const __n of __r.value) anchor_${id}.parentNode.insertBefore(__n, anchor_${id}); shown_${id} = __r; }`);
-        lines.push(`  } else if (shown_${id}) { shown_${id}.dispose(); for (const __n of shown_${id}.value) __n.remove(); shown_${id} = null; }`);
+        lines.push(`    if (!shown_${id}) { const __r = root(() => { const __f = document.createDocumentFragment(); build_${id}(__f); return __f; }); anchor_${id}.parentNode.insertBefore(__r.value, anchor_${id}); shown_${id} = __r; }`);
+        lines.push(`  } else if (shown_${id}) { shown_${id}.dispose(); __leave(start_${id}, anchor_${id}); shown_${id} = null; }`);
         lines.push(`});`);
         break;
       }
@@ -747,9 +778,13 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         // inline-editable list items: if this each iterates a settable local list state, record it so an input
         // `bind(<as>.field)` inside the body writes back a patch to that state (see logic.bindWrite).
         const srcName = p.list.kind === Ek.Ref ? p.list.name.split('.')[0] : '';
-        const settable = !!srcName && stateKeys.has(srcName) && !queryStates.has(srcName);
+        // Record the source list for an each over a page `state` list, so `bind(<as>.field)` in the body can
+        // write back: a settable LOCAL list is patched inline (logic.bindWrite); a QUERY list is edited in place
+        // by a text input (logic.bindRowWrite: local patch + PUT). Stores/derived lists aren't in `stateKeys`,
+        // so they stay read-only.
+        const bindable = !!srcName && stateKeys.has(srcName);
         const prevItemBinds = pageScope.itemBinds;
-        pageScope.itemBinds = settable ? { ...(prevItemBinds || {}), [p.as]: srcName } : prevItemBinds;
+        pageScope.itemBinds = bindable ? { ...(prevItemBinds || {}), [p.as]: srcName } : prevItemBinds;
         const body = capture(() => genChildren(id, '__p'));
         pageScope.sigLocals = prevSig;
         pageScope.itemBinds = prevItemBinds;
@@ -769,7 +804,12 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
         lines.push(`    let __e = map_${id}.get(__k);`);
         lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
-        lines.push(`    else { const __sig = signal(__row);${p.index ? ' const __ix = signal(0);' : ''} const __r = root(() => { const __c = ${wrapLi ? "document.createElement('li')" : 'document.createDocumentFragment()'}; buildItem_${id}(__c, __sig${p.index ? ', __ix' : ''}); return ${wrapLi ? '[__c]' : '[...__c.childNodes]'}; }); __e = { sig: __sig,${p.index ? ' idx: __ix,' : ''} nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
+        // A fragment row is bracketed by two markers and its nodes are read LIVE between them, for the same
+        // reason as `when`: a nested block at the row's root adds nodes after the row is built.
+        const rowNodes = wrapLi
+          ? `const __r = root(() => { const __c = document.createElement('li'); buildItem_${id}(__c, __sig${p.index ? ', __ix' : ''}); return __c; }); const __ns = [__r.value];`
+          : `const __r = root(() => { const __c = document.createDocumentFragment(); const __a = document.createComment('row'); const __b = document.createComment('/row'); __c.appendChild(__a); buildItem_${id}(__c, __sig${p.index ? ', __ix' : ''}); __c.appendChild(__b); return [__a, __b]; }); const [__a, __b] = __r.value; const __ns = { get nodes() { const __o = [__a]; let __n = __a; while (__n !== __b && __n.nextSibling) { __n = __n.nextSibling; __o.push(__n); } return __o; } };`;
+        lines.push(`    else { const __sig = signal(__row);${p.index ? ' const __ix = signal(0);' : ''} ${rowNodes} __e = { sig: __sig,${p.index ? ' idx: __ix,' : ''} ${wrapLi ? 'nodes: __ns,' : 'get nodes() { return __ns.nodes; },'} dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
         lines.push(`    __next.push(__e);`);
         lines.push(`  }`);
         lines.push(`  for (const [__k, __e] of map_${id}) if (!__seen.has(__k)) { __e.dispose(); for (const __n of __e.nodes) __n.remove(); map_${id}.delete(__k); }`);
@@ -816,9 +856,20 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Link: { // client-side navigation -> <a href="/route"> intercepted by the history router
         declEl(id, 'a', classFor('link', p));
         genInterpAttr(id, 'href', p.to ?? '/');  // static path or interpolated (/product/{p.id})
+        // Born active: the router marks links when it navigates, so a link created LATER (a menu that opens, a `when`
+        // that turns on) would miss the mark until the next navigation. Mark it the moment it is made.
+        lines.push(`if (typeof location !== 'undefined' && el_${id}.getAttribute('href') === location.pathname) { el_${id}.classList.add('is-active'); el_${id}.setAttribute('aria-current', 'page'); }`);
         if (n.children && n.children.length) genChildren(id, `el_${id}`);          // children -> clickable card that navigates
         else if (p.label !== undefined) genInterpAttr(id, 'textContent', p.label);
         genDynamics(id, p);
+        // `disabled when <cond>` on a Link: an <a> has no `disabled`, so give it the real meaning — out of the Tab
+        // order, announced as disabled, and a click (or Enter) that goes nowhere. Checked at click time, so it
+        // follows the condition live without re-binding.
+        if (p.disabled !== undefined) {
+          const off = logic.compileExpr(p.disabled, pageScope);
+          lines.push(`effect(() => { const __off = !!(${off}); el_${id}.tabIndex = __off ? -1 : 0; if (__off) el_${id}.setAttribute('aria-disabled', 'true'); else el_${id}.removeAttribute('aria-disabled'); });`);
+          lines.push(`el_${id}.addEventListener('click', (e) => { if (el_${id}.getAttribute('aria-disabled') === 'true') { e.preventDefault(); e.stopImmediatePropagation(); } }, true);`);
+        }
         appendEl(id, parentVar);
         break;
       }
@@ -889,7 +940,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       }
       case Nt.Row: return `<tr${cls('row')}>${kids()}</tr>`;
       case Nt.Cell: { const tag = headCells.has(id) ? 'th' : 'td'; return `<${tag}${cls('cell')}>${(n.children && n.children.length) ? kids() : escHtml(strOf(p.value))}</${tag}>`; }
-      case Nt.Details: return `<details${cls('details')}${p.open ? ' open' : ''}><summary class="mu-summary">${escHtml(strOf(p.summary))}</summary>${kids()}</details>`;
+      case Nt.Details: return `<details${cls('details')}${p.group ? ` name="${escAttr(p.group)}"` : ''}${p.open ? ' open' : ''}><summary class="mu-summary">${escHtml(strOf(p.summary))}</summary>${kids()}</details>`;
       default: return '';
     }
   }
@@ -898,7 +949,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const staticPage = (opts.format === Fmt.Ssr || opts.format === Fmt.Patch) ? false : isStatic(); // SSR/Patch always render the tree (genNode)
   // route params -> local string consts read from the mount() argument (set by the router on match).
   const paramDecls = (doc.params || []).map((p) => `const ${p} = (__params || {})[${JSON.stringify(p)}] ?? '';`).join('\n  ');
-  const stateDecls = logic.genState();
+  const stateDecls = [logic.genState(), logic.genActionSignals()].filter(Boolean).join('\n  ');
   const actionDecls = logic.genActions();
   // a store exports its gets (cross-module reads); a page declares them as locals inside mount() (export is illegal there).
   const getKw = opts.format === Fmt.Store ? 'export const' : 'const';

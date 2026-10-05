@@ -19,6 +19,7 @@ export function readRoutes(appRoot: string): RouteEntry[] {
   const pagesDir = join(appRoot, 'src', 'pages');
   const routes: RouteEntry[] = (ir.routes || []).map((r) => ({
     route: r.url.replace(/^\//, ''), page: r.page, screenPath: join(pagesDir, r.page, r.page + '.muten'),
+    ...(r.layout ? { layout: r.layout } : {}),
   }));
   if (!routes.length) throw new Error(`${rel(root)} has no routes. Add:  routes { /url -> page }`);
   for (const r of routes) {

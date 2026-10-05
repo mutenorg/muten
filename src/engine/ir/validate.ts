@@ -9,14 +9,14 @@ import { Nt, Ek, StOp, BOp, CHART_KINDS, SVG_PRIMS, nonPrimitiveHint } from '#en
 import { exprListType, isKnownHead, selfUpdateTargets, type RefFacts, type KnownHeads } from '#engine/ir/refs.js';
 import type { Doc, FlatNode, ValidateCtx, ValidateResult, Diagnostic, Expr, Stmt, RequestStmt, StringPropValue, Loc } from '#engine/shared/types.js';
 
-const KNOWN_TYPES = new Set<string>([...PRIMITIVE_NAMES, Nt.Shell, Nt.Slot]); // manifest primitives + Shell wrapper (app.muten root) + Slot (part children outlet; composed away before flatten)
+const KNOWN_TYPES = new Set<string>([...PRIMITIVE_NAMES, Nt.Shell, Nt.Layout, Nt.Slot]); // manifest primitives + Shell/Layout wrappers (app.muten roots) + Slot (part children outlet, or a shell/layout's page outlet)
 const REF_PROPS: Array<'bind' | 'data'> = ['bind', 'data']; // props whose value is @state
 const KNOWN_OPS = new Set<string>([...ACTION_OPS, StOp.Request]); // Request is parsed + compiled but is not a method op
 const SOURCE_OPS = new Set<string>([StOp.Create, StOp.Update, StOp.Delete, StOp.Refetch]); // hit the backend, so the list MUST be query/source-backed
 const LOCAL_MUT_OPS = new Set<string>([StOp.Push, StOp.Set, StOp.Reset, StOp.Toggle, StOp.Patch, StOp.Remove]); // mutate a PAGE-LOCAL state (compiler reads doc.state[target]) — never a store
 const SCALARS = ['text', 'number', 'bool', 'uuid', 'email', 'string', 'date', 'password', 'textarea'];
 const STRINGY = ['text', 'string', 'email', 'uuid', 'date', 'password', 'textarea']; // string-backed scalars: expose `.length` (a text value's character count) for reactive length gates
-const DISABLEABLE = new Set<string>([Nt.Button, Nt.RowAction, Nt.SearchField, Nt.Textarea, Nt.Password, Nt.Select, Nt.Checkbox, Nt.Number, Nt.Range, Nt.Date, Nt.Form]); // `disabled` only affects form controls
+const DISABLEABLE = new Set<string>([Nt.Button, Nt.RowAction, Nt.SearchField, Nt.Textarea, Nt.Password, Nt.Select, Nt.Checkbox, Nt.Number, Nt.Range, Nt.Date, Nt.Form, Nt.Link]); // form controls, plus Link (out of Tab order + aria-disabled + no navigation)
 // native primitives that share a name with common plugin (shadcn) parts → a part-style call resolves to the
 // primitive and trips `missing-prop`; the value is the native usage to point the AI at.
 const SHADOWED_PRIMITIVE: { readonly [k: string]: string } = { [Nt.Select]: 'Select bind(x) options(a, b)', [Nt.Checkbox]: 'Checkbox bind(ok)', [Nt.Number]: 'Number bind(n)', [Nt.Range]: 'Range bind(v) min(0) max(100)', [Nt.Date]: 'Date bind(d)', [Nt.Chart]: 'Chart @data kind(bar) x(field) y(field)' };
@@ -641,7 +641,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     }
     if (props.disabled) { // `disabled when <cond>`: the condition is a real expression, and it only affects form controls
       checkExpr(props.disabled, n.loc ?? null, scope);
-      if (!DISABLEABLE.has(n.type)) D.push(diag('disabled-target', `\`disabled\` does nothing on ${n.type} — it applies to form controls (Button, RowAction, SearchField, Password, Select, Checkbox, Form).`, { loc: n.loc, from: n.type }));
+      if (!DISABLEABLE.has(n.type)) D.push(diag('disabled-target', `\`disabled\` does nothing on ${n.type} — it applies to form controls (Button, RowAction, SearchField, Password, Select, Checkbox, Form) and to Link.`, { loc: n.loc, from: n.type }));
     }
     if (props.draggable) checkExpr(props.draggable, n.loc ?? null, scope); // `draggable(item.id)` — the id expression is real
     if (props.dropGroup && typeof props.dropGroup !== 'string' && 'kind' in props.dropGroup) // `droptarget("{row.id}")` — the interpolated refs are real
@@ -651,6 +651,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     if (props.styleVars) for (const sv of Object.values(props.styleVars)) if (typeof sv !== 'string') for (const pt of sv.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);  // `style(w: "{ref}")` interpolations: an unknown state ref is caught here, not at runtime
     // Page already carries the compiler-emitted id `mu-main` (the skip-link target); overriding it silently breaks a11y.
     if (props.id && n.type === Nt.Page) D.push(diag('id-target', `Page already owns the id "mu-main" (the skip-link target) — put id() on a Section/Stack inside it`, { loc: n.loc }));
+    if (props.group && n.type !== Nt.Details) D.push(diag('group-target', `group() only groups a Details (one open at a time) — ${n.type} has nothing to open`, { loc: n.loc }));
     const interps: StringPropValue[] = [];
     if ((n.type === Nt.Text || n.type === Nt.Title || n.type === Nt.Span) && props.value) interps.push(props.value);
     if (n.type === Nt.Image) { if (props.src) interps.push(props.src); if (props.alt) interps.push(props.alt); }
@@ -840,6 +841,52 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
       for (let i = before; i < D.length; i++) if (!D[i].loc) D[i].loc = st.loc ?? null;
     };
     for (const st of a.body || []) checkStmt(st);
+
+    // DEAD FAILURE-HANDLER after a `post`: `post … into X` then `if X.id { … } else { … }`. The `else` LOOKS
+    // like the error branch but is UNREACHABLE on a failed request. A `post` THROWS on any non-2xx (the
+    // runtime's __send does `if (!r.ok) throw`), so the action jumps straight to its catch — setting
+    // `<name>.error` — and NOTHING after the `post` runs on a failure. The `if X.id`/`else` therefore only
+    // ever tells apart shapes of a SUCCESSFUL body (which always carries an id): the `else` never fires for a
+    // 503/500/timeout/offline. The failure-handling the author wrote in that `else` silently never runs, so
+    // the screen has no error to show and often hangs on its pending state — a footgun precisely because the
+    // `else` reads like the natural place for it. Point them at the one place the error actually lands:
+    // `<name>.error`. Sibling-scoped (per statement array) so a reachable `else` in another block isn't flagged.
+    // Every expression a statement carries (so we can tell whether an `else` re-inspects the response).
+    const stmtExprs = (s: Stmt): Expr[] => {
+      if (s.op === StOp.If) return [s.cond];
+      if (s.op === StOp.Remove) return [s.pred];
+      if (s.op === StOp.Patch) return [s.pred, s.patch];
+      if (s.op === StOp.Call || s.op === StOp.Extern) return s.args;
+      if (s.op === StOp.Request) return s.body ? [s.body] : [];
+      if (s.op === StOp.Refetch) return Object.values(s.params);
+      return 'arg' in s && s.arg ? [s.arg] : [];
+    };
+    // Does this statement subtree read any of the `post` targets? A legitimate `else` after a 2xx (e.g. an
+    // auth call that answers 200 with a token OR 200 with an email-to-continue) branches by RE-READING the
+    // response; a dead failure-handler `else` ignores the response and just reports an error.
+    const readsPosted = (sts: Stmt[], posted: Set<string>): boolean => sts.some((s) =>
+      stmtExprs(s).some((e) => collectRefs(e).some((r) => posted.has(r.split('.')[0]))) ||
+      (s.op === StOp.If && (readsPosted(s.then || [], posted) || readsPosted(s.else || [], posted))));
+    const flagDeadPostElse = (stmts: Stmt[]): void => {
+      const posted = new Set<string>(); // into-targets of a `post` seen earlier in THIS array
+      for (const st of stmts) {
+        if (st.op === StOp.Request && st.into) posted.add(st.into);
+        else if (st.op === StOp.If) {
+          // Flag ONLY a dead FAILURE-handler: the `if` guards on the response (`X`/`X.field`), there IS an
+          // `else`, and that `else` does NOT re-read the response — so it can only be meant for the request
+          // failing, which it can never catch (the `post` threw). An `else` that re-inspects the response
+          // (a 200-token-vs-200-email branch) is legitimate alternate-success handling and is left alone.
+          const guardsPostTarget = (st.else?.length ?? 0) > 0 &&
+            collectRefs(st.cond).some((r) => posted.has(r.split('.')[0])) &&
+            !readsPosted(st.else || [], posted);
+          if (guardsPostTarget)
+            D.push(diag('post-else-dead', `action "${name}": this \`else\` never runs on a failed request. A \`post\`/\`put\` THROWS on any non-2xx response, so the action jumps to \`${name}.error\` and NOTHING after the request runs on a failure — an \`if\` on the response and its \`else\` only tell apart shapes of a SUCCESSFUL body, never a 503/500/timeout/offline (the very failures this \`else\` looks written for). Handle the failure where it actually lands, on \`${name}.error\`: read it in the view with \`when ${name}.error { … }\`, or react in an \`effect { if ${name}.error { … } }\`. (The button already recovers: \`${name}.pending\` clears on error.)`, { loc: st.loc ?? null, severity: 'warning' }));
+          flagDeadPostElse(st.then || []);
+          flagDeadPostElse(st.else || []);
+        }
+      }
+    };
+    flagDeadPostElse(a.body || []);
   }
 
   // styling under the oracle: validate every class() name against the styling plugin's RESOLVED theme

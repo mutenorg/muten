@@ -5,6 +5,7 @@
 
 import { Ek, Nt } from '#engine/shared/vocab.js';
 import { toDoc } from '#engine/ir/flatten.js';
+import { mergeImports } from '#engine/ir/imports.js';
 import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap, ArgValue, PartDef } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
@@ -17,17 +18,21 @@ function argToStr(v: ArgValue): string {
   return '$' + v.$param;
 }
 
-export function compose(tree: IRNode | null, parts: Parts): { tree: IRNode | null; used: string[] } {
+// The page outlet a shell/layout keeps: composing a page, a top-level `slot` has no caller and composes away; composing
+// a layout, it IS the point where the router mounts the page, so it survives as itself.
+const OUTLET: IRNode = { type: Nt.Slot, props: {} };
+
+export function compose(tree: IRNode | null, parts: Parts, keepOutlet = false): { tree: IRNode | null; used: string[] } {
   const used = new Set<string>();                      // which parts were instantiated (to hoist their data)
-  const out = tree ? composeNode(tree, parts, used) : tree;
+  const out = tree ? composeNode(tree, parts, used, new Set(), keepOutlet ? [OUTLET] : []) : tree;
   return { tree: out, used: [...used] };
 }
 
 // The single page-doc builder: inline parts, hoist the used parts' entities/state, then flatten.
 // Spreads `ir` so every field (imports/params/meta/...) survives. Both the CLI loader and the editor
 // analyzer go through here, so a new IR field can never silently drop in just one path.
-export function composeDoc(ir: IR, parts: Parts): { doc: Doc; used: string[] } {
-  const { tree, used } = compose(ir.tree, parts);
+export function composeDoc(ir: IR, parts: Parts, keepOutlet = false): { doc: Doc; used: string[] } {
+  const { tree, used } = compose(ir.tree, parts, keepOutlet);
   const entities = { ...ir.entities };
   const state = { ...ir.state };
   for (const name of used) {
@@ -36,7 +41,8 @@ export function composeDoc(ir: IR, parts: Parts): { doc: Doc; used: string[] } {
     Object.assign(entities, p.entities);
     Object.assign(state, p.state);
   }
-  return { doc: toDoc({ ...ir, entities, state, tree }), used };
+  const imports = mergeImports(ir.imports || [], used.flatMap((name) => parts[name]?.imports || []));
+  return { doc: toDoc({ ...ir, entities, state, tree, imports }), used };
 }
 
 // `slot` carries the call-site children to inject at the part's `slot` marker. They're composed once, in the

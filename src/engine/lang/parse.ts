@@ -100,6 +100,7 @@ export class Parser extends Grammar {
       [Mod.Draggable, (props: NodeProps) => { props.draggable = this.parseExpr(); }],                 // draggable(item.id) — the id the drop carries
       [Mod.Droptarget, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); const t = this.eat(Tk.String); props.dropGroup = this.parseInterpolation(t.v, t.pos + 1); if (p) this.eat(Tk.Punct, Pn.ParenR); }], // droptarget("group") — the group interpolates, so `droptarget("{row.id}")` makes each row carry its own id (list reorder), while a static `droptarget("done")` is unchanged
       [Mod.Id, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.id = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // id("features") — a STATIC literal, so the oracle can prove every `-> "#features"` lands
+      [Mod.Group, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.group = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // Details group("faq") — a STATIC name: the oracle checks it sits on a Details
     ]);
 
     this.statements = new Map([
@@ -141,6 +142,7 @@ export class Parser extends Grammar {
       [Kw.Meta, () => this.parseMeta(ir)],
       [Kw.Routes, () => this.parseRoutes(ir)],
       [Kw.Shell, () => this.parseShell(ir)],                                                   // persistent app chrome with slot
+      [Kw.Layout, () => this.parseLayout(ir)],                                                 // chrome shared by a group of routes
       [Kw.Part, () => this.parsePart(ir)],
       [Kw.Const, () => this.parseConst(ir)],                                                   // compile-time immutable scalar
       [Kw.Theme, () => this.parseTheme(ir)],                                                   // project token scale
@@ -396,7 +398,7 @@ export class Parser extends Grammar {
     ir.meta = meta;
   }
 
-  // `routes { "/url" -> page [guard [not] store.flag else "/redirect"] }`: the app root (app.muten).
+  // `routes { "/url" -> page [in layout] [guard [not] store.flag else "/redirect"] }`: the app root (app.muten).
   private parseRoutes(ir: IR): void {
     this.eat(Tk.Ident, Kw.Routes);
     this.eat(Tk.Punct, Pn.BraceL);
@@ -406,6 +408,7 @@ export class Parser extends Grammar {
       const url = this.eat(Tk.String).v;             // path is a quoted string literal (no path sub-grammar)
       this.eat(Tk.Arrow);
       const route: Route = { url, page: this.eat(Tk.Ident).v, loc: this.locOf(start.pos) };
+      if (this.at(Tk.Ident, Kw.In)) { this.next(); route.layout = this.eat(Tk.Ident).v; } // `in pro`: mount inside that layout
       if (this.at(Tk.Ident, Kw.Guard)) {             // `guard [not] store.flag else "/redirect"`
         this.next();
         route.guardNeg = this.at(Tk.Ident, Kw.Not) ? (this.next(), true) : false;
@@ -423,6 +426,13 @@ export class Parser extends Grammar {
   private parseShell(ir: IR): void {
     this.eat(Tk.Ident, Kw.Shell);
     ir.shell = { type: Nt.Shell, props: {}, children: this.parseChildren() };
+  }
+
+  // `layout name { <node>* }`: chrome shared by the routes declared `in name`; mounted once, kept across them.
+  private parseLayout(ir: IR): void {
+    const start = this.eat(Tk.Ident, Kw.Layout);
+    const name = this.eat(Tk.Ident).v;
+    (ir.layouts = ir.layouts || {})[name] = { type: Nt.Layout, props: {}, children: this.parseChildren(), loc: this.locOf(start.pos) };
   }
 
   // `const NAME = <scalar>`: compile-time immutable, inlined at build. Scalars only: structured

@@ -232,7 +232,7 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
 };
 
-export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id'];
+export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group'];
 export const MODIFIER_DOCS = {
   bind: 'Two-way bind to a @state, e.g. `bind @search`.',
   submit: 'Action to run on form submit, e.g. `submit createUser`.',
@@ -248,7 +248,7 @@ export const MODIFIER_DOCS = {
   style: 'The bounded way to bind a DYNAMIC CSS value to state — for progress bars, data-driven sizes, transforms: `style(w: "{pct}%")`. Each key becomes a CSS custom property `--key` (muten prepends `--`, so it can ONLY set variables, never arbitrary properties — no competing with class()). The value is an interpolated string; it is REACTIVE when it reads state. Your CSS consumes it: `.bar { width: var(--w); }`. Use class() for STATIC styling; use style() only for a value that changes at runtime.',
   draggable: 'Make an element a drag source carrying an id: `draggable(item.id)`. A pointer-based floating clone tracks the cursor (touch-ready, styled via .mu-dnd-overlay / .mu-dnd-ghost). The drop target reads the id.',
   droptarget: 'A drop zone: `droptarget("done") on(drop: move)` fires `move(draggedId, "done")`. Nested zones are safe — the INNERMOST zone under the pointer wins (no double-fire). muten owns the data (do the `patch` in the action).',
-  disabled: 'Reactively disable a form control (Button/RowAction/SearchField/Password/Select/Checkbox/Number/Range/Form): `disabled when <cond>` sets the real `disabled` property (e.g. `Button "Next" -> next disabled when pw.length < 8`). Bare `disabled` = always disabled. Prefer this over a fake CSS class + aria(disabled) hand-roll; it does nothing on non-control nodes (the oracle flags it).',
+  disabled: 'Reactively disable a form control (Button/RowAction/SearchField/Password/Select/Checkbox/Number/Range/Form): `disabled when <cond>` sets the real `disabled` property (e.g. `Button "Next" -> next disabled when pw.length < 8`). Bare `disabled` = always disabled. On a `Link` it takes the link out of the Tab order, marks it aria-disabled and stops the click from navigating (a card that is only a call to action while there is something to do). Prefer this over a fake CSS class + aria(disabled) hand-roll; it does nothing on other non-control nodes (the oracle flags it).',
   min: 'Minimum value of a Number/Range input: `Range bind(v) min(0)`. A number or a state (reactive).',
   max: 'Maximum value of a Number/Range input: `Range bind(v) max(100)`. A number or a state (reactive).',
   step: 'Step increment of a Number/Range input: `Range bind(v) step(5)`. A number or a state.',
@@ -298,7 +298,7 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   dayKey: 'dayKey(isoText) → the calendar day as "YYYY-MM-DD" (drops the time). Match an event to a day cell or group by day: `when dayKey(event.date) == dayKey(cell.date) { … }`.',
   addDays: 'addDays(isoText, n) → the date shifted by n days (n may be negative), as an ISO string. Compute a due date or a range bound.',
 };
-export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'into', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from'];
+export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'layout', 'in', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'into', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from'];
 export const KEYWORD_DOCS = {
   screen: 'Declares the screen name: `screen users_dashboard`.',
   entity: 'Declares a data shape + validation: `entity User { name text required  email email required  zip text pattern:"^\\d{5}$" }` (implicit uuid id). Constraints: `required`, `min:N`, `max:N`, `pattern:"<regex>"`. An `email` field validates its format on submit; `pattern` matches a value against your regex.',
@@ -319,6 +319,8 @@ export const KEYWORD_DOCS = {
   body: 'The JSON body of an explicit `post`/`put` request: `post "shop:/x" body item`.',
   routes: 'App root (app.muten): maps URLs to pages, `routes { /url -> page }`. The single source of truth the AI reads.',
   shell: 'Persistent app chrome in app.muten: `shell { Header { … }  slot  Footer { … } }`. Wraps every route; `slot` is where the active Page (<main>) mounts.',
+  layout: 'Chrome shared by a GROUP of routes in app.muten: `layout pro { Tabbar()  slot }`, then `"/x" -> page in pro`. Mounted once and kept while navigating between its routes (only the page in its `slot` swaps); may call parts. Use it for an app sidebar/tab bar that must not appear on every route (unlike `shell`).',
+  in: 'Mounts a route inside a `layout`: `routes { "/schedule" -> schedule in pro guard auth.signedIn else "/login" }`.',
   guard: 'Route guard in app.muten: `routes { /cart -> cart guard auth.loggedIn else /login }`. If the store boolean is false on navigation, redirect. Guest-only page: `guard not auth.loggedIn else /catalog`.',
   else: 'The redirect target of a route `guard`: `guard auth.loggedIn else /login`.',
   part: 'Reusable composition: `part Card(item: Item, onPick: action) { ... }`. Pass OBJECTS (`$item.field`) and ACTION callbacks (`-> $onPick(...)`). Inlined at build time.',

@@ -1,6 +1,7 @@
 // check-app: app-level validation (not per-page): every .store body + every route guard.
 // Shared by lint.ts and build.ts so they can never disagree (a fix in one path alone silently ships broken code).
 // Returns located diagnostics ready to report (lint) or throw (build).
+import { layoutDiagnostics } from '#engine/project/layouts.js';
 import { join, relative } from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { parse } from '#engine/lang/parse.js';
@@ -40,6 +41,7 @@ export function validateStoresAndGuards(appRoot: string, storeIRs: { [domain: st
         }
         if (r.redirect && !routeUrls.has(r.redirect)) add(`route guard redirect "${r.redirect}" is not a declared route`);
       }
+      for (const d of layoutDiagnostics(appIr)) out.push({ file, ...d });
     } catch { /* a parse error in app.muten surfaces via readRoutes */ }
   }
   return out;
