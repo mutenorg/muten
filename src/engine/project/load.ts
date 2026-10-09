@@ -13,7 +13,7 @@ import { resolveStyles } from '#engine/project/styles.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { anchorImports } from '#engine/project/imports.js';
 import { readMutenConfig } from '#engine/project/config.js';
-import type { PartDef, Value, LoadResult, IR, Entity } from '#engine/shared/types.js';
+import type { PartDef, Value, LoadResult, IR, Entity, PluginFileError } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
 
@@ -33,8 +33,12 @@ interface PluginRegistry { components?: { file: string; component?: string }[]; 
 // Local src/parts always win (so an ejected copy overrides the imported one) - see loadAllParts merge order.
 // EVERY registry part is imported - including Custom-backed ones (Chart, Calendar, …); their host .js is resolved
 // from the plugin by loadPluginComponents (below), so `plugins {}` gives you the full catalog without ejecting.
+// Every plugin file the last loadPluginParts could not parse (read by `muten check` to warn about it).
+export const pluginFileErrors: PluginFileError[] = [];
+
 export async function loadPluginParts(appRoot: string): Promise<Parts> {
   const out: Parts = {};
+  pluginFileErrors.length = 0;
   const plugins = readMutenConfig(appRoot).plugins;
   if (typeof plugins !== 'object' || plugins === null || Array.isArray(plugins)) return out;
   let req;
@@ -53,7 +57,8 @@ export async function loadPluginParts(appRoot: string): Promise<Parts> {
       // Any other parse error in a plugin file is also non-fatal (the plugin is not the user's code). Local parts
       // still hard-error on shadow (parse.ts), where a rename is the right fix.
       let ir;
-      try { ir = parse(readFileSync(filePath, 'utf8')); } catch { continue; }
+      try { ir = parse(readFileSync(filePath, 'utf8')); }
+      catch (e) { pluginFileErrors.push({ file: filePath, message: e instanceof Error ? e.message : String(e), loc: e instanceof ParseError && e.loc ? e.loc : null }); continue; }
       const { css } = await resolveStyles(filePath);
       for (const [partName, def] of Object.entries(ir.parts || {}))
         if (!(partName in PRIMITIVES)) out[partName] = { ...def, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css }; // primitive-named plugin parts yield to the primitive

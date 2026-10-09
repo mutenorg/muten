@@ -55,6 +55,8 @@ export const RUNTIME = `let __current = null;
 export const BUILTINS_JS = `function upper(s) { return String(s == null ? '' : s).toUpperCase(); }
   function lower(s) { return String(s == null ? '' : s).toLowerCase(); }
   function initial(s) { return String(s == null ? '' : s).trim().charAt(0).toUpperCase(); }
+  function initials(s) { const words = String(s == null ? '' : s).trim().split(/\\s+/).filter(Boolean); return ((words[0] || '').charAt(0) + (words.length > 1 ? words[words.length - 1].charAt(0) : '')).toUpperCase(); }
+  function hue(s) { let h = 0; for (const c of String(s == null ? '' : s)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; }
   function truncate(s, n) { s = String(s == null ? '' : s); n = Number(n) || 0; return s.length > n ? s.slice(0, n) + '…' : s; }
   function money(n, cur) { try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: cur || 'USD' }).format(Number(n) || 0); } catch (e) { return String(n); } }
   function map(v, a, b, c, d) { const lo = Number(a), hi = Number(b); return hi === lo ? Number(c) : Number(c) + (Number(v) - lo) * (Number(d) - Number(c)) / (hi - lo); }

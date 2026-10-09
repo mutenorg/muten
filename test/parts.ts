@@ -107,5 +107,26 @@ const inst = compose(parse('screen t\nPage {\n  Box() { Span "hi" }\n}').tree, {
 check('part instance root keeps the call-site loc', inst?.loc?.line === 3, JSON.stringify(inst?.loc));
 check('inlined node carries its owner, and leaks no page line', inst?.ownerPart === 'Box' && !!inst?.partLoc, JSON.stringify({ owner: inst?.ownerPart, partLoc: inst?.partLoc }));
 
+
+// Optional params: `size: text = "sm"` — a call that leaves it out gets the default; a call that passes it wins.
+const btnPart = parse('part Btn(variant: text, size: text = "sm", onClick: action) { Button -> $onClick class("b-{$variant} s-{$size}") { slot } }').parts.Btn;
+const btnOmit = compose(parse('screen t\nPage { Btn(variant: "outline", onClick: go) { Span "x" } }').tree, { Btn: btnPart }).tree.children?.[0];
+check('omitted param takes its default ("sm")', JSON.stringify(btnOmit?.props?.class).includes('"value":"sm"'), JSON.stringify(btnOmit?.props?.class));
+const btnGiven = compose(parse('screen t\nPage { Btn(variant: "outline", size: "lg", onClick: go) { Span "x" } }').tree, { Btn: btnPart }).tree.children?.[0];
+check('a passed param beats the default ("lg")', JSON.stringify(btnGiven?.props?.class).includes('"value":"lg"') && !JSON.stringify(btnGiven?.props?.class).includes('"value":"sm"'), JSON.stringify(btnGiven?.props?.class));
+check('the default is recorded on the param', btnPart.params[1].fallback?.$lit === 'sm', JSON.stringify(btnPart.params[1]));
+let refDefault = false;
+try { parse('part P(size: text = other) { Text $size }'); } catch (e) { refDefault = /must be a literal/.test(String(e)); }
+check('a default that is not a literal is refused, and says why', refDefault);
+
+// A part forwarding its own DEFAULTED params to a nested part (VectorField → NumberField(step: $step, unit: $unit)):
+// the nested part must receive the VALUES (1, "px"), not bare names that read as missing state refs.
+const numPart = parse('part Num(step: number, unit: text) { Custom Num inputs(step: $step, unit: $unit) }').parts.Num;
+const pairPart = parse('part Pair(step: number = 1, unit: text = "px") { Num(step: $step, unit: $unit) }').parts.Pair;
+const pair = compose(parse('screen t\nPage { Pair() }').tree, { Num: numPart, Pair: pairPart }).tree.children?.[0];
+const pairInputs = JSON.stringify(pair?.props?.inputs);
+check('a forwarded defaulted number reaches the nested part as the number', /"step":1\b/.test(pairInputs), pairInputs);
+check('a forwarded defaulted text reaches the nested part as the literal', /"unit":\{"\$lit":"px"\}/.test(pairInputs), pairInputs);
+
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nALL OK');
 process.exit(fails ? 1 : 0);

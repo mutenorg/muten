@@ -14,7 +14,7 @@
 // Static filters (role == admin) are pushed to the query; dynamic ones (name contains @q) stay
 // reactive. A page with no reactivity compiles to plain HTML with zero runtime (Astro-like).
 
-import { Nt, Ek, Fmt, Fk } from '#engine/shared/vocab.js';
+import { Nt, Ek, Fmt, Fk, DATA_PREFIX } from '#engine/shared/vocab.js';
 import { CONTAINERS, parseClause, editableFields } from '#engine/compile/helpers.js';
 import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, emitPatch } from '#engine/compile/emit.js';
 import { inlineSourceMap } from '#engine/compile/sourcemap.js';
@@ -128,13 +128,15 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     }
     // draggable(<id>): a pointer-DnD source — a styled clone tracks the pointer; the id is read live at grab time.
     if (p.draggable !== undefined) lines.push(`__drag(el_${id}, () => String(${logic.compileExpr(p.draggable, pageScope)}));`);
-    // aria(...) — author-expressed accessibility: `key` → `aria-<key>` (`role` → `role`). A literal value is a
+    // aria(...) / data(...) — author-expressed attributes: `key` → `aria-<key>` (`role` → `role`). A literal value is a
     // static attribute; a value that reads state is wrapped in an effect, so e.g. `aria(expanded: open)` stays in sync.
+    // An EMPTY value means «no attribute»: a part's optional `label: text = ""` must not stamp aria-label="" (that
+    // erases the element's accessible name), so an empty literal is skipped and an empty live value removes it.
     for (const [key, expr] of Object.entries(p.aria || {})) {
-      const attr = key === 'role' ? 'role' : 'aria-' + key;
+      const attr = JSON.stringify(key === 'role' || key.startsWith(DATA_PREFIX) ? key : 'aria-' + key);   // data(...) keys arrive already named `data-*`
       const val = logic.compileExpr(expr, pageScope);
-      if (expr.kind === Ek.Lit) lines.push(`el_${id}.setAttribute(${JSON.stringify(attr)}, String(${val}));`);
-      else lines.push(`effect(() => el_${id}.setAttribute(${JSON.stringify(attr)}, String(${val})));`);
+      if (expr.kind === Ek.Lit) { if (expr.value !== '') lines.push(`el_${id}.setAttribute(${attr}, String(${val}));`); }
+      else lines.push(`effect(() => { const __av = String(${val}); if (__av === '') el_${id}.removeAttribute(${attr}); else el_${id}.setAttribute(${attr}, __av); });`);
     }
     // disabled: `disabled when <cond>` → `el.disabled`. A literal (bare `disabled`) sets it once; a cond that
     // reads state is wrapped in an effect so the control enables/disables live (the "disable until valid" gate).

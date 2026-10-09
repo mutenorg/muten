@@ -5,7 +5,7 @@
 import { join, relative, isAbsolute } from 'node:path';
 import { readFileSync, existsSync, watch } from 'node:fs';
 import { readRoutes, readApi, apiClientNames } from '#engine/project/routes.js';
-import { load, loadAllParts, findStores } from '#engine/project/load.js';
+import { load, loadAllParts, findStores, pluginFileErrors } from '#engine/project/load.js';
 import { storeContext } from '#engine/project/context.js';
 import { validateStoresAndGuards } from '#engine/project/check-app.js';
 import { lintComponents } from '#engine/project/js-antipatterns.js';
@@ -14,7 +14,7 @@ import { toDoc } from '#engine/ir/flatten.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { validate } from '#engine/ir/validate.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
-import { formatDiagnostic, ParseError } from '#engine/shared/diagnostics.js';
+import { formatDiagnostic, ParseError, diag } from '#engine/shared/diagnostics.js';
 import type { Diagnostic } from '#engine/shared/types.js';
 
 export async function lintApp(appRoot: string, json = false): Promise<number> {
@@ -84,6 +84,13 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
     found.push(d);
   }
 
+  // a plugin file that does not parse is skipped (the app still runs) - but never silently: its parts vanish, and
+  // without this every caller only learns «not a known part»
+  for (const f of pluginFileErrors) {
+    const d = { file: f.file, ...diag('plugin-file', `this plugin file could not be read, so its parts are missing: ${f.message}`, { loc: f.loc, severity: 'warning' }) };
+    if (!json) console.log(formatDiagnostic(d, d.file, srcOf(d.file)));
+    found.push(d);
+  }
   const errors = found.filter((d) => d.severity === 'error').length;
   const warnings = found.length - errors;
   if (json) console.log(JSON.stringify(found, null, 2));

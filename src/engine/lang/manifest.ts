@@ -232,7 +232,7 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
 };
 
-export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group'];
+export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'data', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group'];
 export const MODIFIER_DOCS = {
   bind: 'Two-way bind to a @state, e.g. `bind @search`.',
   submit: 'Action to run on form submit, e.g. `submit createUser`.',
@@ -245,6 +245,7 @@ export const MODIFIER_DOCS = {
   inputs: 'Custom component inputs: `inputs(data: @sales)`.',
   on: 'Custom component events wired to actions: `on(select: pick)`.',
   aria: 'Accessibility attributes on ANY node — the bounded way to write `aria-*`/`role` (muten is HTML + logic): `aria(label: "Close", role: "dialog", expanded: menuOpen)`. Each key → `aria-<key>`; `role` → `role`. A literal value is a static attribute; a value that reads state is REACTIVE (e.g. `aria(expanded: open)` keeps aria-expanded in sync). Use this for an accessible interactive widget instead of escaping to Custom.',
+  data: 'Data attributes on ANY node — `data(slot: "card", size: "sm", state: isOpen ? "open" : "closed")` → `data-slot`/`data-size`/`data-state`. The hooks component CSS styles by (shadcn reads data-slot/data-state). A literal is static; a value that reads state stays in sync.',
   style: 'The bounded way to bind a DYNAMIC CSS value to state — for progress bars, data-driven sizes, transforms: `style(w: "{pct}%")`. Each key becomes a CSS custom property `--key` (muten prepends `--`, so it can ONLY set variables, never arbitrary properties — no competing with class()). The value is an interpolated string; it is REACTIVE when it reads state. Your CSS consumes it: `.bar { width: var(--w); }`. Use class() for STATIC styling; use style() only for a value that changes at runtime.',
   draggable: 'Make an element a drag source carrying an id: `draggable(item.id)`. A pointer-based floating clone tracks the cursor (touch-ready, styled via .mu-dnd-overlay / .mu-dnd-ghost). The drop target reads the id.',
   droptarget: 'A drop zone: `droptarget("done") on(drop: move)` fires `move(draggedId, "done")`. Nested zones are safe — the INNERMOST zone under the pointer wins (no double-fire). muten owns the data (do the `patch` in the action).',
@@ -256,7 +257,7 @@ export const MODIFIER_DOCS = {
 
 // Built-in formatting functions: callable like a `use`'d function but ALWAYS available (no import). The bounded
 // answer to "muten has no dates/string ops" — a FIXED set, so the language stays small and the oracle knows them.
-export const BUILTINS = ['upper', 'lower', 'initial', 'truncate', 'money', 'map', 'sin', 'cos', 'sqrt', 'abs', 'round', 'floor', 'ceil', 'pow', 'min', 'max', 'pi', 'ago', 'date', 'time', 'datetime', 'calendar', 'weekday', 'now', 'isToday', 'isPast', 'isFuture', 'isEmail', 'before', 'after', 'daysUntil', 'dayKey', 'addDays'];
+export const BUILTINS = ['upper', 'lower', 'initial', 'initials', 'hue', 'truncate', 'money', 'map', 'sin', 'cos', 'sqrt', 'abs', 'round', 'floor', 'ceil', 'pow', 'min', 'max', 'pi', 'ago', 'date', 'time', 'datetime', 'calendar', 'weekday', 'now', 'isToday', 'isPast', 'isFuture', 'isEmail', 'before', 'after', 'daysUntil', 'dayKey', 'addDays'];
 // Identifiers the emitted page/store module already binds — the signals runtime (`signal`/`effect`/…), the
 // injected data layer (`query`, `mount`), and the formatting BUILTINS — all in the SAME scope as a state/get/
 // action const. Naming a state `query` compiles to `const query = …` colliding with the runtime's `query`
@@ -267,6 +268,8 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   upper: 'upper(text) → UPPERCASE.',
   lower: 'lower(text) → lowercase.',
   initial: 'initial(name) → first letter, uppercased — avatar initials: `Text "{initial(user.name)}"`.',
+  hue: 'hue(name) → a stable 0-359 hue from a text: the same person always gets the same colour (`style(h: "{hue(user.name)}")` → var(--h)).',
+  initials: 'initials(name) → first + last word initials, uppercased ("Valentina Ruiz" → "VR", "Ana" → "A") — what an avatar shows.',
   truncate: 'truncate(text, n) → first n characters, + "…" if longer.',
   money: 'money(number[, "USD"]) → localized currency, e.g. $1,234.56.',
   map: 'map(v, inLo, inHi, outLo, outHi) → linear scale, e.g. a value to an SVG coordinate: `Circle cy(map(p.val, 0, max, 100, 0))`.',

@@ -124,10 +124,13 @@ export const SORT_OPS = new Set<string>(['sort', 'sortDesc']);
 /** Action-body statement ops (discriminants): mutations + the `if` branch. */
 export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle', Remove = 'remove', Patch = 'patch', Create = 'create', Update = 'update', Delete = 'delete', Refetch = 'refetch', Request = 'request', Call = 'call', Extern = 'extern', If = 'if' }
 
+/** The attribute prefix data(...) keys carry once parsed (they share aria's map). */
+export const DATA_PREFIX = 'data-';
 /** Node modifiers (post-primitive). */
 export enum Mod {
   Bind = 'bind', Checked = 'checked', Submit = 'submit', Where = 'where', Columns = 'columns',
   Class = 'class', Alt = 'alt', Inputs = 'inputs', On = 'on', Aria = 'aria', Style = 'style', Disabled = 'disabled', Options = 'options',
+  Data = 'data',   // data(slot: "card", state: open) — `data-*` attributes for CSS hooks (component libraries style by them); rides aria()'s machinery
   Group = 'group',   // Details group("faq") — siblings sharing a group open one at a time (native <details name>)
   Id = 'id',   // id("features") — a stable DOM id; the target an in-page `Link -> "#features"` anchor scrolls to
   Min = 'min', Max = 'max', Step = 'step',   // Number/Range numeric bounds + step (each takes one number expression)

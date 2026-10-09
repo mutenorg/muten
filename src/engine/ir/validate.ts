@@ -7,6 +7,7 @@ import { diag, closest } from '#engine/shared/diagnostics.js';
 import { PRIMITIVE_NAMES, ACTION_OPS, PRIMITIVES, BUILTINS, RESERVED_NAMES } from '#engine/lang/manifest.js';
 import { Nt, Ek, StOp, BOp, CHART_KINDS, SVG_PRIMS, nonPrimitiveHint } from '#engine/shared/vocab.js';
 import { exprListType, isKnownHead, selfUpdateTargets, type RefFacts, type KnownHeads } from '#engine/ir/refs.js';
+import { leafChildren } from '#engine/ir/leaf-children.js';
 import type { Doc, FlatNode, ValidateCtx, ValidateResult, Diagnostic, Expr, Stmt, RequestStmt, StringPropValue, Loc } from '#engine/shared/types.js';
 
 const KNOWN_TYPES = new Set<string>([...PRIMITIVE_NAMES, Nt.Shell, Nt.Layout, Nt.Slot]); // manifest primitives + Shell/Layout wrappers (app.muten roots) + Slot (part children outlet, or a shell/layout's page outlet)
@@ -909,5 +910,6 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   // `ok` means "nothing here BLOCKS a build" — not "nothing was found". A warning is a real finding the author must
   // see, but it must never fail `muten dev`/`bundle`/`build`. Every consumer keys off this flag, so if severity is not
   // honoured HERE it is decorative everywhere: the first warning validate ever emitted broke the whole showcase.
+  D.push(...leafChildren(doc));
   return { ok: !D.some((d) => d.severity === 'error'), diagnostics: D };
 }

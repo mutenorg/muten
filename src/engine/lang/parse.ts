@@ -7,7 +7,7 @@
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { Grammar } from '#engine/lang/grammar.js';
-import { Tk, Pn, Kw, Nt, Mod, StOp, Ek, BOp, nonPrimitiveHint } from '#engine/shared/vocab.js';
+import { Tk, Pn, Kw, Nt, Mod, StOp, Ek, BOp, nonPrimitiveHint, DATA_PREFIX } from '#engine/shared/vocab.js';
 import type {
   IR, IRNode, NodeProps, StringPropName, Stmt, IfStmt, Expr, Interp, Value, Level,
   Entity, FieldType, EntityConstraints, FieldConstraint,
@@ -89,6 +89,9 @@ export class Parser extends Grammar {
       [Mod.Inputs, (props: NodeProps) => { props.inputs = { ...props.inputs, ...this.parseArgs() }; }],   // Custom inputs(k: value, ...)
       [Mod.On, (props: NodeProps) => { props.on = { ...props.on, ...this.parseArgs() }; }],               // Custom on(event: action, ...)
       [Mod.Aria, (props: NodeProps) => { props.aria = { ...props.aria, ...this.parseAriaArgs() }; }],      // aria(label: "Close", expanded: isOpen) -> aria-*/role
+      // data(slot: "card", state: isOpen ? "open" : "closed") -> data-* attrs. Stored beside aria's keys with the full `data-` name, so the
+      // same compose/validate/compile path (literal = static, state-reading = effect) carries them; compile keeps a `data-` key as is.
+      [Mod.Data, (props: NodeProps) => { const attrs = this.parseAriaArgs(); props.aria = { ...props.aria, ...Object.fromEntries(Object.entries(attrs).map(([key, expr]) => [DATA_PREFIX + key, expr])) }; }],
       [Mod.Style, (props: NodeProps) => { props.styleVars = { ...props.styleVars, ...this.parseStyleArgs() }; }], // style(w: "{pct}%") -> CSS var --w (the bounded path for dynamic values: progress, transforms)
       [Mod.Disabled, (props: NodeProps) => { // `disabled when <cond>` -> reactive el.disabled; bare `disabled` = always disabled
         if (this.at(Tk.Ident, Kw.When)) { this.next(); props.disabled = this.parseExpr(); }
@@ -479,7 +482,14 @@ export class Parser extends Grammar {
     while (!this.at(Tk.Punct, Pn.ParenR)) {
       const paramName = this.eat(Tk.Ident).v;
       this.eat(Tk.Punct, Pn.Colon);
-      params.push({ name: paramName, type: this.parseType() });
+      const param: PartParam = { name: paramName, type: this.parseType() };
+      // `size: text = "sm"`: an optional param. Only a literal: a ref would be read in each caller's scope, not the part's.
+      if (this.at(Tk.Punct, Pn.Assign)) {
+        const eq = this.next();
+        if (!this.at(Tk.String) && !this.at(Tk.Number)) throw new ParseError(`part "${name}": the default of "${paramName}" must be a literal ("text" or a number).`, this.locOf(eq.pos));
+        param.fallback = this.parseArgValue();
+      }
+      params.push(param);
       if (this.at(Tk.Punct, Pn.Comma)) this.next();
     }
     this.eat(Tk.Punct, Pn.ParenR);

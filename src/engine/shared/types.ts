@@ -177,7 +177,8 @@ export type ArgValue = string | number | ParamRef | LitRef;
 export interface ArgMap { [key: string]: ArgValue; }
 
 /** A part definition: its params + the (single-root) tree it expands to. */
-export interface PartParam { name: string; type: string; }
+/** `fallback`: a literal the param takes when a call leaves it out (`size: text = "sm"`); without one the param is required. */
+export interface PartParam { name: string; type: string; fallback?: ArgValue; }
 export interface PartDef {
   params: PartParam[];
   tree: IRNode;
@@ -606,3 +607,7 @@ export interface AppMap {
 declare module 'sass' {
   export function compile(path: string): { css: string };
 }
+
+// A file of an imported plugin that could not be parsed: the app still runs without its parts (the plugin is not the
+// user's code), but `muten check` says which file and why, instead of a bare «not a known part» on every caller.
+export interface PluginFileError { file: string; message: string; loc: Loc | null; }

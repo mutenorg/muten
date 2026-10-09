@@ -6,7 +6,7 @@
 import { Ek, Nt } from '#engine/shared/vocab.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { mergeImports } from '#engine/ir/imports.js';
-import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap, ArgValue, PartDef } from '#engine/shared/types.js';
+import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap, ArgValue, PartDef, PartParam } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
 
@@ -45,6 +45,13 @@ export function composeDoc(ir: IR, parts: Parts, keepOutlet = false): { doc: Doc
   return { doc: toDoc({ ...ir, entities, state, tree, imports }), used };
 }
 
+// The defaults a part declares (`size: text = "sm"`), as the args a call that omits them would have passed.
+function fallbacks(params: PartParam[]): ArgMap {
+  const out: ArgMap = {};
+  for (const param of params) if (param.fallback !== undefined) out[param.name] = param.fallback;
+  return out;
+}
+
 // `slot` carries the call-site children to inject at the part's `slot` marker. They're composed once, in the
 // CALLER's chain — so nesting the same wrapper (`Panel { Panel { … } }`) is fine; only a part whose BODY cites
 // itself is the unterminating cycle the chain guard catches.
@@ -54,7 +61,8 @@ function composeNode(node: IRNode, parts: Parts, used: Set<string>, chain: Set<s
     if (chain.has(node.type)) throw new Error(`part "${node.type}" references itself (directly or through another part) — parts inline at build, so a cycle can never terminate. Remove the self-reference.`);
     used.add(node.type);
     const kids = (node.children || []).flatMap((c) => composeChild(c, parts, used, chain, slot)); // the call's children become this part's slot content (forwarding any enclosing slot)
-    const inlined = substitute(part.tree, node.args || {}, node.type);   // every inlined node remembers which part file it was written in
+    const args = { ...fallbacks(part.params), ...(node.args || {}) };   // a param the call leaves out takes its declared default
+    const inlined = substitute(part.tree, args, node.type);   // every inlined node remembers which part file it was written in
     const composed = composeNode(inlined, parts, used, new Set([...chain, node.type]), kids);   // resolve nested parts; the part's `slot` fills with kids
     // The instance root keeps the CALL SITE — the line in the page where this part was written. It is the only line the
     // app owns for that whole subtree (a plugin part's own file lives in node_modules and must never be edited), and
@@ -185,10 +193,18 @@ function subArgs(m: ArgMap, args: ArgMap): ArgMap {
 }
 
 function subArgValue(v: ArgValue, args: ArgMap): ArgValue {
-  if (typeof v === 'string') return v.startsWith('$') ? refText(v, args) : v;
+  if (typeof v === 'string') {
+    if (!v.startsWith('$')) return v;
+    // a part forwarding its OWN param to a nested part (`NumberField(step: $step)`): when that param holds a number
+    // or a quoted literal (passed, or its declared default), forward the VALUE. refText would turn it into a bare
+    // name — `step` — that reads as a state ref that does not exist.
+    const own = v.includes('.') ? undefined : args[v.slice(1)];
+    if (typeof own === 'number' || (own !== undefined && typeof own === 'object')) return own;
+    return refText(v, args);
+  }
   if (typeof v === 'number') return v;
   if ('$lit' in v) return v;        // quoted literal: nothing to substitute
-  return args[v.$param];            // nested $param -> the arg
+  return args[v.$param] ?? v;       // nested $param -> the arg (left as is when missing: validate names it)
 }
 
 // Custom `inputs` are read by customValue, which marks a REACTIVE ref with a leading `@` (else it's a literal).
