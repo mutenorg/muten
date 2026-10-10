@@ -44,6 +44,8 @@ const VNS = 'muten-virtual'; // esbuild namespace for the virtual modules
 // The dev server binds EVERY interface (`listen(port)` with no host), so a phone on the same wifi already
 // reaches it — these are the addresses to hand it. HMR follows for free: the client opens EventSource('/_reload'),
 // a same-origin relative path, so it works from whatever host the page was served from. Nothing to configure.
+// Only a top-level page opens it: the stream never closes, Chrome allows six connections per host, and a page
+// showing several dev pages in iframes (a row of store previews) would leave the seventh waiting forever.
 const lanAddresses = (): string[] => Object.values(networkInterfaces())
   .flatMap((ifaces) => ifaces ?? [])
   .filter((iface) => iface.family === 'IPv4' && !iface.internal)
@@ -435,7 +437,7 @@ const MIME: { [ext: string]: string } = { '.js': 'text/javascript', '.css': 'tex
 const DEV_CLIENT = `<script>(function(){function show(m){var d=document.getElementById('__mu_err');if(!d){d=document.createElement('div');d.id='__mu_err';document.body.appendChild(d);}d.style.cssText='position:fixed;inset:0;z-index:99999;background:#1a1a1f;color:#ffb4b4;font:13px/1.6 ui-monospace,monospace;overflow:auto';d.innerHTML='<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten \\u2014 runtime error</div><pre style="padding:24px;white-space:pre-wrap">'+String(m).replace(/[<&]/g,function(c){return c==='<'?'&lt;':'&amp;';})+'</pre>';}
 addEventListener('error',function(e){show((e.error&&e.error.stack)||e.message);});
 addEventListener('unhandledrejection',function(e){show('Unhandled promise rejection:\\n'+((e.reason&&e.reason.stack)||e.reason));});
-new EventSource('/_reload').onmessage=function(e){var m;try{m=JSON.parse(e.data)}catch(_){return location.reload()}if(m.type==='css'){var l=document.querySelector('link[href^="/assets/boot.css"]');if(l){var n=l.cloneNode(false);n.setAttribute('href','/assets/boot.css?v='+Date.now());n.onload=function(){l.remove()};l.parentNode.insertBefore(n,l.nextSibling);}return;}if(m.type!=='patch')return location.reload();var rt=window.__muten_rt,pg=window.__muten_page;if(!rt||!pg||window.__muten_screen!==m.screen)return location.reload();try{for(var i=0;i<m.patches.length;i++){var p=m.patches[i],b=eval('('+p.src+')');if(!rt.patchNode(pg,p.id,function(c,par,n){return b(c,n,par,rt)}))return location.reload();}}catch(err){console.error('[muten hmr]',err);location.reload();}};})();</script>`;
+if(self===top)new EventSource('/_reload').onmessage=function(e){var m;try{m=JSON.parse(e.data)}catch(_){return location.reload()}if(m.type==='css'){var l=document.querySelector('link[href^="/assets/boot.css"]');if(l){var n=l.cloneNode(false);n.setAttribute('href','/assets/boot.css?v='+Date.now());n.onload=function(){l.remove()};l.parentNode.insertBefore(n,l.nextSibling);}return;}if(m.type!=='patch')return location.reload();var rt=window.__muten_rt,pg=window.__muten_page;if(!rt||!pg||window.__muten_screen!==m.screen)return location.reload();try{for(var i=0;i<m.patches.length;i++){var p=m.patches[i],b=eval('('+p.src+')');if(!rt.patchNode(pg,p.id,function(c,par,n){return b(c,n,par,rt)}))return location.reload();}}catch(err){console.error('[muten hmr]',err);location.reload();}};})();</script>`;
 
 // esbuild rejects build()/rebuild() with a BuildFailure carrying `.errors` (each with a code-frame location);
 // pull them out so we can format them Vite-style. null if the failure isn't a build failure (a real crash).

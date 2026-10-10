@@ -129,4 +129,27 @@ check('a forwarded defaulted number reaches the nested part as the number', /"st
 check('a forwarded defaulted text reaches the nested part as the literal', /"unit":\{"\$lit":"px"\}/.test(pairInputs), pairInputs);
 
 console.log(fails ? `\n${fails} FAILURE(S)` : '\nALL OK');
+// A bool param can default to true/false and a call can pass true/false: a literal, never a ref named «true».
+{
+  const lib = parse('part Go(onClick: action, disabled: bool = false) { Button -> $onClick disabled when $disabled { slot } }');
+  const bparts = { ...lib.parts };
+  const off = compose(parse('screen b\naction a { }\nPage { Go(onClick: a) { Text "x" } }').tree, bparts).tree.children?.[0];
+  const on = compose(parse('screen b\naction a { }\nPage { Go(onClick: a, disabled: true) { Text "x" } }').tree, bparts).tree.children?.[0];
+  const lit = (n) => JSON.stringify(n?.props).match(/"value":(true|false)/)?.[1];
+  check('bool default false composes to the literal false', lit(off) === 'false', JSON.stringify(off?.props));
+  check('a call passing true composes to the literal true', lit(on) === 'true', JSON.stringify(on?.props));
+  let threw = '';
+  try { parse('part P(x: bool = maybe) { Text "x" }'); } catch (e) { threw = String(e.message); }
+  check('a non-literal default is still refused', threw.includes('true or false'), threw);
+}
+
+// A $param in a one-expression prop (checked, min, cx, …) reaches the call's value, not the page as an unknown ref.
+{
+  const lib = parse('part Tick(on: bool, lo: number = 2) { Checkbox checked($on)  Range min($lo) max(10) }');
+  const node = compose(parse('screen t\nstate { ok = true : bool  v = 3 : number }\nPage { Tick(on: ok) }').tree, { ...lib.parts }).tree;
+  const text = JSON.stringify(node);
+  check('checked($on) inside a part becomes the caller\'s ref', text.includes('"checked":{"kind":"ref","name":"ok"}') || (text.includes('"checked"') && !text.includes('$on')), text.slice(0, 400));
+  check('min($lo) inside a part takes the default', !text.includes('$lo'), text.slice(0, 400));
+}
+
 process.exit(fails ? 1 : 0);

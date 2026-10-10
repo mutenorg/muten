@@ -3,17 +3,18 @@
 // still mutate it by id. Resolves nested parts. Substitution is explicit per value shape
 // (prop / expression / interpolation / arg), honestly typed with no generic any.
 
-import { Ek, Nt } from '#engine/shared/vocab.js';
+import { BOp, Ek, Nt } from '#engine/shared/vocab.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { mergeImports } from '#engine/ir/imports.js';
-import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap, ArgValue, PartDef, PartParam } from '#engine/shared/types.js';
+import { ParseError } from '#engine/shared/diagnostics.js';
+import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap, ArgValue, PartDef, PartParam, ExprPropKey } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
 
 // a readable form of a part-call arg value, for the DevTools "props" view (bare ref / number / "literal" / $param).
 function argToStr(v: ArgValue): string {
   if (typeof v === 'string') return v;
-  if (typeof v === 'number') return String(v);
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   if ('$lit' in v) return JSON.stringify(v.$lit);
   return '$' + v.$param;
 }
@@ -21,6 +22,9 @@ function argToStr(v: ArgValue): string {
 // The page outlet a shell/layout keeps: composing a page, a top-level `slot` has no caller and composes away; composing
 // a layout, it IS the point where the router mounts the page, so it survives as itself.
 const OUTLET: IRNode = { type: Nt.Slot, props: {} };
+// the one-expression props a $param can sit in: each is substituted like `cond` (left out, `checked($on)` inside a part
+// reached the page as an unknown ref)
+const EXPR_PROPS: ExprPropKey[] = ['checked', 'draggable', 'min', 'max', 'step', 'filter', 'take', 'x', 'y', 'w', 'h', 'cx', 'cy', 'r', 'x1', 'y1', 'x2', 'y2', 'rx', 'start', 'end', 'inner'];
 
 export function compose(tree: IRNode | null, parts: Parts, keepOutlet = false): { tree: IRNode | null; used: string[] } {
   const used = new Set<string>();                      // which parts were instantiated (to hoist their data)
@@ -62,7 +66,9 @@ function composeNode(node: IRNode, parts: Parts, used: Set<string>, chain: Set<s
     used.add(node.type);
     const kids = (node.children || []).flatMap((c) => composeChild(c, parts, used, chain, slot)); // the call's children become this part's slot content (forwarding any enclosing slot)
     const args = { ...fallbacks(part.params), ...(node.args || {}) };   // a param the call leaves out takes its declared default
-    const inlined = substitute(part.tree, args, node.type);   // every inlined node remembers which part file it was written in
+    let inlined: IRNode;
+    try { inlined = substitute(part.tree, args, node.type); }   // every inlined node remembers which part file it was written in
+    catch (error) { const missing = new ParseError(`${node.type}(…): ${error instanceof Error ? error.message : String(error)}`, node.loc); missing.code = 'part-arg-missing'; throw missing; }   // a diagnostic at the CALL (file:line in check), not a crash
     const composed = composeNode(inlined, parts, used, new Set([...chain, node.type]), kids);   // resolve nested parts; the part's `slot` fills with kids
     // The instance root keeps the CALL SITE — the line in the page where this part was written. It is the only line the
     // app owns for that whole subtree (a plugin part's own file lives in node_modules and must never be edited), and
@@ -127,27 +133,41 @@ function subProps(props: NodeProps, args: ArgMap): NodeProps {
   if (props.alt !== undefined) out.alt = subStringProp(props.alt, args);
   if (props.name !== undefined) out.name = subStringProp(props.name, args); // Icon "set:name" — a part can pass the icon (`Icon $icon`), inlined to a static literal so it tree-shakes
   if (props.placeholder !== undefined) out.placeholder = subStringProp(props.placeholder, args);
+  if (props.summary !== undefined) out.summary = subStringProp(props.summary, args); // Details "{$question}" in a part: the summary is a positional string too
   if (props.submitLabel !== undefined) out.submitLabel = subStringProp(props.submitLabel, args);
   if (props.cond !== undefined) out.cond = subExpr(props.cond, args);
+  if (props.disabled !== undefined) out.disabled = subExpr(props.disabled, args); // `disabled when $disabled` in a part (Btn): the caller's bool, a state or true/false
   if (props.list !== undefined) out.list = subExpr(props.list, args);
   if (props.arg !== undefined) out.arg = subExpr(props.arg, args);
   if (props.argRest !== undefined) out.argRest = props.argRest.map((a) => subExpr(a, args));
   if (props.action !== undefined) out.action = refText(props.action, args); // action/submit names can be $params too
   if (props.submit !== undefined) out.submit = refText(props.submit, args);
-  if (props.bind !== undefined) out.bind = refText(props.bind, args);
+  if (props.bind !== undefined) {
+    // a part that binds one of its params (`SearchField bind($value)`) needs that param passed: left out, it bound a
+    // state named `value` that does not exist and the page crashed when it opened, with a clean check
+    const own = props.bind.startsWith('$') ? props.bind.slice(1).split('.')[0] : '';
+    if (own && args[own] === undefined) throw new Error(`this part binds \`${own}\` (bind($${own})) but the call does not pass it: add \`${own}: <a state>\` to the call`);
+    out.bind = refText(props.bind, args);
+  }
   if (props.to !== undefined) out.to = typeof props.to === 'string' ? props.to : subInterp(props.to, args);
   if (props.inputs !== undefined) out.inputs = subInputs(props.inputs, args);
-  if (props.on !== undefined) out.on = subArgs(props.on, args);
+  if (props.on !== undefined) out.on = subOn(props.on, args);
   if (props.styleVars !== undefined) out.styleVars = Object.fromEntries(Object.entries(props.styleVars).map(([k, v]) => [k, typeof v === 'string' ? v : subInterp(v, args)])); // `style(w: "{$pct}")` in a part: sub the param
   if (props.aria !== undefined) out.aria = Object.fromEntries(Object.entries(props.aria).map(([k, e]) => [k, subExpr(e, args)]));                                          // `aria(label: $lbl)` in a part: sub the param
+  for (const key of EXPR_PROPS) { const expr = props[key]; if (expr !== undefined) out[key] = subExpr(expr, args); }
   return out;
 }
 
 // a positional string prop: plain text passes through, { $param } resolves to the arg, interpolation recurses.
 function subStringProp(v: StringPropValue, args: ArgMap): StringPropValue {
   if (typeof v === 'string') return v;
-  if ('$param' in v) { const a = args[v.$param]; return typeof a === 'number' ? String(a) : (typeof a === 'object' && '$lit' in a) ? (a.$interp ?? a.$lit) : a; } // {$param} -> arg (an interpolated literal keeps its Interp)
+  if ('$param' in v) { const a = args[v.$param]; return typeof a === 'number' || typeof a === 'boolean' ? String(a) : (typeof a === 'object' && '$lit' in a) ? (a.$interp ?? a.$lit) : a; } // {$param} -> arg (an interpolated literal keeps its Interp)
   return subInterp(v, args);                                                                      // interpolation
+}
+
+// "{t(lang, k)} más" as ONE expression ("" + t(lang, k) + " más"), for the sinks that read an expr (aria, conditions).
+function interpExpr(interp: Interp): Expr {
+  return interp.parts.reduce<Expr>((acc, part) => ({ kind: Ek.Bin, op: BOp.Add, left: acc, right: typeof part === 'string' ? { kind: Ek.Lit, value: part } : part }), { kind: Ek.Lit, value: '' });
 }
 
 // expression: substitute $param refs inside; structure (kind) is preserved.
@@ -155,8 +175,8 @@ function subExpr(e: Expr, args: ArgMap): Expr {
   if (e.kind === Ek.Ref) {
     if (e.name.startsWith('$')) {                                       // a part param in an expr position
       const a = args[e.name.slice(1).split('.')[0]];
-      if (a !== undefined && typeof a === 'object' && '$lit' in a) return { kind: Ek.Lit, value: a.$lit }; // literal stays a literal, not a ref
-      if (typeof a === 'number') return { kind: Ek.Lit, value: a };
+      if (a !== undefined && typeof a === 'object' && '$lit' in a) return a.$interp && !e.name.includes('.') ? interpExpr(a.$interp) : { kind: Ek.Lit, value: a.$lit }; // literal stays a literal, not a ref; an interpolated one (`label: "{t(lang, k)}"`) stays live, so aria and other expr sinks get the text, never the raw `{…}`
+      if (typeof a === 'number' || typeof a === 'boolean') return { kind: Ek.Lit, value: a };
     }
     return { kind: Ek.Ref, name: refText(e.name, args) };              // $char.image -> c.image
   }
@@ -199,12 +219,24 @@ function subArgValue(v: ArgValue, args: ArgMap): ArgValue {
     // or a quoted literal (passed, or its declared default), forward the VALUE. refText would turn it into a bare
     // name — `step` — that reads as a state ref that does not exist.
     const own = v.includes('.') ? undefined : args[v.slice(1)];
-    if (typeof own === 'number' || (own !== undefined && typeof own === 'object')) return own;
+    if (typeof own === 'number' || typeof own === 'boolean' || (own !== undefined && typeof own === 'object')) return own;
     return refText(v, args);
   }
-  if (typeof v === 'number') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return v;
   if ('$lit' in v) return v;        // quoted literal: nothing to substitute
   return args[v.$param] ?? v;       // nested $param -> the arg (left as is when missing: validate names it)
+}
+
+// Custom `on(...)`: a handler that forwards an action param the caller did not pass (`open: $onOpen` with no onOpen)
+// is dropped, so the widget sees no handler at all instead of a call to a name that does not exist.
+function subOn(m: ArgMap, args: ArgMap): ArgMap {
+  const out: ArgMap = {};
+  for (const [k, v] of Object.entries(m)) {
+    const name = typeof v === 'string' ? (v.startsWith('$') && !v.includes('.') ? v.slice(1) : '') : (typeof v === 'object' && '$param' in v ? v.$param : '');
+    if (name && args[name] === undefined) continue;
+    out[k] = subArgValue(v, args);
+  }
+  return out;
 }
 
 // Custom `inputs` are read by customValue, which marks a REACTIVE ref with a leading `@` (else it's a literal).
@@ -213,6 +245,10 @@ function subArgValue(v: ArgValue, args: ArgMap): ArgValue {
 function subInputs(m: ArgMap, args: ArgMap): ArgMap {
   const out: ArgMap = {};
   for (const [k, v] of Object.entries(m)) {
+    // a param the caller did not pass (and that has no default) is left out: otherwise its bare name would read as a
+    // state of the same name on the calling page (AgendaLive's `free` picked up a page's own `free` list)
+    const name = typeof v === 'string' ? (v.startsWith('$') && !v.includes('.') ? v.slice(1) : '') : (typeof v === 'object' && '$param' in v ? v.$param : '');
+    if (name && args[name] === undefined) continue;
     const sub = subArgValue(v, args); // resolves a {$param}/"$x" param to its arg (a bare ref string, a number, or a {$lit})
     // A resolved bare string is a state/param REF; restore the `@` customValue needs so it stays reactive
     // (without it the ref is JSON-stringified as a literal and never updates). Numbers and {$lit} pass through.
@@ -227,6 +263,6 @@ function refText(name: string, args: ArgMap): string {
   const head = name.slice(1).split('.')[0];
   const rest = name.slice(1 + head.length);
   const a = args[head];
-  const av = (a !== undefined && typeof a === 'object' && '$lit' in a) ? a.$lit : (typeof a === 'string' ? a : head);
+  const av = (a !== undefined && typeof a === 'object' && '$lit' in a) ? a.$lit : (typeof a === 'string' ? a : typeof a === 'boolean' ? String(a) : head);
   return av + rest;
 }

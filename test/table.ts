@@ -135,5 +135,15 @@ Span "{initials(who)} {hue(who)}"`));
   ok('initials("ana") = A, "  María  José  Pérez " = MP, "" = ""', initials('ana') === 'A' && initials('  María  José  Pérez ') === 'MP' && initials('') === '', '');
 }
 
+// ── header cells made by each: `Row head { each cols as c { Cell "{c.name}" } }` are <th>, not <td> ──
+{
+  const src = `screen t
+state { cols = [ { name: "A" }, { name: "B" } ] : list }
+Table { Row head { Cell "Name"  each cols as c { Cell "{c.name}" } } }`;
+  const js = compile(toDoc(parse(src)), {});
+  const thCount = (js.match(/createElement\('th'\)|createElement\("th"\)/g) || []).length;
+  ok('a Cell inside each in a Row head is a <th>', thCount >= 2 && !/createElement\(['"]td['"]\)/.test(js), 'th=' + thCount);
+}
+
 if (f) { console.error(`\n${f} FAILED`); process.exit(1); }
 console.log('\nALL OK');

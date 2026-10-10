@@ -655,8 +655,13 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
     // (Clearing before the async load left a blank gap that made the whole UI flash/jump on every navigation.)
     const want = def.layout && layouts[def.layout] ? def.layout : null;
     const layoutLoad: Promise<PageModule | null> = want && want !== layoutName ? layouts[want]() : Promise.resolve(null);
+    // while it loads, the links to it say so (`data-loading`, and the document is `aria-busy`): a menu can turn the
+    // section's icon into a spinner. Only past a beat, so a page already in memory never flickers.
+    const busy = setTimeout(() => { if (mounted !== path) return; document.documentElement?.setAttribute('aria-busy', 'true'); document.querySelectorAll('a[href]').forEach((a) => { if (a.getAttribute('href') === path) a.setAttribute('data-loading', ''); }); }, 120);
+    const unbusy = (): void => { clearTimeout(busy); document.documentElement?.removeAttribute('aria-busy'); document.querySelectorAll?.('a[data-loading]').forEach((a) => a.removeAttribute('data-loading')); };
     Promise.all([def.load(), layoutLoad]).then(([module, layoutModule]) => {
       if (mounted !== path) return;            // a newer navigation superseded this load — drop the stale result
+      unbusy();
       if (disposePage) disposePage();          // stop the previous page's effects to avoid stale-DOM crashes
       disposePage = null;
       const target = pageTarget(want, layoutModule);
@@ -667,9 +672,9 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
         const pageEl = module.mount(target, params); // atomic swap: no blank frame
         if (typeof window !== 'undefined') { window.__muten_page = pageEl.__muten; window.__muten_screen = module.screen; } // dev HMR target
       });
-      scrollTo(0, 0);
+      scrollTo({ top: 0, left: 0, behavior: 'instant' }); // a new page opens at its top at once, even under scroll-behavior: smooth
       markActive(); // shell nav + page links reflect the new path (aria-current + .is-active)
-      const main = target.querySelector('main'); if (main instanceof HTMLElement) main.focus(); // a11y: move focus to content on nav (the <main> is tabIndex -1)
+      const main = target.querySelector('main'); if (main instanceof HTMLElement) main.focus({ preventScroll: true }); // a11y: move focus to content on nav (the <main> is tabIndex -1)
     });
   };
   // intercept internal link clicks for client-side navigation (external/new-tab/downloads pass through)

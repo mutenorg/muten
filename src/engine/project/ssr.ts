@@ -126,6 +126,7 @@ export async function fetchSources(sources: { [name: string]: Value }, api: Valu
   for (const [name, src] of Object.entries(sources)) {
     const r = sourceRequest(src, api);
     if (!r.url) continue;
+    if (r.wait) { console.log(`  • source "${name}" waits for its params — not fetched at build (runs client-side)`); continue; }
     if (r.method !== 'GET') { console.log(`  • source "${name}" is ${r.method} — not fetched at build (runs client-side)`); continue; }
     try {
       const json: Value = await (await fetch(r.url, { headers: r.headers })).json();

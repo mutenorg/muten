@@ -172,7 +172,7 @@ export interface StateDef {
  *  static `$lit`. Carrying both is what keeps the change from rippling through those sinks. */
 export interface LitRef { $lit: string; $interp?: Interp; }
 /** The value of a part-instance arg: a quoted literal, a bare ref string, a number, or a $param. */
-export type ArgValue = string | number | ParamRef | LitRef;
+export type ArgValue = string | number | boolean | ParamRef | LitRef;
 /** key → arg value, for part instances and Custom inputs/on. */
 export interface ArgMap { [key: string]: ArgValue; }
 
@@ -237,6 +237,10 @@ export interface ClassCond { name: string; cond: Expr; }
 export interface ClassInterp { interp: Interp; }   // `class("status-{x}")` — a class token whose value interpolates state, applied reactively (swap on change)
 
 /** A node's props: a named bag of authoring options (no catch-all — every field is declared). */
+/** The NodeProps that hold one plain expression a part's $param can sit in (`checked($on)`, `min($lo)`, `cx($x)`, …). */
+export type ExprPropKey = 'checked' | 'draggable' | 'min' | 'max' | 'step' | 'filter' | 'take'
+  | 'x' | 'y' | 'w' | 'h' | 'cx' | 'cy' | 'r' | 'x1' | 'y1' | 'x2' | 'y2' | 'rx' | 'start' | 'end' | 'inner';
+
 export interface NodeProps {
   // positional / textual
   value?: StringPropValue;

@@ -17,20 +17,86 @@ action edit mutates orders <- item { orders.update(item) }
 action drop mutates orders <- item { orders.delete(item) }
 Page { each orders as o { Text "{o.title}" } }`)));
 
-ok('create → POST to collection', js.includes('__write("orders", \'POST\', null, __i)'));
-ok('create appends optimistically (temp id)', js.includes('[...__prev, __i]') && js.includes('if (__i.id == null) __i.id = __id()'));
-ok('create reconciles with the server row', js.includes('.map((__x) => __x.id === __i.id ? __r : __x)'));
-ok('update → PUT by id', js.includes('__write("orders", \'PUT\', __i.id, __i)'));
-ok('update replaces by id', js.includes('.map((__x) => __x.id === __i.id ? __r : __x)'));
-ok('delete → DELETE by id', js.includes('__write("orders", \'DELETE\', __i.id, null)'));
-ok('delete drops by id (optimistic)', js.includes('.filter((__x) => __x.id !== __i.id)'));
-ok('reverts to the snapshot on failure', js.includes('data: __prev'));
+ok('create → POST through __crud', js.includes('await __crud("orders", \'POST\', item,'));
+ok('update → PUT through __crud', js.includes('await __crud("orders", \'PUT\', item,'));
+ok('delete → DELETE through __crud', js.includes('await __crud("orders", \'DELETE\', item,'));
+ok('__crud reads and writes the query .data', js.includes('() => orders.get().data, (__d) => orders.set({ ...orders.get(), data: __d })'));
+ok('__crud helper emitted', js.includes('function __crud(name, method, item, get, set)'));
 ok('write failure captured to action .error', js.includes('__error_buy.set(String(__e))'));
 ok('__write helper emitted', js.includes('function __write(name, method, id, body)'));
 ok('__write JSON-encodes the body', js.includes('init.body = JSON.stringify(body)'));
 ok('__write appends /:id', js.includes('encodeURIComponent(id)'));
 ok('__write throws on !ok', js.includes("if (!r.ok) return r.json().catch(() => null).then((j) => {") && js.includes("throw new Error('HTTP ' + r.status + why)"));
 ok('actions are generated', js.includes('function buy(item)') && js.includes('function drop(item)'));
+
+// The emitted __crud, run for real against a fake server that answers late. The bug it exists for: a
+// switch tapped three times jumped back when the first, older reply landed on top of the newest tap.
+const crudSrc = js.slice(js.indexOf('const __book = {};'), js.indexOf('function __refetch('));
+const runCrud = async (script) => {
+  const sent = []; const waiting = [];
+  const fakeWrite = (name, method, id, body) => new Promise((res, rej) => { sent.push({ method, id, body }); waiting.push({ res, rej, method, body }); });
+  let seq = 0; const fakeId = () => 'tmp-' + (++seq);
+  const make = new Function('__write', '__id', crudSrc + '; return __crud;');
+  const crud = make(fakeWrite, fakeId);
+  let rows = [];
+  const list = { get: () => rows, set: (d) => { rows = d; } };
+  const tick = () => new Promise((r) => setTimeout(r, 0));
+  const answer = async (n, row) => { await tick(); waiting[n].res(row); await tick(); };
+  const fail = async (n) => { await tick(); waiting[n].rej(new Error('HTTP 500')); await tick(); };
+  await script({ crud: (m, item) => crud('rows', m, item, list.get, list.set).catch(() => {}), rows: () => rows, sent, answer, fail });
+};
+await runCrud(async ({ crud, rows, sent, answer }) => {
+  crud('POST', { kind: 'hours', active: false });
+  ok('crud: create shows at once', rows().length === 1 && rows()[0].active === false);
+  crud('PUT', { ...rows()[0], active: true });
+  ok('crud: a tap during the create shows at once', rows()[0].active === true);
+  crud('PUT', { ...rows()[0], active: false });
+  ok('crud: a third tap shows at once', rows()[0].active === false);
+  await new Promise((r) => setTimeout(r, 0));
+  ok('crud: the PUTs wait for the create (one request in flight)', sent.length === 1);
+  await answer(0, { id: 'srv-1', kind: 'hours', active: false });
+  ok('crud: the old create reply does not overwrite the newest tap', rows()[0].active === false && rows().length === 1);
+  ok('crud: the queued PUT goes to the server id', sent.length === 2 && sent[1].method === 'PUT' && sent[1].id === 'srv-1' && sent[1].body.id === 'srv-1');
+  ok('crud: queued taps coalesce into ONE PUT carrying the last value', sent.length === 2 && sent[1].body.active === false);
+  await answer(1, { id: 'srv-1', kind: 'hours', active: false });
+  ok('crud: the latest reply settles the row (server id)', rows().length === 1 && rows()[0].id === 'srv-1' && rows()[0].active === false);
+});
+await runCrud(async ({ crud, rows, sent, answer }) => {
+  crud('POST', { id: 'b', kind: 'x', title: 'old', on: false });
+  await answer(0, { id: 'b', kind: 'x', title: 'old', on: false });
+  crud('PUT', { id: 'b', on: true });
+  await new Promise((r) => setTimeout(r, 0));
+  crud('PUT', { id: 'b', title: 'new' });
+  crud('PUT', { id: 'b', on: false });
+  await new Promise((r) => setTimeout(r, 0));
+  ok('crud: an in-flight PUT is not merged into', sent.length === 2 && sent[1].body.on === true);
+  await answer(1, { id: 'b', kind: 'x', title: 'old', on: true });
+  ok('crud: an older PUT reply does not overwrite the newest tap', rows()[0].on === false && rows()[0].title === 'new');
+  ok('crud: coalesced PUT keeps every field of the skipped ones', sent.length === 3 && sent[2].body.title === 'new' && sent[2].body.on === false);
+  await answer(2, { id: 'b', kind: 'x', title: 'new', on: false });
+  ok('crud: settles on the server row', rows()[0].title === 'new' && rows()[0].on === false);
+});
+await runCrud(async ({ crud, rows }) => {
+  crud('POST', { id: 'r1', kind: 'hours', title: 'hours', active: true });
+  crud('PUT', { id: 'r1', active: false });
+  ok('crud: a partial update keeps the fields it did not send', rows()[0].kind === 'hours' && rows()[0].title === 'hours' && rows()[0].active === false);
+});
+await runCrud(async ({ crud, rows, fail }) => {
+  crud('POST', { kind: 'a' });
+  await fail(0);
+  ok('crud: a failed create removes its row', rows().length === 0);
+});
+await runCrud(async ({ crud, rows, answer, fail }) => {
+  crud('POST', { kind: 'a', on: false });
+  await answer(0, { id: 's', kind: 'a', on: false });
+  crud('PUT', { ...rows()[0], on: true });
+  await fail(1);
+  ok('crud: a failed latest PUT restores that row', rows()[0].on === false);
+  crud('DELETE', rows()[0]);
+  ok('crud: delete drops at once', rows().length === 0);
+  await fail(2);
+  ok('crud: a failed delete puts the row back', rows().length === 1 && rows()[0].id === 's');
+});
 
 // write status: an action that writes is async and exposes reactive .pending / .error
 const sjs = compileModule(toDoc(parse(`screen s
@@ -42,7 +108,7 @@ Page { when buy.pending { Text "Saving" } when buy.error { Text "{buy.error}" } 
 ok('write action is async', sjs.includes('function buy(item) { return untrack(async () =>'));
 // An action never subscribes the effect that calls it (an effect calling notice.error re-ran itself for ever).
 ok('actions run untracked (and untrack is imported)', sjs.includes('untrack') && /import \{[^}]*\buntrack\b/.test(sjs));
-ok('write is awaited', sjs.includes('await __write("orders", \'POST\', null, __i)'));
+ok('write is awaited', sjs.includes('await __crud("orders", \'POST\', item,'));
 ok('.pending / .error signals declared', sjs.includes('const __pending_buy = signal(false)') && sjs.includes('const __error_buy = signal(null)'));
 ok('pending toggles around the write', sjs.includes('__pending_buy.set(true)') && sjs.includes('__pending_buy.set(false)'));
 ok('failure captured to .error', sjs.includes('__error_buy.set(String(__e))'));
@@ -172,7 +238,7 @@ ok('query row: reconciles with the server row', rowEdit.includes('__r && __r.id 
 ok('query row: reverts on failure', rowEdit.includes('data: __prev'));
 ok('query row: __write prelude included', rowEdit.includes('function __write(name, method, id, body)'));
 // a non-text input (Checkbox) over the query row must NOT get a text write path — it stays read-only.
-ok('query row: Checkbox stays read-only (only the 2 text inputs PUT)', (rowEdit.match(/'PUT'/g) || []).length === 2);
+ok('query row: Checkbox stays read-only (only the 2 text inputs PUT)', (rowEdit.match(/__write\("msgs", 'PUT'/g) || []).length === 2);
 
 // A SETTABLE local list keeps its old inline patch (no __write, no change listener) — unchanged behavior.
 const localEdit = compileModule(toDoc(parse(`screen s

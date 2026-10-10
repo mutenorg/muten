@@ -8,6 +8,9 @@ import { JS_BINOP } from '#engine/compile/helpers.js';
 import { listElementFields, type RefFacts } from '#engine/ir/refs.js';
 import type { CompileCtx, Expr, Stmt, Scope, Value, ValueObject } from '#engine/shared/types.js';
 
+// the HTTP verb each server write sends (read by the runtime's __crud)
+const CRUD_METHOD: ReadonlyMap<StOp, string> = new Map([[StOp.Create, 'POST'], [StOp.Update, 'PUT'], [StOp.Delete, 'DELETE']]);
+
 export class Logic {
   constructor(private readonly ctx: CompileCtx) {}
 
@@ -303,9 +306,7 @@ export class Logic {
         const name = JSON.stringify(st.target);
         const value = this.compileExpr(st.arg, scope);
         if (isAsync) { // optimistic: apply now (instant UI), reconcile on success, revert on failure
-          if (st.op === StOp.Create) out.push(`{ const __i = { ...${value} }; if (__i.id == null) __i.id = __id(); const __prev = ${cur}; ${set(`[...__prev, __i]`)}; try { const __r = await __write(${name}, 'POST', null, __i); ${set(`${cur}.map((__x) => __x.id === __i.id ? __r : __x)`)}; } catch (__e) { ${set('__prev')}; throw __e; } }`);
-          else if (st.op === StOp.Update) out.push(`{ const __i = ${value}; const __prev = ${cur}; ${set(`__prev.map((__x) => __x.id === __i.id ? __i : __x)`)}; try { const __r = await __write(${name}, 'PUT', __i.id, __i); ${set(`${cur}.map((__x) => __x.id === __i.id ? __r : __x)`)}; } catch (__e) { ${set('__prev')}; throw __e; } }`);
-          else out.push(`{ const __i = ${value}; const __prev = ${cur}; ${set(`__prev.filter((__x) => __x.id !== __i.id)`)}; try { await __write(${name}, 'DELETE', __i.id, null); } catch (__e) { ${set('__prev')}; throw __e; } }`);
+          out.push(`await __crud(${name}, '${CRUD_METHOD.get(st.op) ?? ''}', ${value}, () => ${cur}, (__d) => ${set('__d')});`);
         } else { // fire-and-forget (e.g. inside a .store effect): reflect on resolve, set error on failure
           if (st.op === StOp.Create) out.push(`{ const __i = ${value}; __write(${name}, 'POST', null, __i).then((__r) => ${set(`[...${cur}, __r]`)})${err}; }`);
           else if (st.op === StOp.Update) out.push(`{ const __i = ${value}; __write(${name}, 'PUT', __i.id, __i).then((__r) => ${set(`${cur}.map((__x) => __x.id === __i.id ? __r : __x)`)})${err}; }`);

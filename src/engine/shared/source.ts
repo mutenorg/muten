@@ -11,6 +11,7 @@ export interface SourceRequest {
   headers: { [k: string]: string };
   body: string | null;             // JSON-serialized request body (POST/PUT/PATCH), null otherwise
   at: string | null;               // JSON path to the array within the response (e.g. "data")
+  wait: boolean;                   // `wait: true`: no load on its own — the query waits for its first refetch (its params)
 }
 
 // Normalize a raw source descriptor (URL string or request object) into a complete request,
@@ -38,10 +39,10 @@ export function sourceRequest(src: Value, api: Value = {}): SourceRequest {
   const headers: { [k: string]: string } = {};
   const collect = (h: Value | undefined): void => { for (const [k, v] of Object.entries(obj(h))) if (typeof v === 'string') headers[k] = v; };
   collect(client.headers);                                            // client defaults first
-  if (typeof src === 'string') return { url: join(src), method: 'GET', headers, body: null, at: null };
+  if (typeof src === 'string') return { url: join(src), method: 'GET', headers, body: null, at: null, wait: false };
   collect(s.headers);                                                 // per-source headers override last
   const hasBody = s.body !== undefined && s.body !== null;
-  return { url: join(str(s.url)), method: (str(s.method) || 'GET').toUpperCase(), headers, body: hasBody ? JSON.stringify(s.body) : null, at: str(s.at) || null };
+  return { url: join(str(s.url)), method: (str(s.method) || 'GET').toUpperCase(), headers, body: hasBody ? JSON.stringify(s.body) : null, at: str(s.at) || null, wait: s.wait === true };
 }
 
 // Pick the row array from a fetched JSON response: walk the dotted `at` path (e.g. "data.posts" for

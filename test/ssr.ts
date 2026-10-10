@@ -34,7 +34,8 @@ ok('containers + classes', ssr(`screen c\nPage class("p-6") { Title "T" }`).incl
 ok('text is escaped', ssr(`screen c\nstate { x = "<b>hi</b>" : text }\nPage { Text "{x}" }`).includes('&lt;b&gt;'));
 
 // a source descriptor → a complete request (the single definition the build and runtime share)
-ok('bare URL → GET request', JSON.stringify(sourceRequest('http://x')) === '{"url":"http://x","method":"GET","headers":{},"body":null,"at":null}');
+ok('bare URL → GET request', JSON.stringify(sourceRequest('http://x')) === '{"url":"http://x","method":"GET","headers":{},"body":null,"at":null,"wait":false}');
+ok('`wait: true` is carried', sourceRequest({ url: '/pro', wait: true }).wait === true && sourceRequest({ url: '/pro' }).wait === false);
 const req = sourceRequest({ url: 'http://x', method: 'post', headers: { Authorization: 'Bearer t' }, body: { a: 1 }, at: 'data' });
 ok('full request: method/headers/body/at', req.method === 'POST' && req.headers.Authorization === 'Bearer t' && req.body === '{"a":1}' && req.at === 'data');
 ok('sourceRows picks json[at]', JSON.stringify(sourceRows({ data: [{ x: 1 }] }, 'data')) === '[{"x":1}]');

@@ -2,7 +2,7 @@
 // Kept out of compile.ts so that file stays focused on the codegen walk. Consumed by compile.ts and logic.ts.
 
 import { Nt, BOp, Fk } from '#engine/shared/vocab.js';
-import type { Entity, EditableField, ArgValue } from '#engine/shared/types.js';
+import type { Entity, EditableField, ArgValue, FlatNode } from '#engine/shared/types.js';
 
 // Custom input value: @state -> snapshot of the signal; otherwise the JSON literal.
 export const customValue = (v: ArgValue): string =>
@@ -65,4 +65,21 @@ export function editableFields(entity: Entity): EditableField[] {
     else fields.push({ name, kind: Fk.Text });
   }
   return fields;
+}
+
+// the control-flow nodes a Row can hold its cells through (`Row head { each roles as r { Cell … } }`)
+const CELL_WRAPPERS = new Set<string>([Nt.Each, Nt.When]);
+
+/** Cell-ids under a header row (`Row head`), directly or through each/when: they render as <th>, not <td>. */
+export function headCellIds(nodes: { [id: string]: FlatNode }): Set<string> {
+  const heads = new Set<string>();
+  const visit = (ids: string[]): void => {
+    for (const id of ids) {
+      const node = nodes[id];
+      if (node.type === Nt.Cell) heads.add(id);
+      else if (CELL_WRAPPERS.has(node.type)) visit(node.children || []);
+    }
+  };
+  for (const id of Object.keys(nodes)) if (nodes[id].type === Nt.Row && nodes[id].props?.head) visit(nodes[id].children || []);
+  return heads;
 }

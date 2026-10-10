@@ -50,7 +50,7 @@ function printStringProp(v: StringPropValue): string {
   return printInterp(v);
 }
 
-const printArgValue = (v: ArgValue): string => typeof v === 'number' ? String(v) : typeof v === 'string' ? v : '$lit' in v ? JSON.stringify(v.$lit) : '$' + v.$param;
+const printArgValue = (v: ArgValue): string => typeof v === 'number' || typeof v === 'boolean' ? String(v) : typeof v === 'string' ? v : '$lit' in v ? JSON.stringify(v.$lit) : '$' + v.$param;
 const printArgMap = (m: ArgMap): string => Object.entries(m).map(([k, v]) => `${k}: ${printArgValue(v)}`).join(', ');
 const printClass = (c: string | ClassCond | ClassInterp): string =>
   typeof c === 'string' ? (isIdent(c) ? c : JSON.stringify(c))

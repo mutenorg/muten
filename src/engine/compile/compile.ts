@@ -15,7 +15,7 @@
 // reactive. A page with no reactivity compiles to plain HTML with zero runtime (Astro-like).
 
 import { Nt, Ek, Fmt, Fk, DATA_PREFIX } from '#engine/shared/vocab.js';
-import { CONTAINERS, parseClause, editableFields } from '#engine/compile/helpers.js';
+import { CONTAINERS, parseClause, editableFields, headCellIds } from '#engine/compile/helpers.js';
 import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, emitPatch } from '#engine/compile/emit.js';
 import { inlineSourceMap } from '#engine/compile/sourcemap.js';
 import { Logic } from '#engine/compile/logic.js';
@@ -241,9 +241,8 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const listItemEach = new Set<string>();
   for (const lid of Object.keys(nodes)) if (nodes[lid].type === Nt.List) for (const cid of nodes[lid].children || []) if (nodes[cid].type === Nt.Each) listItemEach.add(cid);
 
-  // Cell-ids whose parent Row is a header row (`Row head`): they render as <th> instead of <td>.
-  const headCells = new Set<string>();
-  for (const rid of Object.keys(nodes)) if (nodes[rid].type === Nt.Row && nodes[rid].props?.head) for (const cid of nodes[rid].children || []) if (nodes[cid].type === Nt.Cell) headCells.add(cid);
+  // Cell-ids under a header row (`Row head`), also through each/when: they render as <th> instead of <td>.
+  const headCells = headCellIds(nodes);
 
   // Emit one node + its subtree into `parentVar`. Semantic containers share one generic path;
   // every other primitive has a case below. Logic (refs, exprs, actions) is delegated to `logic`.

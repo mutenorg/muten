@@ -486,7 +486,7 @@ export class Parser extends Grammar {
       // `size: text = "sm"`: an optional param. Only a literal: a ref would be read in each caller's scope, not the part's.
       if (this.at(Tk.Punct, Pn.Assign)) {
         const eq = this.next();
-        if (!this.at(Tk.String) && !this.at(Tk.Number)) throw new ParseError(`part "${name}": the default of "${paramName}" must be a literal ("text" or a number).`, this.locOf(eq.pos));
+        if (!this.at(Tk.String) && !this.at(Tk.Number) && !this.atBool()) throw new ParseError(`part "${name}": the default of "${paramName}" must be a literal ("text", a number, true or false).`, this.locOf(eq.pos));
         param.fallback = this.parseArgValue();
       }
       params.push(param);
@@ -746,6 +746,8 @@ export class Parser extends Grammar {
     return args;
   }
 
+  private atBool(): boolean { return this.at(Tk.Ident, Kw.True) || this.at(Tk.Ident, Kw.False); }
+
   private parseArgValue(): ArgValue {
     if (this.at(Tk.String)) {                                // quoted: literal, not a ref (compose keeps it as text)
       const t = this.next();                                 // …but `{…}` must interpolate here as in every other string
@@ -753,6 +755,7 @@ export class Parser extends Grammar {
       return typeof parsed === 'string' ? { $lit: parsed } : { $lit: t.v, $interp: parsed };
     }
     if (this.at(Tk.Number)) return Number(this.next().v);
+    if (this.atBool()) return this.next().v === Kw.True;     // `disabled: true` / `= false`: a literal, never a ref named «true»
     if (this.at(Tk.Ref)) return this.next().v;               // @state
     if (this.at(Tk.Param)) return { $param: this.next().v }; // $param (nested parts)
     return this.parseDotted();                                // bare ref / store action (cart.add) / enum
