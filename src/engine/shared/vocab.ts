@@ -126,12 +126,17 @@ export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle
 
 /** The attribute prefix data(...) keys carry once parsed (they share aria's map). */
 export const DATA_PREFIX = 'data-';
+/** The class of the Stack that wraps a part with several roots (`part P() { when a {…} when b {…} }`), so CSS can name
+ *  that wrapper by class. Matching it by `[class="mu-stack"]` instead made Chrome restyle a whole subtree on every class
+ *  change anywhere in the page (an attribute test on an ancestor followed by `> *`). */
+export const PART_WRAP_CLASS = 'mu-part';
 /** Node modifiers (post-primitive). */
 export enum Mod {
   Bind = 'bind', Checked = 'checked', Submit = 'submit', Where = 'where', Columns = 'columns',
   Class = 'class', Alt = 'alt', Inputs = 'inputs', On = 'on', Aria = 'aria', Style = 'style', Disabled = 'disabled', Options = 'options',
   Data = 'data',   // data(slot: "card", state: open) — `data-*` attributes for CSS hooks (component libraries style by them); rides aria()'s machinery
   Group = 'group',   // Details group("faq") — siblings sharing a group open one at a time (native <details name>)
+  Eager = 'eager',   // Image eager — load it now (the cover, the first thing seen); every other Image loads as it nears the screen
   Id = 'id',   // id("features") — a stable DOM id; the target an in-page `Link -> "#features"` anchor scrolls to
   Min = 'min', Max = 'max', Step = 'step',   // Number/Range numeric bounds + step (each takes one number expression)
   Draggable = 'draggable', Droptarget = 'droptarget',   // drag pack: mark an element draggable (carries an id) + a drop zone (fires on(drop: action(id, group)))

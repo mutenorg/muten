@@ -715,6 +715,8 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         if (p.id) lines.push(`el_${id}.id = ${JSON.stringify(p.id)};`); // Image is the one case that skips genDynamics
         genInterpAttr(id, 'src', p.src);
         genInterpAttr(id, 'alt', p.alt ?? ''); // alt required by the manifest; "" = decorative
+        // lazy unless `eager`: a page of 600 photos asks for the few near the screen; decoding never blocks a frame
+        lines.push(p.eager ? `el_${id}.loading = 'eager'; el_${id}.fetchPriority = 'high'; el_${id}.decoding = 'async';` : `el_${id}.loading = 'lazy'; el_${id}.decoding = 'async';`);
         appendEl(id, parentVar);
         break;
       }
@@ -799,7 +801,11 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`onCleanup(() => { for (const __e of map_${id}.values()) __e.dispose(); map_${id}.clear(); });`);
         lines.push(`let order_${id} = [];`);
         lines.push(`effect(() => {`);
-        lines.push(`  const __l = ${listJS}; const __rows = (Array.isArray(__l) ? __l : [])${filterJS ? `.filter((${p.as}) => ${filterJS})` : ''}${takeJS ? `.slice(0, ${takeJS})` : ''};`);   // fail-closed: a non-array never crashes the loop (renders empty)
+        // `where` sees the index var too (`each xs as x, i where i >= from`): there it is the row's place in the list
+        // BEFORE the filter (a plain number), the only position a filter can ask about. The oracle already accepted
+        // `i` in the where while the filter's arrow never declared it, so it threw «i is not defined» at runtime.
+        const filterArgs = p.index ? `${p.as}, ${p.index}` : p.as;
+        lines.push(`  const __l = ${listJS}; const __rows = (Array.isArray(__l) ? __l : [])${filterJS ? `.filter((${filterArgs}) => ${filterJS})` : ''}${takeJS ? `.slice(0, ${takeJS})` : ''};`);   // fail-closed: a non-array never crashes the loop (renders empty)
         lines.push(`  const __seen = new Set(); const __next = [];`);
         lines.push(`  for (const __row of __rows) {`);
         lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
@@ -829,7 +835,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         const inputVal = (v: ArgValue): string =>
           typeof v === 'number' ? String(v)
             : typeof v === 'string' ? logic.resolveRef(v.startsWith('@') ? v.slice(1) : v, pageScope)
-              : v && typeof v === 'object' && '$lit' in v ? JSON.stringify(v.$lit)
+              : v && typeof v === 'object' && '$lit' in v ? (v.$interp ? `(${interpConcat(v.$interp)})` : JSON.stringify(v.$lit)) // a part passing `unit: "{mark}"` on to a Custom: the text, live, never the raw `{mark}`
                 : v && typeof v === 'object' && '$param' in v ? logic.resolveRef(v.$param, pageScope)
                   : JSON.stringify(v);
         const ins = Object.entries(p.inputs || {}).map(([k, v]) => `${JSON.stringify(k)}: ${inputVal(v)}`).join(', ');
@@ -926,7 +932,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Text: return `<p${cls('text')}>${escHtml(strOf(p.value))}</p>`;
       case Nt.Span: return `<span${cls('span')}>${escHtml(strOf(p.value))}</span>`;
       case Nt.Title: { const lvl = p.level || 'h1'; return `<${lvl}${cls('title')}>${escHtml(strOf(p.value))}</${lvl}>`; }
-      case Nt.Image: return `<img${cls('image')} src="${escAttr(strOf(p.src))}" alt="${escAttr(strOf(p.alt))}">`;
+      case Nt.Image: return `<img${cls('image')} src="${escAttr(strOf(p.src))}" alt="${escAttr(strOf(p.alt))}"${p.eager ? ' loading="eager" fetchpriority="high"' : ' loading="lazy"'} decoding="async">`;
       case Nt.Icon: return `<span${cls('icon')}>${opts.iconResolver ? opts.iconResolver(strOf(p.name)) : ''}</span>`;
       case Nt.Video: return `<video${cls('video')} src="${escAttr(strOf(p.src))}"${(p.flags || []).map((f) => ` ${f}`).join('')}></video>`;
       case Nt.Link: return `<a${cls('link')} href="${escAttr(strOf(p.to) || '/')}">${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</a>`;

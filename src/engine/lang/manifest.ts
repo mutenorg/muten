@@ -89,7 +89,7 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
   Image: {
     string: 'src', props: { src: 'text', alt: 'text' }, children: false, interp: true,
-    doc: 'Image (<img>). `alt` is required (a11y/SEO): `Image "{p.image}" alt "{p.title}"`. Use alt "" for decorative images.',
+    doc: 'Image (<img>). `alt` is required (a11y/SEO): `Image "{p.image}" alt "{p.title}"`. Use alt "" for decorative images. It loads as it nears the screen (lazy) and decodes off the main thread; add `eager` for what is seen first (a cover).',
     snippet: 'Image "{${1:item.image}}" alt "${2:description}"',
   },
   Icon: {
@@ -232,7 +232,7 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
 };
 
-export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'data', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group'];
+export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'data', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group', 'eager'];
 export const MODIFIER_DOCS = {
   bind: 'Two-way bind to a @state, e.g. `bind @search`.',
   submit: 'Action to run on form submit, e.g. `submit createUser`.',
@@ -253,6 +253,7 @@ export const MODIFIER_DOCS = {
   min: 'Minimum value of a Number/Range input: `Range bind(v) min(0)`. A number or a state (reactive).',
   max: 'Maximum value of a Number/Range input: `Range bind(v) max(100)`. A number or a state (reactive).',
   step: 'Step increment of a Number/Range input: `Range bind(v) step(5)`. A number or a state.',
+  eager: 'Load an Image at once, at high priority: `Image "{shop.cover}" alt "" eager`. Every other Image loads as it nears the screen (loading=lazy, decoding=async), so a list of 600 photos asks for the few on screen. Use it only for what is seen first (a hero, a cover, the logo).',
 };
 
 // Built-in formatting functions: callable like a `use`'d function but ALWAYS available (no import). The bounded

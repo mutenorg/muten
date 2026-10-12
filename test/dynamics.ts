@@ -72,6 +72,33 @@ ok('each-index: per-row index signal created', ixJs.includes('const __ix = signa
 ok('each-index: passed to buildItem + stored on the entry', ixJs.includes(', __ix)') && ixJs.includes('idx: __ix'));
 ok('each-index: reindexed by position each pass', ixJs.includes('__next[__i].idx.set(__i)'));
 ok('each-index: `i` read reactively (i.get())', ixJs.includes('i.get()'));
+// `where` reads the index var: the row's place in the list BEFORE the filter, as a plain number (a window of rows,
+// `where i >= from and i < to`). The filter's arrow must declare it: the oracle accepted it and the page threw
+// «i is not defined» at runtime.
+const ixWhereJs = compileModule(toDoc(parse(`screen s
+entity T { name text }
+state { xs = query xs : list<T>  from = 1 : number  to = 3 : number }
+sources { xs: { url: "/x" } }
+Page { each xs as it, i where i >= from and i < to { Text "{i}. {it.name}" } }`)));
+ok('each-index in where: the filter arrow declares the index', ixWhereJs.includes('.filter((it, i) =>'));
+const whereLine = ixWhereJs.split('\n').find((l) => l.includes('.filter((it, i) =>')) || '';
+ok('each-index in where: read as a plain number there (not i.get())', /i >= /.test(whereLine) && !whereLine.includes('i.get()'));
+// and it really filters by position: run the compiled filter on a list
+const arrow = whereLine.match(/\.filter\(\((it, i)\) => (.*?)\)(\.slice|;)/);
+ok('each-index in where: the compiled filter keeps rows 1 and 2 of four', !!arrow && (() => { try { const src = arrow[2].replace(/\bfrom\.get\(\)|\bfrom\b(?!\s*:)/g, '1').replace(/\bto\.get\(\)|\bto\b(?!\s*:)/g, '3'); const f = new Function('it', 'i', `return (${src});`); return ['a', 'b', 'c', 'd'].filter((it, i) => f(it, i)).join('') === 'bc'; } catch { return false; } })());
+// Image loads lazily unless `eager`; both decode off the main thread. A static page is one HTML string, a reactive one
+// builds the <img> in JS: both carry the same attributes.
+const imgStatic = compileModule(toDoc(parse(`screen s
+Page { Image "/a.png" alt "a"  Image "/cover.png" alt "" eager }`)));
+ok('Image (static page): lazy and async by default', imgStatic.includes('alt=\\"a\\" loading=\\"lazy\\" decoding=\\"async\\"'));
+ok('Image eager (static page): at once, high priority', imgStatic.includes('loading=\\"eager\\" fetchpriority=\\"high\\"'));
+const imgLive = compileModule(toDoc(parse(`screen s
+state { pic = "/a.png" : text  cover = "/c.png" : text }
+Page { Image "{pic}" alt "a"  Image "{cover}" alt "" eager }`)));
+ok('Image (reactive page): lazy and async by default', imgLive.includes(".loading = 'lazy'; ") && imgLive.includes(".decoding = 'async';"));
+ok('Image eager (reactive page): at once, high priority', imgLive.includes(".loading = 'eager'; ") && imgLive.includes(".fetchPriority = 'high';"));
+ok('eager on a non-Image is flagged by the oracle', validate(toDoc(parse(`screen s
+Page { Text "x" eager }`)), {}).diagnostics.some((d) => d.code === 'eager-target'));
 // no index var → no index machinery at all (zero overhead)
 const noIxJs = compileModule(toDoc(parse(`screen s
 entity T { name text }

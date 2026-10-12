@@ -7,7 +7,7 @@
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { Grammar } from '#engine/lang/grammar.js';
-import { Tk, Pn, Kw, Nt, Mod, StOp, Ek, BOp, nonPrimitiveHint, DATA_PREFIX } from '#engine/shared/vocab.js';
+import { Tk, Pn, Kw, Nt, Mod, StOp, Ek, BOp, nonPrimitiveHint, DATA_PREFIX, PART_WRAP_CLASS } from '#engine/shared/vocab.js';
 import type {
   IR, IRNode, NodeProps, StringPropName, Stmt, IfStmt, Expr, Interp, Value, Level,
   Entity, FieldType, EntityConstraints, FieldConstraint,
@@ -103,6 +103,7 @@ export class Parser extends Grammar {
       [Mod.Draggable, (props: NodeProps) => { props.draggable = this.parseExpr(); }],                 // draggable(item.id) — the id the drop carries
       [Mod.Droptarget, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); const t = this.eat(Tk.String); props.dropGroup = this.parseInterpolation(t.v, t.pos + 1); if (p) this.eat(Tk.Punct, Pn.ParenR); }], // droptarget("group") — the group interpolates, so `droptarget("{row.id}")` makes each row carry its own id (list reorder), while a static `droptarget("done")` is unchanged
       [Mod.Id, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.id = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // id("features") — a STATIC literal, so the oracle can prove every `-> "#features"` lands
+      [Mod.Eager, (props: NodeProps) => { props.eager = true; }], // Image eager — a bare flag: this image loads at once, at high priority (lazy is the default)
       [Mod.Group, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.group = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // Details group("faq") — a STATIC name: the oracle checks it sits on a Details
     ]);
 
@@ -495,8 +496,9 @@ export class Parser extends Grammar {
     this.eat(Tk.Punct, Pn.ParenR);
     const nodes = this.parseChildren();
     ir.parts = ir.parts || {};
-    // One root, or several nodes auto-wrapped in a Stack (a part always expands to a single subtree).
-    const tree = nodes.length === 1 ? nodes[0] : { type: Nt.Stack, props: {}, children: nodes };
+    // One root, or several nodes auto-wrapped in a Stack (a part always expands to a single subtree). The wrapper wears
+    // PART_WRAP_CLASS so a stylesheet can name it (`.mu-part`) instead of guessing it by its bare class attribute.
+    const tree = nodes.length === 1 ? nodes[0] : { type: Nt.Stack, props: { class: [PART_WRAP_CLASS] }, children: nodes };
     // A part takes a single `slot` (the caller's children inline there). >1 would inject the same content twice.
     const slots = (nd: IRNode): number => (nd.type === Nt.Slot ? 1 : 0) + (nd.children || []).reduce((s, c) => s + slots(c), 0);
     if (slots(tree) > 1) throw new ParseError(`part "${name}" has more than one \`slot\` — a part takes a single slot, where the caller's children inline.`, this.locOf(start.pos));

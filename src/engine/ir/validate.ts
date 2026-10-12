@@ -652,6 +652,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     if (props.styleVars) for (const sv of Object.values(props.styleVars)) if (typeof sv !== 'string') for (const pt of sv.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);  // `style(w: "{ref}")` interpolations: an unknown state ref is caught here, not at runtime
     // Page already carries the compiler-emitted id `mu-main` (the skip-link target); overriding it silently breaks a11y.
     if (props.id && n.type === Nt.Page) D.push(diag('id-target', `Page already owns the id "mu-main" (the skip-link target) — put id() on a Section/Stack inside it`, { loc: n.loc }));
+    if (props.eager && n.type !== Nt.Image) D.push(diag('eager-target', `eager only loads an Image at once — ${n.type} has no image to load`, { loc: n.loc }));
     if (props.group && n.type !== Nt.Details) D.push(diag('group-target', `group() only groups a Details (one open at a time) — ${n.type} has nothing to open`, { loc: n.loc }));
     const interps: StringPropValue[] = [];
     if ((n.type === Nt.Text || n.type === Nt.Title || n.type === Nt.Span) && props.value) interps.push(props.value);

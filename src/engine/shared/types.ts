@@ -251,6 +251,7 @@ export interface NodeProps {
   flags?: string[];         // Video boolean attrs: controls / autoplay / loop / muted / playsinline
   ordered?: boolean;        // List `ordered` -> <ol> instead of <ul>
   open?: boolean;           // Details `open` -> <details open> (expanded by default)
+  eager?: boolean;          // Image eager -> loading=eager + fetchPriority=high; without it an Image is loading=lazy (it loads as it nears the screen)
   group?: string;           // Details group("faq") -> <details name="faq">: the browser keeps one of the group open
   head?: boolean;           // Row `head` -> a header row (its cells become <th>, grouped into <thead>)
   summary?: StringPropValue; // Details summary text -> <summary>

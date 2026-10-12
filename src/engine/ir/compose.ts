@@ -150,12 +150,26 @@ function subProps(props: NodeProps, args: ArgMap): NodeProps {
     out.bind = refText(props.bind, args);
   }
   if (props.to !== undefined) out.to = typeof props.to === 'string' ? props.to : subInterp(props.to, args);
+  if (props.id !== undefined) out.id = subId(props.id, args);
   if (props.inputs !== undefined) out.inputs = subInputs(props.inputs, args);
   if (props.on !== undefined) out.on = subOn(props.on, args);
   if (props.styleVars !== undefined) out.styleVars = Object.fromEntries(Object.entries(props.styleVars).map(([k, v]) => [k, typeof v === 'string' ? v : subInterp(v, args)])); // `style(w: "{$pct}")` in a part: sub the param
   if (props.aria !== undefined) out.aria = Object.fromEntries(Object.entries(props.aria).map(([k, e]) => [k, subExpr(e, args)]));                                          // `aria(label: $lbl)` in a part: sub the param
   for (const key of EXPR_PROPS) { const expr = props[key]; if (expr !== undefined) out[key] = subExpr(expr, args); }
   return out;
+}
+
+// `id("{$anchor}")` in a part: the id stays a STATIC literal (the oracle proves every `-> "#anchor"` lands), so the param
+// is replaced by the quoted text the call passed. Left alone, every section came out with the id «{$anchor}» and the
+// table of contents of a document pointed nowhere.
+const ID_PARAM = /^\{\$(\w+)\}$/;
+function subId(id: string, args: ArgMap): string {
+  const match = ID_PARAM.exec(id);
+  if (!match) return id;
+  const value = args[match[1]];
+  if (typeof value === 'number') return String(value);
+  if (typeof value === 'object' && '$lit' in value && !value.$interp) return value.$lit;
+  throw new Error(`id("{$${match[1]}}") needs a quoted text: pass ${match[1]}: "…" (an id is static, so the anchors that point to it can be checked)`);
 }
 
 // a positional string prop: plain text passes through, { $param } resolves to the arg, interpolation recurses.

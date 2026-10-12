@@ -1,6 +1,8 @@
 // Parts: nesting (a part uses another) + param propagation through nesting.
 import { parse } from '#engine/lang/parse.js';
 import { compose } from '#engine/ir/compose.js';
+import { toDoc } from '#engine/ir/flatten.js';
+import { compile } from '#engine/compile/compile.js';
 
 let fails = 0;
 const check = (label, ok, extra = '') => {
@@ -150,6 +152,37 @@ console.log(fails ? `\n${fails} FAILURE(S)` : '\nALL OK');
   const text = JSON.stringify(node);
   check('checked($on) inside a part becomes the caller\'s ref', text.includes('"checked":{"kind":"ref","name":"ok"}') || (text.includes('"checked"') && !text.includes('$on')), text.slice(0, 400));
   check('min($lo) inside a part takes the default', !text.includes('$lo'), text.slice(0, 400));
+}
+
+// A part passing an interpolated arg on to a Custom (`unit: "{mark}"`) sends the text, live, never the raw `{mark}`.
+{
+  const lib = parse('part Chart2(unit: text = "") { Custom Chart2 inputs(unit: $unit) }');
+  const tree = compose(parse('screen c\nstate { mark = "USD" : text }\nPage { Chart2(unit: "{mark}") }').tree, { ...lib.parts }).tree;
+  const js = compile(toDoc({ ...parse('screen c\nstate { mark = "USD" : text }\nPage { Text "x" }'), tree }), {});
+  check('an interpolated arg reaches the Custom as an expression', !js.includes('"{mark}"') && js.includes('mark'), js.match(/__custom_Chart2\([^)]*\)/)?.[0] ?? '');
+}
+
+// id("{$anchor}") inside a part takes the quoted text the call passed (it stays static, so anchors can be checked); a
+// dynamic one is refused instead of shipping the literal «{$anchor}» as the id.
+{
+  const lib = parse('part Sec(anchor: text) { Section id("{$anchor}") { slot } }');
+  const node = compose(parse('screen s\nPage { Sec(anchor: "what") { Text "x" } }').tree, { ...lib.parts }).tree.children?.[0];
+  check('id("{$anchor}") becomes the passed text', node?.props?.id === 'what', JSON.stringify(node?.props));
+  let threw = '';
+  try { compose(parse('screen s\nstate { a = "x" : text }\nPage { Sec(anchor: "{a}") { Text "x" } }').tree, { ...lib.parts }); } catch (e) { threw = String(e.message); }
+  check('a dynamic id is refused with the fix', threw.includes('needs a quoted text'), threw);
+}
+
+// a part with SEVERAL roots is wrapped in a Stack that a stylesheet can name by class (`.mu-part`): matching it by
+// `[class="mu-stack"]` made every class change in the page restyle whole subtrees. One root stays unwrapped.
+const multi = parse('part Two() {\n  when a { Text "x" }\n  when b { Text "y" }\n}\npart One() { Stack { Text "z" } }');
+check('multi-root part → Stack wearing mu-part', multi.parts.Two.tree.type === 'Stack' && (multi.parts.Two.tree.props.class || []).includes('mu-part'), JSON.stringify(multi.parts.Two.tree.props));
+check('single-root part keeps its own root, no mu-part', !(multi.parts.One.tree.props?.class || []).includes('mu-part'), JSON.stringify(multi.parts.One.tree.props));
+{
+  const page2 = parse('screen t\nstate { a = true : bool  b = false : bool }\nPage { Two() }');
+  const { tree: tree2 } = compose(page2.tree, multi.parts);
+  const js = compile(toDoc({ ...page2, tree: tree2 }), {});
+  check('the compiled wrapper carries the class', /mu-part/.test(typeof js === 'string' ? js : JSON.stringify(js)), '');
 }
 
 process.exit(fails ? 1 : 0);

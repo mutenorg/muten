@@ -3,6 +3,9 @@
 // module (imported per-use, tree-shaken); the standalone HTML format inlines an equivalent. No dependencies.
 
 import type { Signal, EffectRun, PageModule, RouteDef, LayoutDefs, PageInstance, NodeRegistry } from '#engine/shared/types.js';
+// the way out of a block (`__leave`): its own module, re-exported for the compiled pages
+import { __leave } from './runtime-leave.js';
+export { __leave };
 
 // The HMR handle lives on the mounted page element (`el.__muten`); the dev client reaches it + the runtime via window.
 declare global {
@@ -121,61 +124,6 @@ function __lisSet(arr: number[]): Set<number> {
   let u = result.length, v = result[u - 1];
   while (u-- > 0) { result[u] = v; v = p[v]; }
   return new Set(result);
-}
-
-// Take out every node between two block markers. An element the app gives an animation on `.mu-leave` stays
-// until that animation ends, so a hidden block can fade or collapse instead of vanishing; `--mu-h` carries its
-// height for a collapse. Anything without such an animation goes at once, exactly as before.
-function isHtml(node: ChildNode): node is HTMLElement {
-  return typeof HTMLElement !== 'undefined' && node instanceof HTMLElement;
-}
-
-// THE LEAVES OF ONE UPDATE GO TOGETHER. Each asks the page for heights and animations, and every question asked
-// after another block's class changed makes the browser recompute all styles again: an editor opening with
-// thirteen blocks swapped paid twenty-six full recalculations. Queued to the end of the update, they cost two.
-// The nodes are listed now (the markers are about to receive the new content) and stay in place until then.
-let leaving: ChildNode[] | null = null;
-
-function isCssAnimation(animation: Animation): boolean {
-  return typeof CSSAnimation !== 'undefined' && animation instanceof CSSAnimation;
-}
-
-export function __leave(start: Node, end: Node): void {
-  const nodes: ChildNode[] = [];
-  for (let node = start.nextSibling; node && node !== end; node = node.nextSibling) nodes.push(node);
-  if (!leaving) {
-    leaving = [];
-    queueMicrotask(leaveTogether);
-  }
-  leaving.push(...nodes);
-}
-
-function leaveTogether(): void {
-  const nodes = leaving ?? [];
-  leaving = null;
-  const elements = nodes.filter(isHtml);
-  // Only an animation that STARTS with the leave counts: one already running (a looping shimmer) would never
-  // end, and waiting on it would leave the node on screen for good.
-  const before = new Set(elements.flatMap((element) => element.getAnimations()));
-  // Measure, then mark ALL of them before asking which animate: the CSS can then tell a lone element leaving
-  // from a whole block leaving together (`:has(.x.mu-leave)`), and skip the animation for the latter.
-  const heights = elements.map((element) => element.offsetHeight);
-  elements.forEach((element, index) => {
-    element.style.setProperty('--mu-h', `${heights[index]}px`);
-    element.classList.add('mu-leave');
-  });
-  // Ask every node before removing any: removing one first would change what the others' CSS matches.
-  // And only a CSS ANIMATION the app put on `.mu-leave` holds the node: a transition the class change happens to start
-  // (a button's `scrollbar-color`, an inherited color) is not a way out, and waiting on it left the old button on
-  // screen beside its replacement.
-  const endsOnItsOwn = (animation: Animation): boolean =>
-    isCssAnimation(animation) && !before.has(animation) && animation.effect?.getComputedTiming().iterations !== Infinity;
-  const running = nodes.map((node) => isHtml(node) ? node.getAnimations().filter(endsOnItsOwn) : []);
-  nodes.forEach((node, index) => {
-    const animations = running[index];
-    if (!animations.length) { node.remove(); return; }
-    Promise.all(animations.map((animation) => animation.finished)).then(() => node.remove(), () => node.remove());
-  });
 }
 
 // Reorder `next` (new row entries) under `parent` with the fewest DOM moves; `prev` is the old order.
@@ -323,6 +271,16 @@ interface PlainDrag extends DragBase { mode: 'plain'; over: Element | null; }
 interface SortDrag extends DragBase { mode: 'sort'; container: HTMLElement; placeholder: HTMLElement; onDrop: (id: string, before?: string) => void; seen: Set<HTMLElement>; }
 type Drag = PlainDrag | SortDrag;
 let __dndActive: Drag | null = null;
+// THE GRAB CURSOR lives on a sheet over the page while a drag lasts. Setting it on <body> (inherited) restyled every
+// element of the page twice per drag, at pick-up and at drop (60 ms each on a 3,500-node page; on a phone, for nothing).
+let __dndShield: HTMLElement | null = null;
+function __shieldOn(z: string): void {
+  const sheet = document.createElement('div');
+  sheet.className = 'mu-dnd-shield';
+  sheet.style.cssText = `position:fixed;inset:0;z-index:${Math.max(0, (parseInt(z, 10) || 99999) - 1)};cursor:grabbing;background:transparent;`;
+  document.body.appendChild(sheet); __dndShield = sheet;
+}
+function __shieldOff(): void { if (__dndShield) { __dndShield.remove(); __dndShield = null; } }
 
 // nearest ancestor (incl. el) that is a registered drop zone
 function __zoneOf(el: Element | null): HTMLElement | null {
@@ -457,7 +415,7 @@ function __dndEnd(): void {
   window.removeEventListener('pointerup', __dndEnd);
   const d = __dndActive; __dndActive = null; if (!d) return;
   cancelAnimationFrame(__dndTick); __dndTick = 0;
-  document.body.style.cursor = '';
+  __shieldOff();
   document.documentElement.classList.remove('mu-dnd-on');
   d.overlay.remove();
   d.item.classList.remove('mu-dnd-ghost');
@@ -505,7 +463,7 @@ export function __drag(el: HTMLElement, getId: () => string): void {
       // Keep the clone under the SAME ancestors so scoped CSS still matches (a 1:1 copy of the row).
       (item.parentElement ?? document.body).appendChild(clone);
       item.classList.add('mu-dnd-ghost');
-      document.body.style.cursor = 'grabbing';
+      __shieldOn(z);
       document.documentElement.classList.add('mu-dnd-on');   // a hook for enlarging drop zones while dragging
       // Grab point stays exactly under the cursor — the row hangs from where you took it. The clone is at
       // left:0;top:0 with no transform yet, so its rect gives the containing-block origin (0,0 unless a

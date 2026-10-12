@@ -73,9 +73,10 @@ plainnode  ::= (${alt(PLAIN)}) (sp commonpart)* (ws block)?
 commonpart ::= string | ref | level | modifier
 level      ::= "h" [1-6]
 
-modifier   ::= classmod | bindmod | submitmod | wheremod | columnsmod | optionsmod | chartmod | geomod | numattrmod | strattrmod | altmod | inputsmod | onmod | disabledmod | draggablemod | droptargetmod
+modifier   ::= classmod | bindmod | submitmod | wheremod | columnsmod | optionsmod | chartmod | geomod | numattrmod | strattrmod | altmod | inputsmod | onmod | disabledmod | draggablemod | droptargetmod | eagermod
 numattrmod ::= ("min" | "max" | "step") ws "(" ws expr ws ")"
 disabledmod ::= "disabled" (sp "when" sp expr)?
+eagermod   ::= "eager"
 draggablemod ::= "draggable" ws "(" ws expr ws ")"
 droptargetmod ::= "droptarget" ws "(" ws string ws ")"
 optionsmod ::= "options" ws "(" ws ident (ws "," ws ident)* ws ")"
