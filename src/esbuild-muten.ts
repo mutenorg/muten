@@ -7,9 +7,8 @@
 // artifact, not through esbuild's graph. The TS compiler stays the single source of truth — esbuild moves bytes.
 
 import * as esbuild from 'esbuild';
-import { readFileSync, existsSync, mkdirSync, writeFileSync, cpSync, rmSync, readdirSync, statSync, watch } from 'node:fs';
-import { createServer, type ServerResponse } from 'node:http';
-import { spawn } from 'node:child_process';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, cpSync, rmSync, readdirSync, watch } from 'node:fs';
+import { createServer, type ServerResponse, type IncomingMessage } from 'node:http';
 import { createRequire } from 'node:module';
 import { networkInterfaces } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -29,6 +28,8 @@ import { compileModule, compileStore, compileNodePatch } from '#engine/compile/c
 import { emitTheme } from '#engine/style/tokens.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { makeIconResolver } from './icons.js';
+import { devToken, fileInside, hostAllowed, openInEditor, cspFrom, withCsp, writeSecurityHeaders } from './dev-security.js';
+import { writeAppMap } from './app-map-file.js';
 import { LAYOUT_PREFIX, layoutDoc, layoutLoaders } from './layout-modules.js';
 import { Nt } from '#engine/shared/vocab.js';
 import type { IR, PartDef, ThemeAdapter, Doc } from '#engine/shared/types.js';
@@ -41,9 +42,10 @@ const SHELL = 'virtual:muten/shell';
 const STORE_PREFIX = 'virtual:muten/store/';
 const VNS = 'muten-virtual'; // esbuild namespace for the virtual modules
 
-// The dev server binds EVERY interface (`listen(port)` with no host), so a phone on the same wifi already
-// reaches it — these are the addresses to hand it. HMR follows for free: the client opens EventSource('/_reload'),
-// a same-origin relative path, so it works from whatever host the page was served from. Nothing to configure.
+// The dev server binds LOCALHOST unless asked (`muten dev --host`, or `dev { host "lan" }` in muten.config): a server
+// bound to every interface hands the project to anyone on the same wifi (see devSecurity.ts). With --host, these are
+// the addresses to hand a phone. HMR follows for free: the client opens EventSource('/_reload'),
+// a same-origin relative path, so it works from whatever host the page was served from.
 // Only a top-level page opens it: the stream never closes, Chrome allows six connections per host, and a page
 // showing several dev pages in iframes (a row of store previews) would leave the seventh waiting forever.
 const lanAddresses = (): string[] => Object.values(networkInterfaces())
@@ -350,9 +352,12 @@ export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.P
   };
 }
 
-// `muten bundle` on esbuild: bundle the boot (+ per-route chunks) with source maps, build the CSS separately,
-// then write index.html pointing at the hashed outputs and copy public/.
-export async function bundleEsbuild(root: string, outDir = join(root, 'dist')): Promise<{ outDir: string }> {
+// `muten bundle` on esbuild: bundle the boot (+ per-route chunks), build the CSS separately, then write index.html
+// pointing at the hashed outputs and copy public/. NOTHING ABOUT THE SOURCE SHIPS unless asked: source maps hand anyone
+// the app's whole source, so they come only with `--sourcemap`; and the app graph (app.map.json) is for the AI on this
+// machine, so it is written to .muten/, never into the folder that gets deployed.
+export interface BundleOptions { sourcemap?: boolean }
+export async function bundleEsbuild(root: string, outDir = join(root, 'dist'), options: BundleOptions = {}): Promise<{ outDir: string }> {
   const model = await loadModel(root);
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(join(outDir, 'assets'), { recursive: true });
@@ -361,7 +366,7 @@ export async function bundleEsbuild(root: string, outDir = join(root, 'dist')): 
   try {
     result = await esbuild.build({
       entryPoints: { boot: join(root, 'src', 'app.muten') },
-      bundle: true, format: 'esm', splitting: true, minify: true, sourcemap: true, metafile: true,
+      bundle: true, format: 'esm', splitting: true, minify: true, sourcemap: options.sourcemap === true, metafile: true,
       define: { __MUTEN_DEV__: 'false' }, // prod: DCE the dev-only __muten_rt registry so unused helpers (chart/DnD/arc) tree-shake out
       outdir: outDir, entryNames: 'assets/[name]-[hash]', chunkNames: 'assets/[name]-[hash]',
       assetNames: 'assets/[name]-[hash]', publicPath: '/', logLevel: 'silent',
@@ -394,14 +399,20 @@ export async function bundleEsbuild(root: string, outDir = join(root, 'dist')): 
   let html = readFileSync(join(root, 'index.html'), 'utf8');
   html = html.replace(/<script\s+type="module"\s+src="\/src\/app\.muten"\s*><\/script>/, `<script type="module" src="${jsHref}"></script>`);
   if (cssHref) html = html.replace('</head>', `  <link rel="stylesheet" href="${cssHref}">\n</head>`);
+  // the page's Content-Security-Policy (dev-security.ts): an injected script does not run. muten.config `security { csp }`
+  const policy = cspFrom(readMutenConfig(root).security);
+  if (policy) html = withCsp(html, policy);
+  else if (policy === null && !/http-equiv=["']content-security-policy["']/i.test(html)) console.log('  \x1b[33m!\x1b[0m no Content-Security-Policy: add `security { csp "default" }` to muten.config (or your own policy)');
   writeFileSync(join(outDir, 'index.html'), html);
 
   // copy public/ (favicons, images) to the dist root
   const pub = join(root, 'public');
   if (existsSync(pub)) for (const e of readdirSync(pub)) cpSync(join(pub, e), join(outDir, e), { recursive: true });
+  writeSecurityHeaders(root, outDir);
 
-  // app.map.json: the app graph (routes/stores/parts) — the root an AI reads to know the whole app.
-  writeFileSync(join(outDir, 'app.map.json'), JSON.stringify(await mapApp(root), null, 2));
+  // app.map.json: the app graph (routes/stores/parts), the root an AI reads to know the whole app. It names every route,
+  // guard, store and state field, so it stays on this machine (.muten/), out of the deployed folder.
+  writeAppMap(root, await mapApp(root));
 
   // Per-route ship report: what each route actually ships (gzipped), so "minimal by construction" is visible
   // and accidental bloat is caught. Routes first (their own chunk), then shared chunks (boot/runtime/commons).
@@ -434,7 +445,7 @@ const MIME: { [ext: string]: string } = { '.js': 'text/javascript', '.css': 'tex
 // Injected into the dev page: SSE full-reload + a RUNTIME-error overlay. Today an uncaught error (a throwing
 // Custom, a bad ref) only hits the console and leaves a blank page; this surfaces it like Vite, with the stack
 // (source maps attribute frames to the .muten file). Compile errors use the server-side overlay() instead.
-const DEV_CLIENT = `<script>(function(){function show(m){var d=document.getElementById('__mu_err');if(!d){d=document.createElement('div');d.id='__mu_err';document.body.appendChild(d);}d.style.cssText='position:fixed;inset:0;z-index:99999;background:#1a1a1f;color:#ffb4b4;font:13px/1.6 ui-monospace,monospace;overflow:auto';d.innerHTML='<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten \\u2014 runtime error</div><pre style="padding:24px;white-space:pre-wrap">'+String(m).replace(/[<&]/g,function(c){return c==='<'?'&lt;':'&amp;';})+'</pre>';}
+const devClient = (token: string): string => `<script>window.__MUTEN_DEV_TOKEN=${JSON.stringify(token)};(function(){function show(m){var d=document.getElementById('__mu_err');if(!d){d=document.createElement('div');d.id='__mu_err';document.body.appendChild(d);}d.style.cssText='position:fixed;inset:0;z-index:99999;background:#1a1a1f;color:#ffb4b4;font:13px/1.6 ui-monospace,monospace;overflow:auto';d.innerHTML='<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten \\u2014 runtime error</div><pre style="padding:24px;white-space:pre-wrap">'+String(m).replace(/[<&]/g,function(c){return c==='<'?'&lt;':'&amp;';})+'</pre>';}
 addEventListener('error',function(e){show((e.error&&e.error.stack)||e.message);});
 addEventListener('unhandledrejection',function(e){show('Unhandled promise rejection:\\n'+((e.reason&&e.reason.stack)||e.reason));});
 if(self===top)new EventSource('/_reload').onmessage=function(e){var m;try{m=JSON.parse(e.data)}catch(_){return location.reload()}if(m.type==='css'){var l=document.querySelector('link[href^="/assets/boot.css"]');if(l){var n=l.cloneNode(false);n.setAttribute('href','/assets/boot.css?v='+Date.now());n.onload=function(){l.remove()};l.parentNode.insertBefore(n,l.nextSibling);}return;}if(m.type!=='patch')return location.reload();var rt=window.__muten_rt,pg=window.__muten_page;if(!rt||!pg||window.__muten_screen!==m.screen)return location.reload();try{for(var i=0;i<m.patches.length;i++){var p=m.patches[i],b=eval('('+p.src+')');if(!rt.patchNode(pg,p.id,function(c,par,n){return b(c,n,par,rt)}))return location.reload();}}catch(err){console.error('[muten hmr]',err);location.reload();}};})();</script>`;
@@ -450,7 +461,10 @@ function buildFailureErrors(e: unknown): esbuild.Message[] | null {
 // the project, no `.muten-dev/` folder) + the CSS rebuilt each pass + a tiny static server with SPA fallback +
 // SSE full-reload. On any .muten/.store/theme/muten.config change: refresh the model, rebuild JS + CSS, reload
 // the browser — the same coarse-but-correct HMR the Vite plugin used. Oracle errors surface as an overlay.
-export async function devEsbuild(root: string, port = 5173): Promise<void> {
+export interface DevOptions { port: number; lan: boolean; hosts: string[] }
+export async function devEsbuild(root: string, options: DevOptions = { port: 5173, lan: false, hosts: [] }): Promise<void> {
+  const { port } = options;
+  const token = devToken(); // this run's secret: the page gets it in its dev client, a page on another origin never does
   const model = await loadModel(root);
   const outdir = join(root, '.muten-dev'); // a virtual base for output paths only — write:false, so nothing hits disk
   const ctx = await esbuild.context({
@@ -527,16 +541,32 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
     let html = readFileSync(join(root, 'index.html'), 'utf8');
     html = html.replace(/<script\s+type="module"\s+src="\/src\/app\.muten"\s*><\/script>/, '<script type="module" src="/assets/boot.js"></script>');
     if (cssBytes) html = html.replace('</head>', '  <link rel="stylesheet" href="/assets/boot.css">\n</head>');
-    return html.replace('</body>', `  ${DEV_CLIENT}\n</body>`);
+    return html.replace('</body>', `  ${devClient(token)}\n</body>`);
   };
   const overlay = (): string => `<!doctype html><body style="margin:0;background:#1a1a1f;color:#f5f5f5;font:14px/1.6 ui-monospace,monospace">`
     + `<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten — compile error</div>`
     + `<pre style="padding:24px;white-space:pre-wrap;color:#ffb4b4">${lastError.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</pre>`
     + `<script>new EventSource('/_reload').onmessage=()=>location.reload()</script></body>`;
 
+  // A side effect (open in editor) needs a POST carrying this run's token in a header: a link, an <img> or a form on another
+  // site can send neither, and the browser will not let a script on another origin add the header without asking us first.
+  // THIS MACHINE ONLY: a request that came in through a proxy or tunnel (dev.example.com → localhost) carries its headers,
+  // and one from the wifi carries another address. The page served through a tunnel holds the token too, so the token
+  // alone is not enough for what touches the machine.
+  const fromThisMachine = (req: IncomingMessage): boolean => ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress || '')
+    && !req.headers['x-forwarded-for'] && !req.headers['cf-connecting-ip'] && !req.headers['forwarded'];
+  const trusted = (req: IncomingMessage): boolean => req.method === 'POST' && req.headers['x-muten-token'] === token && fromThisMachine(req);
   const httpServer = createServer(async (req, res) => {
     const url = (req.url || '/').split('?')[0];
     res.setHeader('Cache-Control', 'no-cache'); // dev: assets change on every edit (boot.css has no hash); never let the browser serve a stale copy
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // DNS rebinding: a page on a domain that resolves to 127.0.0.1 would read every endpoint here. Only this machine's
+    // names, IP literals and the names the app listed (`dev { hosts [...] }`) get an answer.
+    if (!hostAllowed(req.headers.host, options.hosts)) {
+      res.statusCode = 403; res.setHeader('Content-Type', 'text/plain');
+      res.end(`muten dev: host "${String(req.headers.host || '').replace(/[^\w.:-]/g, '')}" is not allowed. Add it to muten.config: dev { hosts ["${String(req.headers.host || '').replace(/:\d+$/, '').replace(/[^\w.-]/g, '')}"] }`);
+      return;
+    }
     if (url === '/_reload') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); clients.add(res); req.on('close', () => clients.delete(res)); return; }
     if (url === '/_qr') { // dev-only: the LAN URL as a scannable code — open on the desktop, scan with a phone
       const addr = httpServer.address(), bound = addr && typeof addr === 'object' ? addr.port : port;
@@ -545,39 +575,43 @@ export async function devEsbuild(root: string, port = 5173): Promise<void> {
       return;
     }
     if (url === '/_muten/graph') { // the live app graph (routes/stores/parts) — an AI reads the structure without parsing files
+      // the whole app's structure: this machine only (curl on localhost works; the wifi and a tunnel get nothing)
+      if (!fromThisMachine(req)) { res.statusCode = 403; res.end('{"error":"the app graph is served to this machine only"}'); return; }
       res.setHeader('Content-Type', 'application/json');
       try { res.end(JSON.stringify(await mapApp(root), null, 2)); }
       catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) })); }
       return;
     }
     if (url === '/__muten_open') { // dev-only: open a .muten file at a line in the user's editor (DevTools "open in editor")
-      const qs = new URLSearchParams((req.url || '').split('?')[1] || '');
-      const rel = qs.get('file') || '', line = qs.get('line') || '1', abs = join(root, rel);
       res.setHeader('Content-Type', 'application/json');
-      if (rel && !rel.includes('..') && existsSync(abs)) {
-        try { spawn(process.env.MUTEN_EDITOR || 'code', ['-g', `${abs}:${line}`], { shell: true, stdio: 'ignore', detached: true }).unref(); res.end('{"ok":true}'); }
-        catch { res.statusCode = 500; res.end('{"ok":false,"error":"spawn failed"}'); }
-      } else { res.statusCode = 404; res.end('{"ok":false,"error":"not found"}'); }
+      if (!trusted(req)) { res.statusCode = 403; res.end('{"ok":false,"error":"forbidden"}'); return; }
+      const qs = new URLSearchParams((req.url || '').split('?')[1] || '');
+      try { if (openInEditor(root, qs.get('file') || '', qs.get('line') || '1')) { res.end('{"ok":true}'); return; } } catch { /* spawn refused */ }
+      res.statusCode = 404; res.end('{"ok":false,"error":"not found"}');
       return;
     }
     if (lastError) { res.setHeader('Content-Type', 'text/html'); res.end(overlay()); return; }
     if (url === '/assets/boot.css' && cssBytes) { res.setHeader('Content-Type', 'text/css'); res.end(cssBytes); return; }
     const mem = files.get(url);
     if (mem) { res.setHeader('Content-Type', MIME[extname(url)] || 'application/octet-stream'); res.end(Buffer.from(mem)); return; }
-    const pub = join(root, 'public', url); // public assets (favicons, /docs, /code) still come from disk
-    if (url !== '/' && existsSync(pub) && !statSync(pub).isDirectory()) { res.setHeader('Content-Type', MIME[extname(pub)] || 'application/octet-stream'); res.end(readFileSync(pub)); return; }
+    // public assets (favicons, /docs, /code) come from disk, and ONLY from inside public/, never a secret (dev-security.ts)
+    const pub = url === '/' ? null : fileInside(join(root, 'public'), url);
+    if (pub) { res.setHeader('Content-Type', MIME[extname(pub)] || 'application/octet-stream'); res.end(readFileSync(pub)); return; }
     res.setHeader('Content-Type', 'text/html'); res.end(indexHtml()); // SPA fallback
   });
   // the configured port may be taken (another app, a stale server) — fall back to a free OS-assigned port instead of
   // crashing, and ALWAYS print the port actually bound so a parent process can read it back.
-  httpServer.on('error', (e: NodeJS.ErrnoException) => { if (e.code === 'EADDRINUSE') { console.log(`  port ${port} is busy — using a free port instead`); httpServer.listen(0); } else throw e; });
+  httpServer.on('error', (e: NodeJS.ErrnoException) => { if (e.code === 'EADDRINUSE') { console.log(`  port ${port} is busy — using a free port instead`); httpServer.listen(0, options.lan ? undefined : '127.0.0.1'); } else throw e; });
   httpServer.on('listening', () => {
     const a = httpServer.address(); const bound = a && typeof a === 'object' ? a.port : port;
     console.log(`  muten dev (esbuild) → http://localhost:${bound}/`);
-    for (const lan of lanAddresses()) console.log(`                      → http://${lan}:${bound}/  (phone, same wifi)`);
-    if (lanAddresses().length) console.log(`  on your phone       → http://localhost:${bound}/_qr  (scan it)`);
+    if (options.lan) {
+      for (const lan of lanAddresses()) console.log(`                      → http://${lan}:${bound}/  (phone, same wifi)`);
+      if (lanAddresses().length) console.log(`  on your phone       → http://localhost:${bound}/_qr  (scan it)`);
+      console.log('  \x1b[33m!\x1b[0m open to the network (--host): anyone on this wifi can load the app');
+    } else console.log('  (this machine only; `muten dev --host` to open it to a phone on the same wifi)');
   });
-  httpServer.listen(port);
+  httpServer.listen(port, options.lan ? undefined : '127.0.0.1');
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   const changed = new Set<string>();

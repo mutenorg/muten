@@ -1,6 +1,6 @@
 // Runtime: effect disposal (scope) + `contains` helper (__has). Disposal is the fix for the
 // router bug where an unmounted page's effects kept firing on shared store signals and crashed.
-import { signal, effect, scope, untrack, __has } from '../dist/runtime.js';
+import { signal, effect, scope, untrack, __has, __rowKey } from '../dist/runtime.js';
 
 let f = 0;
 const ok = (l, c) => { console.log((c ? '✓' : '✗') + ' ' + l); if (!c) f++; };
@@ -44,4 +44,21 @@ ok('an effect calling an action that reads+writes a signal runs once', shown ===
 ok('untrack returns what its function returns', untrack(() => 7) === 7);
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
+
+// A LIST ROW WITHOUT AN ID KEEPS ITS PLACE BY ITS CONTENT. A list computed again hands `each` new objects with the
+// same content; keyed by the object itself, every row was destroyed and rebuilt (the app blinked on every change).
+{
+  const twins = () => new Map();
+  const first = [{ day: 'mon', open: true }, { day: 'tue', open: false }];
+  const again = [{ day: 'mon', open: true }, { day: 'tue', open: false }];   // same content, new objects
+  const k1 = first.map((r) => __rowKey(r, twins())), k2 = again.map((r) => __rowKey(r, twins()));
+  ok('row without id: same content, same key', k1[0] === k2[0] && k1[1] === k2[1]);
+  ok('row without id: different content, different key', __rowKey({ day: 'mon', open: false }, twins()) !== k1[0]);
+  const t = twins(); const a = __rowKey({ x: 1 }, t), b = __rowKey({ x: 1 }, t);
+  ok('twin rows get distinct keys', a !== b);
+  ok('row with id: the id', __rowKey({ id: 'r7', x: 1 }, twins()) === 'r7');
+  ok('primitive row: itself', __rowKey('lunes', twins()) === 'lunes' && __rowKey(3, twins()) === 3);
+  const loop = { n: 1 }; loop.self = loop;
+  ok('a row that cannot be serialized falls back to itself', __rowKey(loop, twins()) === loop);
+}
 process.exit(f ? 1 : 0);

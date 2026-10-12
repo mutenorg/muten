@@ -327,8 +327,17 @@ export class Logic {
       }
       case StOp.Request: {
         // non-REST request escape hatch: build the url (with interpolation) and send the optional body.
+        // A value spliced into the url is ENCODED: in the path it stays one segment (`../admin` cannot climb to another
+        // endpoint carrying the user's session), in the query it stays one value. A url that is a value from its first
+        // character (`post "{hook}"`) is a whole url, left as is; the session never follows it off the app's origins.
+        let written = '';
         const url = typeof st.url === 'string' ? JSON.stringify(st.url)
-          : st.url.parts.map((p) => typeof p === 'string' ? JSON.stringify(p) : `String(${this.compileExpr(p, scope)})`).join(' + ');
+          : st.url.parts.map((p, i) => {
+            if (typeof p === 'string') { written += p; return JSON.stringify(p); }
+            const value = this.compileExpr(p, scope);
+            if (i === 0) return `String(${value})`;
+            return written.includes('?') ? `encodeURIComponent(String(${value}))` : `__seg(${value})`;
+          }).join(' + ');
         const body = st.body ? this.compileExpr(st.body, scope) : 'null';
         const send = `__send(${url}, ${JSON.stringify(st.method)}, ${body})`;
         if (st.into) out.push(isAsync ? `${st.into}.set(await ${send});` : `${send}.then((__r) => ${st.into}.set(__r)).catch(() => {});`); // capture the JSON response into a local state

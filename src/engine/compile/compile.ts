@@ -14,7 +14,7 @@
 // Static filters (role == admin) are pushed to the query; dynamic ones (name contains @q) stay
 // reactive. A page with no reactivity compiles to plain HTML with zero runtime (Astro-like).
 
-import { Nt, Ek, Fmt, Fk, DATA_PREFIX } from '#engine/shared/vocab.js';
+import { Nt, Ek, Fmt, Fk, DATA_PREFIX, URL_ATTRS } from '#engine/shared/vocab.js';
 import { CONTAINERS, parseClause, editableFields, headCellIds } from '#engine/compile/helpers.js';
 import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, emitPatch } from '#engine/compile/emit.js';
 import { inlineSourceMap } from '#engine/compile/sourcemap.js';
@@ -227,12 +227,15 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   };
 
   // set an attribute from a plain string or a (possibly reactive) interpolation (Image src/alt, labels)
+  // A URL that DATA builds (an interpolated href/src) goes through __safeUrl (emit.ts): a `javascript:`/`vbscript:` link, or
+  // a `data:` one where only media belongs, becomes about:blank#blocked, as React does. A URL the author wrote is trusted.
   function genInterpAttr(id: string, attr: string, value: StringPropValue | undefined): void {
     if (typeof value === 'string') {
       lines.push(`el_${id}.${attr} = ${JSON.stringify(value)};`);
     } else if (value && 'kind' in value) {
-      const concat = interpConcat(value);
       const reactive = value.parts.some((part) => typeof part !== 'string');
+      const raw = interpConcat(value);
+      const concat = URL_ATTRS.has(attr) && reactive ? `__safeUrl(${raw}, ${attr === 'href' ? 'false' : 'true'})` : raw;
       lines.push(reactive ? `effect(() => { el_${id}.${attr} = ${concat}; });` : `el_${id}.${attr} = ${concat};`);
     }
   }
@@ -568,9 +571,9 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         lines.push(`let order_${id} = [];`);
         lines.push(`effect(() => {`);
         lines.push(`  const __rows = base_${id}()${dynExpr};`);
-        lines.push(`  const __seen = new Set(); const __next = [];`);
+        lines.push(`  const __seen = new Set(); const __next = []; const __twins = new Map();`);
         lines.push(`  for (const __row of __rows) {`);
-        lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
+        lines.push(`    const __k = __rowKey(__row, __twins); __seen.add(__k);`);   // by id, else by content (runtime-key.ts)
         lines.push(`    let __e = map_${id}.get(__k);`);
         lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
         lines.push(`    else { const __sig = signal(__row); const __r = root(() => [renderRow_${id}(__sig)]); __e = { sig: __sig, nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
@@ -806,9 +809,9 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         // `i` in the where while the filter's arrow never declared it, so it threw «i is not defined» at runtime.
         const filterArgs = p.index ? `${p.as}, ${p.index}` : p.as;
         lines.push(`  const __l = ${listJS}; const __rows = (Array.isArray(__l) ? __l : [])${filterJS ? `.filter((${filterArgs}) => ${filterJS})` : ''}${takeJS ? `.slice(0, ${takeJS})` : ''};`);   // fail-closed: a non-array never crashes the loop (renders empty)
-        lines.push(`  const __seen = new Set(); const __next = [];`);
+        lines.push(`  const __seen = new Set(); const __next = []; const __twins = new Map();`);
         lines.push(`  for (const __row of __rows) {`);
-        lines.push(`    const __k = __row?.id ?? __row; __seen.add(__k);`);
+        lines.push(`    const __k = __rowKey(__row, __twins); __seen.add(__k);`);   // by id, else by content (runtime-key.ts)
         lines.push(`    let __e = map_${id}.get(__k);`);
         lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
         // A fragment row is bracketed by two markers and its nodes are read LIVE between them, for the same

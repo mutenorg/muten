@@ -2,8 +2,9 @@
 // CLI entry point for the `muten` command.
 // Commands: dev, bundle, build, check (lint), map, android. Delegates to runner.ts, build.ts, lint.ts, map.js
 // and android.ts. Consumed by package.json "bin" -> `muten dev|bundle|build|check|map|lint|add|new|android [dir]`.
-import { resolve, join, relative } from 'node:path';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeAppMap } from '../app-map-file.js';
+import { resolve, relative } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { dev, bundle } from '../runner.js';
 import { buildApp } from '../build.js';
 import { lintApp, lintWatch } from '../lint.js';
@@ -20,8 +21,8 @@ const json = args.includes('--json');
 const root = resolve(dir || process.cwd());
 
 try {
-  if (cmd === 'dev') await dev(root);          // native esbuild dev server (surgical HMR + oracle overlay)
-  else if (cmd === 'bundle') await bundle(root); // native esbuild production bundle (per-route chunks + source maps)
+  if (cmd === 'dev') await dev(root, args.includes('--host'));          // dev server; this machine only unless --host (wifi, a phone)
+  else if (cmd === 'bundle') await bundle(root, args.includes('--sourcemap')); // production bundle; source maps only with --sourcemap
   else if (cmd === 'build') await buildApp(root, undefined, (args.find((a) => a.startsWith('--url=')) || '').slice(6)); // SSG → static HTML. --url=https://site.com → absolute sitemap/robots URLs
   else if (cmd === 'check' || cmd === 'lint') {
     if (args.includes('--watch')) await lintWatch(root, json);          // standing oracle (CI/agents), no dev server
@@ -30,7 +31,7 @@ try {
   else if (cmd === 'map') {
     const map = await mapApp(root);
     if (json) console.log(JSON.stringify(map, null, 2));
-    else { writeFileSync(join(root, 'app.map.json'), JSON.stringify(map, null, 2)); console.log('✓ app.map.json → the app graph (read this first)'); }
+    else console.log(`✓ ${relative(root, writeAppMap(root, map))} → the app graph (read this first; stays on this machine)`);
   }
   // preflight the .apk toolchain (Capacitor+Gradle do the build; we say whether this machine can, and --install makes it so)
   else if (cmd === 'android') process.exit(await androidCommand(root, args) ? 0 : 1);

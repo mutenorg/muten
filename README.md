@@ -204,9 +204,10 @@ routes {
 ## CLI
 
 ```sh
-muten dev    [dir]           # dev server - esbuild, in-memory, SURGICAL HMR + the oracle on every save
-muten bundle [dir]           # production build → ./dist (per-route chunks + source maps + ship-size report)
-muten build  [dir]           # SSG: pre-render every route to zero-JS HTML (+ app.map.json)
+muten dev    [dir] [--host]  # dev server - esbuild, in-memory, SURGICAL HMR + the oracle on every save
+                             #   this machine only; --host opens it to the wifi (a phone, Capacitor live reload)
+muten bundle [dir] [--sourcemap]  # production build → ./dist (per-route chunks + ship-size report; maps only if asked)
+muten build  [dir]           # SSG: pre-render every route to zero-JS HTML (+ .muten/app.map.json, never deployed)
 muten check  [dir] [--json]  # parse + validate every page, no compile - the deterministic ORACLE
                              #   --json → structured diagnostics (code + loc + "did you mean…?") in ms, no browser
 muten map    [dir] [--json]  # emit app.map.json COLD (no build) - the app graph an AI reads FIRST
@@ -240,9 +241,9 @@ scripts; `npm run dev` / `npm run build` run them:
   text or class and *only that node* re-renders - your counters, inputs and list selection survive, no full
   reload, no flash. Compile/runtime errors surface with the file:line:col + a code frame + "did you
   mean…?", in the terminal and as a browser overlay. The oracle runs on every save.
-- **`muten bundle`** - the production CSR build: per-route chunks, content-hashed CSS, **source maps that
-  point at your `.muten` lines** (a runtime error shows `page.muten:18`, not `boot-x.js:441`), and a per-route
-  **ship-size report** so "minimum by construction" is visible.
+- **`muten bundle`** - the production CSR build: per-route chunks, content-hashed CSS and a per-route
+  **ship-size report** so "minimum by construction" is visible. Nothing about the source ships: source maps (which
+  point at your `.muten` lines) only with `--sourcemap`, and the app graph stays in `.muten/app.map.json`.
 
 There is **no Vite, no bundler config** - muten owns the entry and the bundler (embedded esbuild). The build is
 configured entirely in **`muten.config`** - written in muten syntax, not JS (it carries the dev port and, for

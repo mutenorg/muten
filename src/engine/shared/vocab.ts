@@ -126,6 +126,8 @@ export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle
 
 /** The attribute prefix data(...) keys carry once parsed (they share aria's map). */
 export const DATA_PREFIX = 'data-';
+/** DOM properties that hold a URL: built from data, they pass through the runtime's __safeUrl (no `javascript:` links). */
+export const URL_ATTRS: ReadonlySet<string> = new Set(['href', 'src', 'poster']);
 /** The class of the Stack that wraps a part with several roots (`part P() { when a {…} when b {…} }`), so CSS can name
  *  that wrapper by class. Matching it by `[class="mu-stack"]` instead made Chrome restyle a whole subtree on every class
  *  change anywhere in the page (an attribute test on an ancestor followed by `> *`). */

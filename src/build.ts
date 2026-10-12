@@ -1,6 +1,8 @@
-// Build orchestration: compiles a host app (.muten files) to dist/<url>/index.html + app.map.json.
+// Build orchestration: compiles a host app (.muten files) to dist/<url>/index.html, and the app graph to .muten/app.map.json.
 // Throws on any error; the CLI (bin/muten.ts) catches, formats, and exits.
 
+import { writeAppMap } from './app-map-file.js';
+import { cspFrom, withCsp, writeSecurityHeaders } from './dev-security.js';
 import { writeFileSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { Nt, Fmt } from '#engine/shared/vocab.js';
@@ -23,6 +25,7 @@ import type { Diagnostic, AppMap } from '#engine/shared/types.js';
 
 export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), baseUrl = ''): Promise<{ routes: string[]; outDir: string }> {
   const rel = (p: string) => relative(appRoot, p);
+  const csp = cspFrom(readMutenConfig(appRoot).security);
   const base = baseUrl.replace(/\/+$/, ''); // app's deploy origin (from --url=) for canonical / og:url / sitemap; '' → relative
   rmSync(outDir, { recursive: true, force: true }); // wipe first so deleted pages don't leave stale routes
 
@@ -143,6 +146,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
     }
     const pageOut = join(outDir, page.route);
     mkdirSync(pageOut, { recursive: true });
+    if (csp) html = withCsp(html, csp); // muten.config `security { csp }`: injected scripts do not run (dev-security.ts)
     writeFileSync(join(pageOut, 'index.html'), html);
     console.log(`✓ /${page.route}  →  ${rel(join(pageOut, 'index.html'))}  (${Object.keys(doc.nodes).length} nodes${ssrd ? ', SSR' : csr.includes('<script') ? ', CSR' : ', static'}${styles.from ? ', + ' + styles.from : ''})`);
     built.push(page.route);
@@ -171,8 +175,9 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   writeFileSync(join(outDir, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${base}/sitemap.xml\n`);
   console.log(`✓ ${rel(join(outDir, 'sitemap.xml'))} + robots.txt (${built.length} route${built.length === 1 ? '' : 's'}${base ? '' : ' — pass --url=https://… for absolute URLs'})`);
 
-  writeFileSync(join(outDir, 'app.map.json'), JSON.stringify(appMap, null, 2));
-  console.log(`✓ ${rel(join(outDir, 'app.map.json'))} → app graph (the root the AI reads)`);
+  // the app graph names every route, guard, store and field: it stays on this machine (.muten/), out of the deployed folder
+  console.log(`✓ ${rel(writeAppMap(appRoot, appMap))} → app graph (the root the AI reads; not deployed)`);
 
+  writeSecurityHeaders(appRoot, outDir); // the host's security headers (_headers), unless the app brought its own
   return { routes: built, outDir };
 }

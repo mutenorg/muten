@@ -153,7 +153,8 @@ action buy <- item { post "shop:/orders" body item }
 action cancel <- o { delete "shop:/orders/{o.id}/cancel" }
 Page { each orders as x { Text "{x.title}" } }`)), {}, '', {}, { orders: { url: '/orders' } }, { api: { shop: { base: 'http://x' } } });
 ok('explicit post + body', ejs.includes('await __send("shop:/orders", "POST", item)'));
-ok('explicit delete + interpolated url', ejs.includes('await __send("shop:/orders/" + String(o.id) + "/cancel", "DELETE", null)'));
+// the id is spliced as ONE path segment (__seg): `../admin` cannot climb to another endpoint with the user's session
+ok('explicit delete + interpolated url', ejs.includes('await __send("shop:/orders/" + __seg(o.id) + "/cancel", "DELETE", null)'));
 ok('explicit request → async (a write)', ejs.includes('function buy(item) { return untrack(async () =>'));
 ok('pure command needs no mutates (.pending wired)', ejs.includes('__pending_buy'));
 ok('__send helper emitted', ejs.includes('function __send(url, method, body)'));

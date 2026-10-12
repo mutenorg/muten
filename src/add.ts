@@ -33,11 +33,18 @@ function ensurePluginInConfig(root: string, name: string): boolean {
   return true;
 }
 
+// An npm package name, nothing else: the name reaches npm as one argument and never a shell (`muten add 'x; rm -rf ~'`
+// and a name an agent copied from untrusted text both stop here).
+const PLUGIN_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
 function addPlugin(root: string, name: string): void {
+  if (!PLUGIN_NAME.test(name)) { console.error(`✖ "${name}" is not a plugin name (lowercase letters, digits, . _ -)`); process.exit(1); }
   const pkg = `@muten/${name}`;
   if (!isInstalled(root, name)) {
     console.log(`  installing ${pkg}…`);
-    const r = spawnSync('npm', ['install', '-D', pkg], { cwd: root, stdio: 'inherit', shell: true });
+    // no shell: Windows runs npm through its .cmd shim instead
+    const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const r = spawnSync(npm, ['install', '-D', pkg], { cwd: root, stdio: 'inherit', shell: false });
     if (r.status !== 0 || !isInstalled(root, name)) { console.error(`✖ could not install ${pkg} (does it exist on npm?)`); process.exit(1); }
   }
   const enabled = ensurePluginInConfig(root, name);

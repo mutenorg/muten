@@ -52,6 +52,9 @@ function collectCalls(e: Expr, acc: string[] = []): string[] {
 }
 
 // ctx.parts = known part names in the project (to suggest and validate instances)
+// state names that hold a secret or a person's data: persisting them is flagged (see persist-sensitive below)
+const SENSITIVE_PERSIST = /(token|secret|password|passwd|session|jwt|bearer|apikey|api_key|email|phone|address|postal|card|cvv|iban|dni|cedula|ssn)/i;
+
 export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   const D: Diagnostic[] = [];
 
@@ -111,6 +114,12 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
     D.push(diag('reserved-name', `${kind} "${name}" collides with a built-in runtime name (${why}) — it compiles to a duplicate declaration and blanks the page. Rename it, e.g. "${name}Value".`, { loc, from: name }));
   };
   for (const [name, def] of Object.entries(doc.state || {})) checkReserved(name, 'state', def.loc ?? null);
+  // `persist` writes to localStorage, which EVERY script on the page reads: one XSS anywhere (a library, an analytics tag)
+  // takes a token or a customer's details. Not an error (a remembered tab is fine), a warning with the safe way.
+  for (const [name, def] of Object.entries(doc.state || {})) {
+    if (!def.persist || !SENSITIVE_PERSIST.test(name)) continue;
+    D.push(diag('persist-sensitive', `"${name}" is persisted to localStorage, where any script on the page can read it. A session belongs in an httpOnly cookie the backend sets (\`api { credentials "include" }\` sends it, no script ever sees it); personal data (email, phone, address) belongs on the server, fetched when needed.`, { loc: def.loc ?? null, severity: 'warning' }));
+  }
   for (const name of Object.keys(doc.gets || {})) checkReserved(name, 'get', null);
   for (const [name, a] of Object.entries(doc.actions || {})) checkReserved(name, 'action', a.body?.[0]?.loc ?? null);
 

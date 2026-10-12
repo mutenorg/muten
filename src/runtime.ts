@@ -5,7 +5,8 @@
 import type { Signal, EffectRun, PageModule, RouteDef, LayoutDefs, PageInstance, NodeRegistry } from '#engine/shared/types.js';
 // the way out of a block (`__leave`): its own module, re-exported for the compiled pages
 import { __leave } from './runtime-leave.js';
-export { __leave };
+import { __rowKey } from './runtime-key.js';
+export { __leave, __rowKey };
 
 // The HMR handle lives on the mounted page element (`el.__muten`); the dev client reaches it + the runtime via window.
 declare global {
@@ -173,8 +174,8 @@ export function __chart(svg: Element, rows: ReadonlyArray<{ [field: string]: unk
   // compact axis number: 3000 -> 3k, 1250000 -> 1.2M (references never show "9000").
   const fmtN = (v: number): string => { const a = Math.abs(v), r = (x: number): string => { const s = x.toFixed(1); return s.slice(-2) === '.0' ? s.slice(0, -2) : s; }; return a >= 1e9 ? r(v / 1e9) + 'B' : a >= 1e6 ? r(v / 1e6) + 'M' : a >= 1e3 ? r(v / 1e3) + 'k' : String(Math.round(v)); };
   const kind = enc.kind || 'bar', radial = kind === 'pie' || kind === 'donut';
-  const cf = enc.color || (radial ? enc.x : ''), six: { [k: string]: number } = {}; let sn = 0;
-  const scls = (base: string, r: { [field: string]: unknown }): string => { if (!cf) return base; const k = String(r[cf]); return `${base} mu-chart-s${(k in six) ? six[k] : (six[k] = sn++)}`; };
+  const cf = enc.color || (radial ? enc.x : ''), six: { [k: string]: number } = Object.create(null); let sn = 0;
+  const scls = (base: string, r: { [field: string]: unknown }): string => { if (!cf) return base; const k = String(r[cf]); return `${base} mu-chart-s${Object.prototype.hasOwnProperty.call(six, k) ? six[k] : (six[k] = sn++)}`; };
   const doLegend = (): void => {
     if (!legend) return;
     while (legend.firstChild) legend.removeChild(legend.firstChild);
@@ -662,4 +663,4 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
 declare const __MUTEN_DEV__: boolean;
 // `typeof window` FIRST so an unbundled consumer (a Node import of runtime.js, where __MUTEN_DEV__ is undefined)
 // short-circuits before touching it — no ReferenceError. In a browser bundle the `define` folds `… && false` → DCE.
-if (typeof window !== 'undefined' && __MUTEN_DEV__) window.__muten_rt = { patchNode, signal, computed, effect, root, onCleanup, __eq, __order, __leave, __has, __id, __chart, __arc, __drag, __drop };
+if (typeof window !== 'undefined' && __MUTEN_DEV__) window.__muten_rt = { patchNode, signal, computed, effect, root, onCleanup, __eq, __rowKey, __order, __leave, __has, __id, __chart, __arc, __drag, __drop };

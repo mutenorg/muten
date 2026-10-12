@@ -12,6 +12,7 @@ export interface SourceRequest {
   body: string | null;             // JSON-serialized request body (POST/PUT/PATCH), null otherwise
   at: string | null;               // JSON path to the array within the response (e.g. "data")
   wait: boolean;                   // `wait: true`: no load on its own — the query waits for its first refetch (its params)
+  credentials: string;             // fetch credentials: 'include' sends the backend's httpOnly session cookie ('' = browser default)
 }
 
 // Normalize a raw source descriptor (URL string or request object) into a complete request,
@@ -27,9 +28,12 @@ export function sourceRequest(src: Value, api: Value = {}): SourceRequest {
   const apiObj = obj(api);
   const s = obj(src);
   // flat config (`base`/`headers` at top) = single client; otherwise a map keyed by client name
-  const flat = 'base' in apiObj || 'headers' in apiObj;
+  const flat = 'base' in apiObj || 'headers' in apiObj || 'credentials' in apiObj;
   const client = obj(flat ? apiObj : apiObj[str(s.api) || 'default']);
   const base = typeof client.base === 'string' ? client.base : '';
+  // \`api { credentials "include" }\`: the session lives in an httpOnly cookie the backend sets, which no script can read
+  // (an XSS cannot steal it); the browser sends it with every request to that backend.
+  const credentials = client.credentials === 'include' || client.credentials === 'same-origin' || client.credentials === 'omit' ? client.credentials : '';
   const join = (u: string): string => {
     if (!u) return base;                                              // no url -> bare base
     if (/^[a-z][a-z0-9+.-]*:\/\//i.test(u) || u.indexOf('//') === 0) return u; // absolute (scheme:// or //host)
@@ -39,10 +43,10 @@ export function sourceRequest(src: Value, api: Value = {}): SourceRequest {
   const headers: { [k: string]: string } = {};
   const collect = (h: Value | undefined): void => { for (const [k, v] of Object.entries(obj(h))) if (typeof v === 'string') headers[k] = v; };
   collect(client.headers);                                            // client defaults first
-  if (typeof src === 'string') return { url: join(src), method: 'GET', headers, body: null, at: null, wait: false };
+  if (typeof src === 'string') return { url: join(src), method: 'GET', headers, body: null, at: null, wait: false, credentials };
   collect(s.headers);                                                 // per-source headers override last
   const hasBody = s.body !== undefined && s.body !== null;
-  return { url: join(str(s.url)), method: (str(s.method) || 'GET').toUpperCase(), headers, body: hasBody ? JSON.stringify(s.body) : null, at: str(s.at) || null, wait: s.wait === true };
+  return { url: join(str(s.url)), method: (str(s.method) || 'GET').toUpperCase(), headers, body: hasBody ? JSON.stringify(s.body) : null, at: str(s.at) || null, wait: s.wait === true, credentials };
 }
 
 // Pick the row array from a fetched JSON response: walk the dotted `at` path (e.g. "data.posts" for
