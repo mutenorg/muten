@@ -16,6 +16,7 @@ function argToStr(v: ArgValue): string {
   if (typeof v === 'string') return v;
   if (typeof v === 'number' || typeof v === 'boolean') return String(v);
   if ('$lit' in v) return JSON.stringify(v.$lit);
+  if ('$expr' in v) return '{…}';
   return '$' + v.$param;
 }
 
@@ -175,7 +176,14 @@ function subId(id: string, args: ArgMap): string {
 // a positional string prop: plain text passes through, { $param } resolves to the arg, interpolation recurses.
 function subStringProp(v: StringPropValue, args: ArgMap): StringPropValue {
   if (typeof v === 'string') return v;
-  if ('$param' in v) { const a = args[v.$param]; return typeof a === 'number' || typeof a === 'boolean' ? String(a) : (typeof a === 'object' && '$lit' in a) ? (a.$interp ?? a.$lit) : a; } // {$param} -> arg (an interpolated literal keeps its Interp)
+  if ('$param' in v) {
+    const a = args[v.$param];
+    if (typeof a === 'number' || typeof a === 'boolean') return String(a);
+    if (typeof a === 'object' && '$lit' in a) return a.$interp ?? a.$lit;   // a quoted literal (an interpolated one keeps its Interp)
+    if (typeof a === 'object' && '$expr' in a) return { kind: Ek.Interp, parts: [a.$expr] };
+    // a ref (`label: tab.label`, `label: title`): the text follows it. It used to be written out as its own name, «tab.label»
+    return typeof a === 'string' && a ? { kind: Ek.Interp, parts: [{ kind: Ek.Ref, name: a }] } : a;
+  }
   return subInterp(v, args);                                                                      // interpolation
 }
 
@@ -197,8 +205,9 @@ function subExpr(e: Expr, args: ArgMap): Expr {
   if (e.kind === Ek.Bin) return { ...e, left: subExpr(e.left, args), right: subExpr(e.right, args) };
   if (e.kind === Ek.Un) return { ...e, operand: subExpr(e.operand, args) };
   if (e.kind === Ek.Tern) return { ...e, cond: subExpr(e.cond, args), then: subExpr(e.then, args), else: subExpr(e.else, args) };
-  if (e.kind === Ek.Call) return { ...e, args: e.args.map((a) => subExpr(a, args)) }; // a use'd fn: substitute $params in its args
+  if (e.kind === Ek.Call) return { ...e, args: e.args.map((a) => subExpr(a, args)), ...(e.chain ? { chain: e.chain.map((step) => (step.args ? { ...step, args: step.args.map((a) => subExpr(a, args)) } : step)) } : {}) }; // a use'd fn: substitute $params in its args and its chain's
   if (e.kind === Ek.Obj) return { ...e, fields: e.fields.map((f) => ({ key: f.key, value: subExpr(f.value, args) })) };
+  if (e.kind === Ek.List) return { ...e, items: e.items.map((item) => subExpr(item, args)) };
   if (e.kind === Ek.Agg) return { ...e, list: refText(e.list, args), body: subExpr(e.body, args) };
   if (e.kind === Ek.Filter) return { ...e, list: refText(e.list, args), cond: subExpr(e.cond, args) }; // `tasks where …` inside a part: sub $params
   return e; // literal: nothing to substitute
@@ -238,6 +247,7 @@ function subArgValue(v: ArgValue, args: ArgMap): ArgValue {
   }
   if (typeof v === 'number' || typeof v === 'boolean') return v;
   if ('$lit' in v) return v;        // quoted literal: nothing to substitute
+  if ('$expr' in v) return { $expr: subExpr(v.$expr, args) };   // an object prop: its $params too
   return args[v.$param] ?? v;       // nested $param -> the arg (left as is when missing: validate names it)
 }
 

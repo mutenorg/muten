@@ -21,6 +21,12 @@ Page class("p-6 gap-4") {
   Title "Count: {count}" h1
   Button "+1" -> inc
 }`,
+  'when … else when … else':
+`screen stars
+state { n = 2 : number }
+Page {
+  when n >= 3 { Text "great" } else when n == 2 { Text "ok" } else { Text "low" }
+}`,
   'Link navigates with -> "/route"':
 `screen home
 Page { Link "Sign Up" -> "/signup" }`,

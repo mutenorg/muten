@@ -17,6 +17,7 @@
   "exports": {
     ".": "./dist/index.js",
     "./browser.js": "./dist/browser.js",
+    "./dnd": "./dist/dnd.js",
     "./ls": "./dist/engine/project/analyze.js"
   },
   "imports": {
@@ -43,9 +44,9 @@
   "license": "MIT",
   "scripts": {
     "prepare": "npm run build",
-    "build": "tsc && node --experimental-strip-types esbuild.ts && node scripts/gen-gbnf.mjs",
+    "build": "tsc && node scripts/honest-types.mjs && node --experimental-strip-types esbuild.ts && node scripts/gen-gbnf.mjs",
     "gbnf": "node scripts/gen-gbnf.mjs",
-    "test": "npm run build && node --experimental-strip-types test/parse.ts && node --experimental-strip-types test/security.ts && node --experimental-strip-types test/expr.ts && node --experimental-strip-types test/parts.ts && node --experimental-strip-types test/diagnostics.ts && node --experimental-strip-types test/routes.ts && node --experimental-strip-types test/layouts.ts && node --experimental-strip-types test/params.ts && node --experimental-strip-types test/ssr.ts && node --experimental-strip-types test/writes.ts && node --experimental-strip-types test/dynamics.ts && node --experimental-strip-types test/runtime.ts && node --experimental-strip-types test/hmr.ts && node --experimental-strip-types test/lang.ts && node --experimental-strip-types test/forms.ts && node --experimental-strip-types test/theme.ts && node --experimental-strip-types test/smoke.ts && node --experimental-strip-types test/table.ts && node --experimental-strip-types test/realapp.ts && node --experimental-strip-types test/print.ts && node --experimental-strip-types test/externs.ts && node --experimental-strip-types test/config.ts && node --experimental-strip-types test/android.ts && node test/gbnf.mjs"
+    "test": "npm run build && node --experimental-strip-types test/parse.ts && node --experimental-strip-types test/security.ts && node --experimental-strip-types test/static-parity.ts && node --experimental-strip-types test/css-prune.ts && node --experimental-strip-types test/use-bundle.ts && node --experimental-strip-types test/env.ts && node --experimental-strip-types test/foreign.ts && node --experimental-strip-types test/fns.ts && node --experimental-strip-types test/builtins.ts && node --experimental-strip-types test/test-files.ts && node --experimental-strip-types test/store-check.ts && node --experimental-strip-types test/theme-config.ts && node --experimental-strip-types test/lang.ts && node --experimental-strip-types test/sdk.ts && node --experimental-strip-types test/react-tree.ts && node --experimental-strip-types test/kit.ts && node --experimental-strip-types test/signals-fuzz.ts && node test/browser/list-fuzz.mjs && node --experimental-strip-types test/expr.ts && node --experimental-strip-types test/parts.ts && node --experimental-strip-types test/diagnostics.ts && node --experimental-strip-types test/routes.ts && node --experimental-strip-types test/layouts.ts && node --experimental-strip-types test/params.ts && node --experimental-strip-types test/ssr.ts && node --experimental-strip-types test/writes.ts && node --experimental-strip-types test/dynamics.ts && node --experimental-strip-types test/runtime.ts && node --experimental-strip-types test/hmr.ts && node --experimental-strip-types test/lang.ts && node --experimental-strip-types test/forms.ts && node --experimental-strip-types test/theme.ts && node --experimental-strip-types test/smoke.ts && node --experimental-strip-types test/table.ts && node --experimental-strip-types test/realapp.ts && node --experimental-strip-types test/print.ts && node --experimental-strip-types test/externs.ts && node --experimental-strip-types test/config.ts && node --experimental-strip-types test/android.ts && node test/gbnf.mjs"
   },
   "optionalDependencies": {
     "sass": "^1.101.0"

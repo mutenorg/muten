@@ -1,17 +1,19 @@
 // parse: .muten source text -> nested IR. Pipeline: .muten -> IR -> compose -> flatten -> compile -> JS.
-// Parser extends Grammar, inheriting the token cursor and expression/value sub-grammars.
-// This file holds only the screen grammar: top-level declarations (entity/state/action/routes ...)
-// and the node tree (Stack/Text/Form/when/each ...). Dispatch is data-driven via Maps (keyword ->
-// handler, modifier -> handler, method -> builder), never growing if/else chains. No magic strings.
+// The grammar is layered, each layer a class on the one below:
+//   Grammar (grammar.ts)        the token cursor + expressions and values
+//   Readers (readers.ts)        small shared readers: types, dotted names, args, clauses
+//   ActionParser (parse-actions) `get`, `action` and the statements of a body
+//   DeclParser (parse-decls)    the data declarations: entity, state, mock, sources, api, meta, routes, theme, use
+//   Parser (this file)          the entry, the declarations that hold a tree (shell, layout, part), and the node tree
+// Dispatch is data-driven via Maps (keyword -> handler, modifier -> handler, method -> builder), never growing if/else
+// chains. No magic strings.
 
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { PRIMITIVES } from '#engine/lang/manifest.js';
-import { Grammar } from '#engine/lang/grammar.js';
-import { Tk, Pn, Kw, Nt, Mod, StOp, Ek, BOp, nonPrimitiveHint, DATA_PREFIX, PART_WRAP_CLASS } from '#engine/shared/vocab.js';
+import { DeclParser } from '#engine/lang/parse-decls.js';
+import { LANG_STORE, THEME_PROVIDER, FROM_SCRIPT, Tk, Pn, Kw, Nt, Mod, Ek, BOp, UOp, nonPrimitiveHint, DATA_PREFIX, PART_WRAP_CLASS } from '#engine/shared/vocab.js';
 import type {
-  IR, IRNode, NodeProps, StringPropName, Stmt, IfStmt, Expr, Interp, Value, Level,
-  Entity, FieldType, EntityConstraints, FieldConstraint,
-  StateDef, Route, PartParam, ArgValue, ArgMap, ThemeScale,
+  IR, IRNode, NodeProps, StringPropName, Expr, Level, PartParam, Loc,
 } from '#engine/shared/types.js';
 
 // Derived from the MANIFEST (single vocabulary source):
@@ -23,15 +25,14 @@ const INTERPOLATES = new Set<string>(
   Object.entries(PRIMITIVES).filter(([, primitive]) => primitive.interp).map(([name]) => name),
 );
 
-const mapFieldType = (raw: string): FieldType => (raw === 'text' ? 'string' : raw); // `text` is the user-facing alias for `string`
 const isLevel = (word: string): word is Level => /^h[1-6]$/.test(word);             // heading level h1..h6
 const VIDEO_FLAGS = new Set(['controls', 'autoplay', 'loop', 'muted', 'playsinline']); // <video> boolean attrs (bare keywords)
 
-export class Parser extends Grammar {
+
+export class Parser extends DeclParser {
   // Built once per parse. Keys double as membership tests: an ident not in a map
   // is simply not a valid modifier or action method.
   private readonly modifiers: Map<string, (props: NodeProps) => void>;   // modifier -> parse + attach its prop
-  private readonly statements: Map<string, (target: string) => Stmt>;    // action method -> parse the call into a Stmt
 
   constructor(source: string) {
     super(source);
@@ -80,11 +81,13 @@ export class Parser extends Grammar {
           if (this.at(Tk.Ident, Kw.When)) { this.next(); return { name: t.v, cond: this.parseExpr() }; }
           return t.v;
         }
-        const name = this.eat(Tk.Ident).v;
+        const name = this.className();
         this.nestGuard(name); // `class("x" aria(…))` — modifiers are siblings, not nested
         if (this.at(Tk.Ident, Kw.When)) { this.next(); return { name, cond: this.parseExpr() }; }
         return name;
       })]; }],
+      [Mod.Currency, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.currency = this.eat(Tk.String).v; if (paren) this.eat(Tk.Punct, Pn.ParenR); }],   // Number currency("COP")
+      [Mod.Accept, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.accept = this.eat(Tk.String).v; if (paren) this.eat(Tk.Punct, Pn.ParenR); }],   // File accept("image/*")
       [Mod.Alt, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); const t = this.eat(Tk.String); props.alt = this.parseInterpolation(t.v, t.pos + 1); if (paren) this.eat(Tk.Punct, Pn.ParenR); }],  // Image a11y/SEO alt text
       [Mod.Inputs, (props: NodeProps) => { props.inputs = { ...props.inputs, ...this.parseArgs() }; }],   // Custom inputs(k: value, ...)
       [Mod.On, (props: NodeProps) => { props.on = { ...props.on, ...this.parseArgs() }; }],               // Custom on(event: action, ...)
@@ -105,25 +108,6 @@ export class Parser extends Grammar {
       [Mod.Id, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.id = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // id("features") — a STATIC literal, so the oracle can prove every `-> "#features"` lands
       [Mod.Eager, (props: NodeProps) => { props.eager = true; }], // Image eager — a bare flag: this image loads at once, at high priority (lazy is the default)
       [Mod.Group, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.group = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // Details group("faq") — a STATIC name: the oracle checks it sits on a Details
-    ]);
-
-    this.statements = new Map([
-      [StOp.Push, (target: string): Stmt => ({ op: StOp.Push, target, arg: this.parseExpr() })],
-      [StOp.Set, (target: string): Stmt => ({ op: StOp.Set, target, arg: this.parseExpr() })],
-      [StOp.Reset, (target: string): Stmt => ({ op: StOp.Reset, target })],
-      [StOp.Toggle, (target: string): Stmt => this.at(Tk.Punct, Pn.ParenR) ? { op: StOp.Toggle, target } : { op: StOp.Toggle, target, arg: this.parseExpr() }], // `open.toggle()` flips a bool; `favs.toggle(x)` toggles x's membership in a list<scalar>
-      // remove/patch are NOT here: they parse inline as `remove where <cond>` / `patch where <cond> with { ... }` (no parens, item-implicit)
-      [StOp.Create, (target: string): Stmt => ({ op: StOp.Create, target, arg: this.parseExpr() })], // POST to source
-      [StOp.Update, (target: string): Stmt => ({ op: StOp.Update, target, arg: this.parseExpr() })], // PUT /:id
-      [StOp.Delete, (target: string): Stmt => ({ op: StOp.Delete, target, arg: this.parseExpr() })], // DELETE /:id
-      [StOp.Refetch, (target: string): Stmt => { // refetch with N named query params: refetch(q: x, page: n)
-        const params: { [k: string]: Expr } = {};
-        while (!this.at(Tk.Punct, Pn.ParenR)) {
-          const key = this.eat(Tk.Ident).v; this.eat(Tk.Punct, Pn.Colon); params[key] = this.parseExpr();
-          if (this.at(Tk.Punct, Pn.Comma)) this.next();
-        }
-        return { op: StOp.Refetch, target, params };
-      }],
     ]);
   }
 
@@ -150,14 +134,31 @@ export class Parser extends Grammar {
       [Kw.Part, () => this.parsePart(ir)],
       [Kw.Const, () => this.parseConst(ir)],                                                   // compile-time immutable scalar
       [Kw.Theme, () => this.parseTheme(ir)],                                                   // project token scale
+      [LANG_STORE, () => { this.next(); this.eat(Tk.Ident, Kw.From); ir.langFrom = this.parseExpr(); }],   // `lang from shop.lang`: this page speaks that language, not the app's
       [Kw.Param, () => { this.next(); (ir.params = ir.params || []).push(this.eat(Tk.Ident).v); }], // route param (`param id`)
-      [Kw.Use, () => { // `use a, b from "./lib.ts"` - named JS functions muten may call
-        this.next();
-        const names = [this.eat(Tk.Ident).v];
-        while (this.at(Tk.Punct, Pn.Comma)) { this.next(); names.push(this.eat(Tk.Ident).v); }
+      [THEME_PROVIDER, () => {   // theme.muten: `provider ThemeProvider(theme: look) from "@mui/material"`
+        const loc = this.locOf(this.next().pos);
+        const component = this.eat(Tk.Ident).v;
+        const args = this.at(Tk.Punct, Pn.ParenL) ? this.parseForeignArgs() : {};
         this.eat(Tk.Ident, Kw.From);
+        (ir.providers = ir.providers || []).push({ component, args, from: this.eat(Tk.String).v, loc });
+      }],
+      [Kw.Use, () => { // `use a, b from "./lib.ts"` - named JS functions muten may call
+        const loc = this.locOf(this.next().pos);
+        if (this.parseForeignUse(ir)) return;   // `use element|widget|react Name … from "…"`: a component from npm
+        // each name may say what it returns (`rowsOf: list<Row>`), so a list it gives back is read with its fields
+        const names: string[] = [];
+        const returns: { [name: string]: string } = {};
+        do {
+          if (names.length) this.next();
+          const name = this.eat(Tk.Ident).v;
+          names.push(name);
+          if (this.at(Tk.Punct, Pn.Colon)) { this.next(); returns[name] = this.parseType(); }
+        } while (this.at(Tk.Punct, Pn.Comma));
+        this.eat(Tk.Ident, Kw.From);
+        const script = this.at(Tk.Ident, FROM_SCRIPT) ? (this.next(), true) : false;   // `from script "https://…"`: a global, not a module
         const from = this.eat(Tk.String).v;
-        (ir.imports = ir.imports || []).push({ names, from });
+        (ir.imports = ir.imports || []).push({ names, from, loc, ...(script ? { script } : {}), ...(Object.keys(returns).length ? { returns } : {}) });
       }],
     ]);
     while (!this.at(Tk.Eof)) {
@@ -167,263 +168,6 @@ export class Parser extends Grammar {
       else ir.tree = this.parseNode(); // anything else begins the tree root
     }
     return ir;
-  }
-
-  // ── declarations ─────────────────────────────────────────────────────────────
-
-  // entity User { name text required  role admin | member  password text min:8 }
-  // A data shape + its validation contract. Every entity gets an implicit `id uuid`.
-  private parseEntity(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Entity);
-    const name = this.eat(Tk.Ident).v;
-    this.eat(Tk.Punct, Pn.BraceL);
-    const fields: Entity = { id: 'uuid' };
-    const constraints: EntityConstraints = {};
-    while (!this.at(Tk.Punct, Pn.BraceR)) {
-      const fieldName = this.eat(Tk.Ident).v;
-      let head = this.eat(Tk.Ident).v;
-      // `features list<text>` — a field holding a list of scalars (feature bullets, tags, categories). muten values
-      // already support list<scalar>; letting an entity FIELD be one spares the model the cryptic `expected ident, got "<"`.
-      if (head === 'list' && this.at(Tk.Punct, Pn.Lt)) { this.next(); const elem = this.eat(Tk.Ident).v; this.eat(Tk.Punct, Pn.Gt); head = `list<${mapFieldType(elem)}>`; }
-      const options = [head];                                                  // type, then any `| enum` alternatives
-      while (this.at(Tk.Punct, Pn.Pipe)) { this.next(); options.push(this.eat(Tk.Ident).v); }
-      fields[fieldName] = options.length > 1 ? 'enum:' + options.join('|') : (head.startsWith('list<') ? head : mapFieldType(options[0]));
-      const constraint = this.parseConstraints();                              // optional constraints: required, min:N, max:N
-      if (Object.keys(constraint).length) constraints[fieldName] = constraint;
-    }
-    this.eat(Tk.Punct, Pn.BraceR);
-    ir.entities[name] = fields;
-    if (Object.keys(constraints).length) (ir.constraints = ir.constraints || {})[name] = constraints;
-  }
-
-  // Validation suffix on an entity field: `required`, `min:N`, `max:N`, `pattern:"<regex>"` (any order, all optional).
-  private parseConstraints(): FieldConstraint {
-    const constraint: FieldConstraint = {};
-    while (this.at(Tk.Ident, Kw.Required) || this.at(Tk.Ident, Kw.Min) || this.at(Tk.Ident, Kw.Max) || this.at(Tk.Ident, Kw.Pattern)) {
-      const key = this.next().v;
-      if (key === Kw.Required) { constraint.required = true; continue; }
-      // accept BOTH `min:8` (muten) and `min(8)` (the function-call style every model reaches for) — same meaning.
-      const paren = this.at(Tk.Punct, Pn.ParenL);
-      if (paren) this.next(); else this.eat(Tk.Punct, Pn.Colon);
-      if (key === Kw.Pattern) { constraint.pattern = this.eat(Tk.String).v; if (paren) this.eat(Tk.Punct, Pn.ParenR); continue; } // `pattern:"^\d{5}$"` — a regex string
-      const num = Number(this.eat(Tk.Number).v);
-      if (paren) this.eat(Tk.Punct, Pn.ParenR);
-      if (key === Kw.Min) constraint.min = num; else constraint.max = num;
-    }
-    return constraint;
-  }
-
-  // The scalar type a literal initial reveals, for an untyped state (`= false` → bool). '' when it can't be inferred
-  // (an object draft or `= null` — those still need an explicit `: type`). An array → 'list' (element synthesized in toDoc).
-  private inferType(v: Value | undefined): string {
-    if (typeof v === 'boolean') return 'bool';
-    if (typeof v === 'number') return 'number';
-    if (typeof v === 'string') return 'text';
-    if (Array.isArray(v)) return 'list';
-    return '';
-  }
-
-  // state { } (page-local) and store { } (app-global) share one grammar: `name = <initial|query> : <type>`
-  private parseState(keyword: Kw, target: { [name: string]: StateDef }): void {
-    this.eat(Tk.Ident, keyword);
-    this.eat(Tk.Punct, Pn.BraceL);
-    while (!this.at(Tk.Punct, Pn.BraceR)) {
-      const nameTok = this.eat(Tk.Ident);
-      this.eat(Tk.Punct, Pn.Assign);
-      let source: string | undefined;
-      let refresh: number | undefined;
-      let live: boolean | undefined;
-      let initial: Value | undefined;
-      let hasInitial = false;
-      if (this.at(Tk.Ident, Kw.Query)) { this.next(); source = 'query:' + this.eat(Tk.Ident).v; if (this.at(Tk.Ident, Kw.Live)) { this.next(); live = true; } else if (this.at(Tk.Ident, Kw.Every)) { this.next(); refresh = this.parseDuration(); } } // `query x live` -> WebSocket; `every Ns` -> poll
-      else if (this.at(Tk.Punct, Pn.BraceL) || this.at(Tk.Punct, Pn.BrackL)) { initial = this.parseValue(); hasInitial = true; }
-      else if (this.at(Tk.String)) { initial = this.next().v; hasInitial = true; }
-      else if (this.at(Tk.Number)) { initial = Number(this.next().v); hasInitial = true; }
-      else if (this.at(Tk.Ident, Kw.True) || this.at(Tk.Ident, Kw.False)) { initial = this.next().v === Kw.True; hasInitial = true; }
-      else if (this.at(Tk.Ident, 'null')) { this.next(); hasInitial = true; }                    // `= null` → initial stays undefined → genState emits signal(null), NOT the string "null"
-      else { initial = this.next().v; hasInitial = true; }                                       // bare enum value
-      // `: type` is OPTIONAL when a literal initial reveals it (`x = false` → bool, `q = ""` → text, `n = 0` → number,
-      // `cards = [ … ]` → list). Only a query / `= null` / an object draft still needs the annotation. Same "infer, don't
-      // demand a redundant declaration" as list shapes — spares the model the cryptic `expected ":", got "}"`.
-      let type: string;
-      if (this.at(Tk.Punct, Pn.Colon)) { this.next(); type = this.parseType(); }
-      else {
-        const inferred = source ? '' : this.inferType(hasInitial ? initial : undefined);
-        if (!inferred) throw new ParseError(`state "${nameTok.v}" needs a type — write \`${nameTok.v} = <value> : text|number|bool|list<T>\`${source ? ' (a query returns a list: `: list<T>`)' : ''}.`, this.locOf(this.peek().pos));
-        type = inferred;
-      }
-      const persist = this.at(Tk.Ident, Kw.Persist) ? (this.next(), true) : undefined; // `: T persist` -> localStorage-backed
-      const loc = this.locOf(nameTok.pos);
-      target[nameTok.v] = source ? { type, source, refresh, live, loc } : { type, initial: hasInitial ? initial : null, persist, loc };
-    }
-    this.eat(Tk.Punct, Pn.BraceR);
-  }
-
-  // `every 5s | 500ms | 2m` -> poll interval in milliseconds (for `query x every ...`).
-  private parseDuration(): number {
-    const start = this.peek();
-    const n = Number(this.eat(Tk.Number).v);
-    const unit = this.eat(Tk.Ident).v;
-    const mult = unit === 'ms' ? 1 : unit === 's' ? 1000 : unit === 'm' ? 60000 : 0;
-    if (!mult || !(n > 0)) throw new ParseError('`every` expects a positive duration like `5s`, `500ms`, or `2m`', this.locOf(start.pos));
-    return n * mult;
-  }
-
-  // `get <name> = <expr>`: a store derived/memoized value (compiles to a `computed`).
-  private parseGet(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Get);
-    const name = this.eat(Tk.Ident).v;
-    this.eat(Tk.Punct, Pn.Assign);
-    (ir.gets = ir.gets || {})[name] = this.parseExpr();
-  }
-
-  // `action <name>[(a: T, b: T)] mutates <targets> [<- <input>] { <statements> }`.
-  // Mutation logic lives in the source, declared and bounded; the compiler only translates it.
-  // Two parameter forms: multi-param `(a: T, b: T)` (typed, like a part) and legacy `<- input`.
-  // They never combine: a `(...)` action reads its params; a `<- v` action reads its input.
-  private parseAction(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Action);
-    const name = this.eat(Tk.Ident).v;
-    let params: PartParam[] | undefined;   // optional typed params: `action f(a: T, b: T)`
-    if (this.at(Tk.Punct, Pn.ParenL)) params = this.parseParenList(() => { const pn = this.eat(Tk.Ident).v; this.eat(Tk.Punct, Pn.Colon); return { name: pn, type: this.parseType() }; });
-    if (this.at(Tk.Punct, Pn.Colon)) throw new ParseError(`action \`${name}\` declares a return type (\`: …\`) — muten actions cannot return a value, they only \`mutates\` state. Since \`${name}\` just derives a value from its inputs, make it a \`get\`, not an action — e.g. a detail page reads \`param pid\` then \`get match = store.items where id == pid\`. Drop the \`: Type\` and the \`return\`.`, this.locOf(this.peek().pos));
-    const mutates: string[] = []; // a pure command (e.g. explicit `post`) may mutate nothing local
-    if (this.at(Tk.Ident, Kw.Mutates)) {
-      this.next();
-      // `mutates` with no target (`action f mutates { … }`) is the classic slip: teach the two fixes instead of "expected ident".
-      if (!this.at(Tk.Ident)) throw new ParseError(`\`mutates\` needs at least one state name (e.g. \`mutates users\`). If \`${name}\` changes no local state, drop \`mutates\` entirely: \`action ${name} { … }\`.`, this.locOf(this.peek().pos));
-      mutates.push(this.eat(Tk.Ident).v);
-      while (this.at(Tk.Punct, Pn.Comma)) { this.next(); mutates.push(this.eat(Tk.Ident).v); }
-    }
-    let input = '';               // optional legacy input parameter (`<- item`)
-    if (this.at(Tk.LArrow)) { this.next(); input = this.eat(Tk.Ident).v; }
-    ir.actions[name] = { mutates, input, params, body: this.parseActionBody() };
-  }
-
-  // `{ statement* }`: an action body or an `if` branch; each statement is a declared mutation.
-  private parseActionBody(): Stmt[] {
-    this.eat(Tk.Punct, Pn.BraceL);
-    const body: Stmt[] = [];
-    while (!this.at(Tk.Punct, Pn.BraceR)) body.push(this.parseStatement());
-    this.eat(Tk.Punct, Pn.BraceR);
-    return body;
-  }
-
-  // `if <expr> { ... } [else { ... }]`: the only branching inside an action (toggles, validation, add-or-remove).
-  private parseIf(): IfStmt {
-    this.eat(Tk.Ident, Kw.If);
-    const cond = this.parseExpr();
-    const then = this.parseActionBody();
-    const otherwise = this.at(Tk.Ident, Kw.Else) ? (this.next(), this.parseActionBody()) : null;
-    return { op: StOp.If, cond, then, else: otherwise };
-  }
-
-  // A statement: an `if` block, or `target.method(args)` dispatched through the `statements` table.
-  // Explicit non-REST request (escape hatch): `post "client:/path" body expr` or `delete "client:/path"`.
-  private parseRequest(): Stmt {
-    const method = this.eat(Tk.Ident).v.toUpperCase();
-    const ut = this.eat(Tk.String); const url = this.parseInterpolation(ut.v, ut.pos + 1);
-    let body: Expr | null = null;
-    if (this.at(Tk.Ident, Kw.Body)) { this.next(); body = this.parseExpr(); }
-    // optional `into <state>`: capture the JSON response (e.g. an order id / confirmation code) into a local state.
-    let into: string | undefined;
-    if (this.at(Tk.Ident, Kw.Into)) { this.next(); into = this.eat(Tk.Ident).v; }
-    return { op: StOp.Request, method, url, body, into };
-  }
-
-  private parseStatement(): Stmt {
-    const pos = this.peek().pos;            // first token's position, so action-body diagnostics land on the right line
-    const st = this.parseStatementInner();
-    st.loc = this.locOf(pos);
-    return st;
-  }
-  private parseStatementInner(): Stmt {
-    if (this.at(Tk.Ident, Kw.If)) return this.parseIf();
-    if (this.at(Tk.Ident, 'post') || this.at(Tk.Ident, 'put') || this.at(Tk.Ident, 'delete')) return this.parseRequest();
-    if (this.at(Tk.Ident, 'let') || this.at(Tk.Ident, 'const') || this.at(Tk.Ident, 'var')) { const kw = this.peek().v; const nx = this.toks[this.pos + 1]; const vn = nx ? nx.v : 'x'; throw new ParseError(`\`${kw} ${vn} = …\` — muten actions have no \`${kw}\`/local variables. Make \`${vn}\` a \`get\` (declared outside the action), or inline its value where it's used. To bump-or-add (e.g. a cart): \`if (items.count where id == x) > 0 { items.patch where id == x with { … } } else { items.push({ … }) }\`.`, this.locOf(this.peek().pos)); }
-    const target = this.eat(Tk.Ident).v;
-    if (this.at(Tk.Punct, Pn.ParenL)) { // `fn(args)`: call a use'd function as a side-effect statement (validate checks fn is declared)
-      this.next();
-      const args: Expr[] = [];
-      while (!this.at(Tk.Punct, Pn.ParenR)) { args.push(this.parseExpr()); if (this.at(Tk.Punct, Pn.Comma)) this.next(); }
-      this.eat(Tk.Punct, Pn.ParenR);
-      return { op: StOp.Extern, fn: target, args };
-    }
-    this.eat(Tk.Punct, Pn.Dot);
-    const method = this.eat(Tk.Ident).v;
-    // Lambda-free predicate mutation (the ONLY form): `tasks.remove where id == x` / `tasks.patch where id == x with { ... }`
-    if (method === StOp.Remove || method === StOp.Patch) {
-      if (!this.at(Tk.Ident, Kw.Where)) throw new ParseError(`\`${method}\` takes a \`where <cond>\` predicate now, not a \`(x => …)\` lambda — write \`${target}.${method} where <cond>\`${method === StOp.Patch ? ' with { … }' : ''} (item fields read bare)`, this.locOf(this.peek().pos));
-      this.next();
-      const pred = this.parseExpr();
-      if (method === StOp.Patch) { this.eat(Tk.Ident, Kw.With); return { op: StOp.Patch, target, pred, patch: this.parseExpr() }; }
-      return { op: StOp.Remove, target, pred };
-    }
-    this.eat(Tk.Punct, Pn.ParenL);
-    const build = this.statements.get(method);
-    if (!build) { // not a built-in op: a store-action call `shop.add(draft)` (validate confirms target is a store)
-      const args: Expr[] = [];
-      while (!this.at(Tk.Punct, Pn.ParenR)) { args.push(this.parseExpr()); if (this.at(Tk.Punct, Pn.Comma)) this.next(); }
-      this.eat(Tk.Punct, Pn.ParenR);
-      return { op: StOp.Call, target, method, args };
-    }
-    const stmt = build(target);
-    this.eat(Tk.Punct, Pn.ParenR);
-    return stmt;
-  }
-
-  // mock { query: <value>, ... }: inline test data. sources { query: "url" | { url, at } }: real endpoints.
-  private parseMock(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Mock);
-    const mock: { [name: string]: Value } = ir.mock || {};
-    this.parseEntries((name) => { mock[name] = this.parseValue(); });
-    ir.mock = mock;
-  }
-  private parseSources(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Sources);
-    const sources: { [name: string]: Value } = ir.sources || {};
-    this.parseEntries((name) => { sources[name] = this.parseValue(); });
-    ir.sources = sources;
-  }
-  // App-wide backend config: `api { base: "..." headers: { ... } }` (in app.muten). Applied to every `sources`.
-  private parseApi(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Api);
-    const api: { [name: string]: Value } = ir.api || {};
-    this.parseEntries((name) => { api[name] = this.parseValue(); });
-    ir.api = api;
-  }
-  // `meta { title "..." description "..." }` -> `<title>` + `<meta>` tags (og:* auto-derived).
-  private parseMeta(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Meta);
-    this.eat(Tk.Punct, Pn.BraceL);
-    const meta: { [k: string]: string } = ir.meta || {};
-    while (!this.at(Tk.Punct, Pn.BraceR)) { const key = this.eat(Tk.Ident).v; meta[key] = this.eat(Tk.String).v; }
-    this.eat(Tk.Punct, Pn.BraceR);
-    ir.meta = meta;
-  }
-
-  // `routes { "/url" -> page [in layout] [guard [not] store.flag else "/redirect"] }`: the app root (app.muten).
-  private parseRoutes(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Routes);
-    this.eat(Tk.Punct, Pn.BraceL);
-    const routes: Route[] = ir.routes || [];
-    while (!this.at(Tk.Punct, Pn.BraceR)) {
-      const start = this.peek();
-      const url = this.eat(Tk.String).v;             // path is a quoted string literal (no path sub-grammar)
-      this.eat(Tk.Arrow);
-      const route: Route = { url, page: this.eat(Tk.Ident).v, loc: this.locOf(start.pos) };
-      if (this.at(Tk.Ident, Kw.In)) { this.next(); route.layout = this.eat(Tk.Ident).v; } // `in pro`: mount inside that layout
-      if (this.at(Tk.Ident, Kw.Guard)) {             // `guard [not] store.flag else "/redirect"`
-        this.next();
-        route.guardNeg = this.at(Tk.Ident, Kw.Not) ? (this.next(), true) : false;
-        route.guard = this.parseDotted();            // store boolean, e.g. auth.loggedIn
-        this.eat(Tk.Ident, Kw.Else);
-        route.redirect = this.eat(Tk.String).v;
-      }
-      routes.push(route);
-    }
-    this.eat(Tk.Punct, Pn.BraceR);
-    ir.routes = routes;
   }
 
   // `shell { <node>* }`: persistent app chrome wrapping every route; holds the `slot` outlet.
@@ -437,38 +181,6 @@ export class Parser extends Grammar {
     const start = this.eat(Tk.Ident, Kw.Layout);
     const name = this.eat(Tk.Ident).v;
     (ir.layouts = ir.layouts || {})[name] = { type: Nt.Layout, props: {}, children: this.parseChildren(), loc: this.locOf(start.pos) };
-  }
-
-  // `const NAME = <scalar>`: compile-time immutable, inlined at build. Scalars only: structured
-  // config uses a block (e.g. `theme { ... }`), so Muten never needs a JS-style object literal.
-  private parseConst(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Const);
-    const name = this.eat(Tk.Ident).v;
-    this.eat(Tk.Punct, Pn.Assign);
-    if (this.at(Tk.Punct, Pn.BraceL) || this.at(Tk.Punct, Pn.BrackL)) {
-      throw new ParseError('const holds a single value (string/number/bool) — use a block like `theme { … }` for structured data', this.locOf(this.peek().pos));
-    }
-    (ir.consts = ir.consts || {})[name] = this.parseScalar();
-  }
-
-  // `theme { space { md "16px" ... }  breakpoints { md "768px" ... } }`: project token scale.
-  // No CSS here (that lives in the stylesheet); the build plugin reads this for token values.
-  private parseTheme(ir: IR): void {
-    this.eat(Tk.Ident, Kw.Theme);
-    this.eat(Tk.Punct, Pn.BraceL);
-    const theme: { [scale: string]: ThemeScale } = {};
-    while (!this.at(Tk.Punct, Pn.BraceR)) {
-      const scale = this.eat(Tk.Ident).v;            // e.g. space, font, weight, leading, breakpoints
-      this.eat(Tk.Punct, Pn.BraceL);
-      const steps: ThemeScale = {};
-      // step -> "value". A hyphenated key (e.g. "base-100", "primary-content") is QUOTED, like a
-      // hyphenated class name; a plain key (primary, md) stays bare.
-      while (!this.at(Tk.Punct, Pn.BraceR)) steps[this.at(Tk.String) ? this.next().v : this.eat(Tk.Ident).v] = this.eat(Tk.String).v;
-      this.eat(Tk.Punct, Pn.BraceR);
-      theme[scale] = steps;
-    }
-    this.eat(Tk.Punct, Pn.BraceR);
-    ir.theme = theme;
   }
 
   // `part Name(p: type, ...) { <tree> }`: reusable composition, inlined at build by `compose`.
@@ -549,7 +261,7 @@ export class Parser extends Grammar {
     // `if <cond> { … }` in the TREE — conditional rendering is `when`, not `if` (`if` is action-body only). Teach it
     // instead of the cryptic `expected ":", got …` the model gets when `if` is parsed as a primitive name.
     if (this.at(Tk.Ident, Kw.If)) throw new ParseError('conditional rendering is `when <cond> { … }`, not `if` (`if/else` is only inside an action body) — e.g. `when not user.isAnonymous { … }`.', this.locOf(this.peek().pos));
-    if (this.at(Tk.Ident, Kw.Else)) throw new ParseError('muten has no `else` in the tree (`if/else` is action-body only). Two branches on a page = two `when`s: `when x { … }` then `when x == false { … }` (or `when not x { … }`). For an enum use `match status { active -> …  lead -> … }`.', this.locOf(this.peek().pos));
+    if (this.at(Tk.Ident, Kw.Else)) throw new ParseError('`else` goes right after the `}` of a `when`: `when x { … } else { … }` (or `else when y { … }`). For an enum use `match status { active -> …  lead -> … }`.', this.locOf(this.peek().pos));
     // `<div>`/`<span>`/… — the model wrote an HTML tag where a primitive goes. muten has NO tags; map it to the primitive.
     if (this.at(Tk.Punct, Pn.Lt)) {
       const nx = this.toks[this.pos + 1]; const tag = nx && nx.t === Tk.Ident ? nx.v : ''; const hint = nonPrimitiveHint(tag);
@@ -558,6 +270,12 @@ export class Parser extends Grammar {
     const head = this.eat(Tk.Ident);
     const type = head.v;
     const loc = this.locOf(head.pos);
+    // a component from npm: `Rating(value: x)`, and a library's parts as its docs write them, `Dialog.Root { … }`
+    if (this.foreign.has(type) && !this.at(Tk.String)) {   // `Card class(…) { … }` too; `Text "…"` stays muten's (a library may also export a Text)
+      let path = type;
+      while (this.at(Tk.Punct, Pn.Dot)) { this.next(); path += '.' + this.eat(Tk.Ident).v; }
+      return this.parseForeignCall(path, loc);
+    }
     if (this.at(Tk.Punct, Pn.ParenL)) { // part instance: `Name(arg: value)`, optional `class(…)`, optional `{ … }` slot
       const args = this.parseArgs();
       const node: IRNode = { type, args, loc };
@@ -569,7 +287,8 @@ export class Parser extends Grammar {
       const props: NodeProps = {};
       while (this.at(Tk.Ident)) {
         const word = this.peek().v;
-        if (word === Mod.Class) { this.next(); (this.modifiers.get(Mod.Class) as (p: NodeProps) => void)(props); continue; }
+        const readClass = this.modifiers.get(Mod.Class);
+        if (word === Mod.Class && readClass) { this.next(); readClass(props); continue; }
         if (this.modifiers.has(word)) throw new ParseError(`\`${word}(…)\` cannot be attached to the part \`${type}\` — only \`class(…)\` can. Put \`${word}\` inside ${type}'s own definition, or wrap the call in a \`Stack ${word}(…) { ${type}(…) }\`.`, this.locOf(this.peek().pos));
         break;   // an ordinary ident starts the next sibling node
       }
@@ -592,7 +311,7 @@ export class Parser extends Grammar {
         case Tk.Ident: {
           const word = tok.v;
           if (type === Nt.Title && isLevel(word)) { this.next(); props.level = word; break; } // heading level (h1..h6)
-          if (type === Nt.Video && VIDEO_FLAGS.has(word)) { this.next(); (props.flags = props.flags || []).push(word); break; } // <video> boolean attr
+          if ((type === Nt.Video || type === Nt.Audio) && VIDEO_FLAGS.has(word)) { this.next(); (props.flags = props.flags || []).push(word); break; } // <video> boolean attr
           if (type === Nt.List && word === Kw.Ordered) { this.next(); props.ordered = true; break; }                          // List ordered -> <ol>
           if (type === Nt.Details && word === Kw.Open) { this.next(); props.open = true; break; }                              // Details open -> <details open>
           if (type === Nt.Row && word === Kw.Head) { this.next(); props.head = true; break; }                                  // Row head -> a header row (cells -> <th>, in <thead>)
@@ -603,7 +322,7 @@ export class Parser extends Grammar {
           break;
         }
         case Tk.Punct:
-          if (tok.v === Pn.BraceL) { this.next(); while (!this.at(Tk.Punct, Pn.BraceR)) { if (this.at(Tk.Ident, Kw.Match)) children.push(...this.parseMatch()); else children.push(this.parseNode()); } this.eat(Tk.Punct, Pn.BraceR); }
+          if (tok.v === Pn.BraceL) { this.next(); while (!this.at(Tk.Punct, Pn.BraceR)) children.push(...this.parseChild()); this.eat(Tk.Punct, Pn.BraceR); }
           reading = false;                                                         // any punct (including `}`) closes the node
           break;
         default:
@@ -635,18 +354,64 @@ export class Parser extends Grammar {
     this.eat(Tk.Punct, Pn.ParenR);
   }
 
+  // A component from npm, called like a part: `Rating(value: stars, max: 5) on(sl-change: rate) class("x") { … }`. It
+  // becomes a Custom node (inputs, events and live updates are the Custom machinery); compile reads the `use` to know
+  // whether to create the element, mount the widget or render the React island. Event names may be kebab-case.
+  private parseForeignCall(type: string, loc: Loc): IRNode {
+    const props: NodeProps = { component: type, inputs: this.at(Tk.Punct, Pn.ParenL) ? this.parseForeignArgs() : {} };
+    while (this.at(Tk.Ident)) {
+      const word = this.peek().v;
+      const classModifier = word === Mod.Class ? this.modifiers.get(Mod.Class) : undefined;
+      if (classModifier) { this.next(); classModifier(props); continue; }
+      if (word === Mod.On) { this.next(); props.on = { ...props.on, ...this.parseArgs(true) }; continue; }
+      if (this.modifiers.has(word)) throw new ParseError(`\`${word}(…)\` cannot be attached to \`${type}\` — a component from npm takes its props in \`${type}(…)\`, events in \`on(…)\` and \`class(…)\`.`, this.locOf(this.peek().pos));
+      break;
+    }
+    const node: IRNode = { type: Nt.Custom, props, loc };
+    if (this.at(Tk.Punct, Pn.BraceL)) node.children = this.parseChildren();   // slotted content (a Web Component's <slot>)
+    return node;
+  }
+
   // ── small readers ────────────────────────────────────────────────────────────
 
   // `{ <node>* }`: a children block shared by shell/part/when/each and inline blocks.
   private parseChildren(): IRNode[] {
     this.eat(Tk.Punct, Pn.BraceL);
     const children: IRNode[] = [];
-    while (!this.at(Tk.Punct, Pn.BraceR)) {
-      if (this.at(Tk.Ident, Kw.Match)) children.push(...this.parseMatch()); // `match` desugars to one When per arm
-      else children.push(this.parseNode());
-    }
+    while (!this.at(Tk.Punct, Pn.BraceR)) children.push(...this.parseChild());
     this.eat(Tk.Punct, Pn.BraceR);
     return children;
+  }
+
+  // One child in a block: a node, a `match` (one When per arm), or a `when` with its `else` chain.
+  private parseChild(): IRNode[] {
+    if (this.at(Tk.Ident, Kw.Match)) return this.parseMatch();
+    const node = this.parseNode();
+    return node.type === Nt.When && this.at(Tk.Ident, Kw.Else) ? [node, ...this.parseElse(node)] : [node];
+  }
+
+  // `when a { … } else when b { … } else { … }`: SUGAR, like `match` — each branch is a plain When on «none of the
+  // earlier conditions, and its own», so validate and compile only ever see Whens. Two `when`s with a hand-negated
+  // condition was the friction the model hit most (star ratings, sent / not sent).
+  private parseElse(first: IRNode): IRNode[] {
+    const branches: IRNode[] = [];
+    const firstCond = first.props?.cond;
+    if (!firstCond) return branches;
+    const notYet: Expr[] = [firstCond];
+    while (this.at(Tk.Ident, Kw.Else)) {
+      const head = this.next();
+      const none = notYet.map((cond): Expr => ({ kind: Ek.Un, op: UOp.Not, operand: cond })).reduce((acc, next): Expr => ({ kind: Ek.Bin, op: BOp.And, left: acc, right: next }));
+      if (this.at(Tk.Ident, Kw.When)) {
+        this.next();
+        const own = this.parseExpr();
+        branches.push({ type: Nt.When, props: { cond: { kind: Ek.Bin, op: BOp.And, left: none, right: own } }, children: this.parseChildren(), loc: this.locOf(head.pos) });
+        notYet.push(own);
+      } else {
+        branches.push({ type: Nt.When, props: { cond: none }, children: this.parseChildren(), loc: this.locOf(head.pos) });
+        break;
+      }
+    }
+    return branches;
   }
 
   // `match <expr> { value -> node|{…}  … }`: render the arm whose value the subject equals. SUGAR — desugars to
@@ -668,134 +433,6 @@ export class Parser extends Grammar {
     return arms;
   }
 
-  // IDENT optionally parameterized: `text` or `list<User>`.
-  private parseType(): string {
-    let type = this.eat(Tk.Ident).v;
-    if (this.at(Tk.Punct, Pn.Lt)) { this.next(); type += '<' + this.eat(Tk.Ident).v + '>'; this.eat(Tk.Punct, Pn.Gt); }
-    if (this.at(Tk.Punct, Pn.Question)) throw new ParseError(`\`${type}?\` — muten has no nullable types and no \`null\`. Model "absent / nothing selected" with a bool flag + scalars instead: \`loggedIn = false : bool persist\` + \`userName = "" : text\`, shown with \`when loggedIn { … }\`.`, this.locOf(this.peek().pos));
-    return type;
-  }
-
-  // `(ident)` — one identifier in parens (Chart kind/x/y/color); bare `ident` also accepted.
-  private parenIdent(): string {
-    const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next();
-    const v = this.eat(Tk.Ident).v;
-    if (paren) this.eat(Tk.Punct, Pn.ParenR);
-    return v;
-  }
-
-  // IDENT(.IDENT)* -> "cart.total". A `$param` head resolves at compose time.
-  private parseDotted(): string {
-    let path = this.at(Tk.Param) ? '$' + this.next().v : this.eat(Tk.Ident).v;
-    while (this.at(Tk.Punct, Pn.Dot)) { this.next(); path += '.' + this.eat(Tk.Ident).v; }
-    return path;
-  }
-
-  // `( item, item, ... )` with a caller-supplied item reader (used by class/columns/where).
-  private parseParenList<T>(readItem: () => T): T[] {
-    this.eat(Tk.Punct, Pn.ParenL);
-    const items: T[] = [];
-    while (!this.at(Tk.Punct, Pn.ParenR)) {
-      items.push(readItem());
-      if (this.at(Tk.Punct, Pn.Comma)) this.next();
-    }
-    this.eat(Tk.Punct, Pn.ParenR);
-    return items;
-  }
-
-  // `where()` clause: raw tokens up to the next `,` or `)`, re-joined -> "role == admin".
-  private rebuildClause(): string {
-    const parts: string[] = [];
-    while (!this.at(Tk.Punct, Pn.Comma) && !this.at(Tk.Punct, Pn.ParenR)) parts.push(this.next().v);
-    return parts.join(' ');
-  }
-
-  // `{ key: <read>, ... }`: keyed block; the reader handles each value (shared by mock/sources).
-  private parseEntries(read: (name: string) => void): void {
-    this.eat(Tk.Punct, Pn.BraceL);
-    while (!this.at(Tk.Punct, Pn.BraceR)) {
-      const name = this.eat(Tk.Ident).v;
-      this.eat(Tk.Punct, Pn.Colon);
-      read(name);
-      if (this.at(Tk.Punct, Pn.Comma)) this.next();
-    }
-    this.eat(Tk.Punct, Pn.BraceR);
-  }
-
-  // A URL path is a quoted string literal, interpolated like any other: `-> "/blog/{post.id}"`.
-  // No path sub-grammar: any path (numbers, `:id` params, dashes) is just the string's text.
-  private parsePath(): string | Interp {
-    return this.parseInterpolation(this.eat(Tk.String).v);
-  }
-
-  // `( key: value, ... )`: the args of a part instance or Custom inputs/on.
-  // modifiers attach to the node, never inside another modifier's () — turn the JSX-props slip (`class("x" aria(…))`) into a message that teaches, not a cryptic "expected ident".
-  private nestGuard(name: string): void {
-    if (this.at(Tk.Punct, Pn.ParenL)) throw new ParseError(`modifiers don't nest: \`${name}(…)\` attaches to the node, not inside another modifier's (). Write each as a sibling — e.g. \`Stack class(…) ${name}(…) { … }\`.`, this.locOf(this.peek().pos));
-  }
-
-  private parseArgs(): ArgMap {
-    this.eat(Tk.Punct, Pn.ParenL);
-    const args: ArgMap = {};
-    while (!this.at(Tk.Punct, Pn.ParenR)) {
-      const key = this.eat(Tk.Ident).v;
-      this.nestGuard(key);
-      this.eat(Tk.Punct, Pn.Colon);
-      args[key] = this.parseArgValue();
-      if (this.at(Tk.Punct, Pn.Comma)) this.next();
-    }
-    this.eat(Tk.Punct, Pn.ParenR);
-    return args;
-  }
-
-  private atBool(): boolean { return this.at(Tk.Ident, Kw.True) || this.at(Tk.Ident, Kw.False); }
-
-  private parseArgValue(): ArgValue {
-    if (this.at(Tk.String)) {                                // quoted: literal, not a ref (compose keeps it as text)
-      const t = this.next();                                 // …but `{…}` must interpolate here as in every other string
-      const parsed = this.parseInterpolation(t.v, t.pos + 1);
-      return typeof parsed === 'string' ? { $lit: parsed } : { $lit: t.v, $interp: parsed };
-    }
-    if (this.at(Tk.Number)) return Number(this.next().v);
-    if (this.atBool()) return this.next().v === Kw.True;     // `disabled: true` / `= false`: a literal, never a ref named «true»
-    if (this.at(Tk.Ref)) return this.next().v;               // @state
-    if (this.at(Tk.Param)) return { $param: this.next().v }; // $param (nested parts)
-    return this.parseDotted();                                // bare ref / store action (cart.add) / enum
-  }
-
-  // `aria( key: <expr>, ... )`: each value is a full expression — a literal compiles to a static attribute,
-  // a value that reads state compiles to a reactive effect (e.g. `aria(expanded: menuOpen)`).
-  private parseAriaArgs(): { [key: string]: Expr } {
-    this.eat(Tk.Punct, Pn.ParenL);
-    const out: { [key: string]: Expr } = {};
-    while (!this.at(Tk.Punct, Pn.ParenR)) {
-      const key = this.eat(Tk.Ident).v;
-      this.nestGuard(key);
-      this.eat(Tk.Punct, Pn.Colon);
-      out[key] = this.parseExpr();
-      if (this.at(Tk.Punct, Pn.Comma)) this.next();
-    }
-    this.eat(Tk.Punct, Pn.ParenR);
-    return out;
-  }
-
-  // style(name: "value") — each key becomes a CSS custom property `--name`; the value is an interpolated string
-  // (e.g. "{pct}%", "translateX({x}px)"). Only CSS variables: muten prepends `--`, so it can't set an arbitrary
-  // property and compete with class()/Tailwind. The CSS reads it with `var(--name)`. Reactive when interpolated.
-  private parseStyleArgs(): { [name: string]: string | Interp } {
-    this.eat(Tk.Punct, Pn.ParenL);
-    const out: { [name: string]: string | Interp } = {};
-    while (!this.at(Tk.Punct, Pn.ParenR)) {
-      const key = this.eat(Tk.Ident).v;
-      this.nestGuard(key);
-      this.eat(Tk.Punct, Pn.Colon);
-      const t = this.eat(Tk.String);
-      out[key] = this.parseInterpolation(t.v, t.pos + 1);
-      if (this.at(Tk.Punct, Pn.Comma)) this.next();
-    }
-    this.eat(Tk.Punct, Pn.ParenR);
-    return out;
-  }
 }
 
 export function parse(source: string): IR { return new Parser(source).parse(); }

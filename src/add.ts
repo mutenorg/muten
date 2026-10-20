@@ -14,6 +14,12 @@ interface RegistryEntry { name: string; part: string; file: string; component?: 
 interface Registry { name?: string; components: RegistryEntry[]; }
 interface Source { dir: string; reg: Registry; }
 
+// a registry.json read from a package: trusted only once it has the shape `muten add` reads
+function isRegistry(value: unknown): value is Registry {
+  if (!value || typeof value !== 'object' || !('components' in value) || !Array.isArray(value.components)) return false;
+  return value.components.every((entry: unknown) => !!entry && typeof entry === 'object' && 'name' in entry && typeof entry.name === 'string' && 'file' in entry && typeof entry.file === 'string' && 'part' in entry && typeof entry.part === 'string');
+}
+
 // ── connectable plugins (`muten add devtools`) ───────────────────────────────
 const isInstalled = (root: string, name: string): boolean => existsSync(join(root, 'node_modules', '@muten', name));
 
@@ -64,7 +70,8 @@ function discoverRegistries(root: string): Source[] {
   for (const name of Object.keys(deps)) {
     try {
       const regPath = req.resolve(name + '/registry.json'); // resolved via the package's exports; a dep with no registry just throws
-      if (existsSync(regPath)) out.push({ dir: dirname(regPath), reg: JSON.parse(readFileSync(regPath, 'utf8')) as Registry });
+      const reg: unknown = existsSync(regPath) ? JSON.parse(readFileSync(regPath, 'utf8')) : null;
+      if (isRegistry(reg)) out.push({ dir: dirname(regPath), reg });
     } catch { /* not a registry package — skip */ }
   }
   return out;

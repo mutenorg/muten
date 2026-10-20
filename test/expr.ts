@@ -26,6 +26,28 @@ const c = (l, ok, e = '') => { console.log((ok ? '✓' : 'x') + ' ' + l + (ok ? 
   c('not binds looser than contains', cond.kind === 'un' && cond.op === 'not' && cond.operand?.kind === 'bin' && cond.operand?.op === 'contains', JSON.stringify(cond));
 }
 
+// `when … else when … else …` desugars to plain Whens: each branch is «none of the earlier, and its own»
+{
+  const kids = parse('screen t\nPage { when a { Text "1" } else when b { Text "2" } else { Text "3" } }').tree.children;
+  c('else chain → three When nodes', kids.length === 3 && kids.every((k) => k.type === 'When'), kids.map((k) => k.type).join(','));
+  c('else when → not a and b', kids[1].props.cond.op === 'and' && kids[1].props.cond.left.op === 'not' && kids[1].props.cond.right.name === 'b', JSON.stringify(kids[1].props.cond));
+  c('else → not a and not b', kids[2].props.cond.op === 'and' && kids[2].props.cond.left.op === 'not' && kids[2].props.cond.right.op === 'not', JSON.stringify(kids[2].props.cond));
+  let threw = '';
+  try { parse('screen t\nPage { Stack { else { Text "x" } } }'); } catch (e) { threw = e.message; }
+  c('an else with no when before it says where it goes', /right after the `\}` of a `when`/.test(threw), threw);
+}
+
+// a string INSIDE an interpolation interpolates too: `{t("post.{id}.fee")}` builds the key (it used to close early)
+{
+  const v = parse('screen t\nuse t from "~/lib/t.ts"\nstate { id = "so" : text }\nPage { Text "{t("post.{id}.fee")}" }').tree.children[0].props.value;
+  const call = v.parts.find((p) => typeof p !== 'string');
+  c('nested interpolation parses to one call', call && call.kind === 'call' && call.fn === 't', JSON.stringify(call));
+  const arg = call.args[0];
+  c('its argument is a concatenation that reads id', arg.kind === 'bin' && arg.op === '+' && JSON.stringify(arg).includes('"name":"id"'), JSON.stringify(arg));
+  const plain = parse('screen t\nPage { when x == "a}" { Text "{y}" } }').tree.children[0].props.cond;
+  c('a } inside a plain string is just text', plain.right.kind === 'lit' && plain.right.value === 'a}', JSON.stringify(plain.right));
+}
+
 // text interpolation: `"Hi, {user.name}!"`
 {
   const v = parse('screen t\nPage { Text "Hi, {user.name}!" }').tree.children[0].props.value;

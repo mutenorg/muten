@@ -19,8 +19,11 @@ all consume `dist/`. **There is no committed `.js` - `dist/` is generated. Edit 
 ## Hard rules
 
 - **≤ 500 lines per file.** Split anything bigger into digestible, single-purpose pieces.
-- **Honest types only - never silence the compiler.** No `any`, `unknown`, `as` (incl. `as const`),
+- **Honest types only - never silence the compiler.** No `any`, `as` (incl. `as const`),
   `!` non-null assertions, `@ts-ignore`/`@ts-nocheck`/`@ts-expect-error`, or any lint disabling.
+  `unknown` only at a boundary (JSON read from disk or the network), narrowed right away by a type guard.
+- These two are **enforced**: `scripts/honest-types.mjs` runs in `npm run build` and fails on a cast, a `!`, an
+  `any`, a ts-ignore or a file over 500 lines (it walks the TypeScript syntax tree, not text).
   No phantom `Record<string, string>` (open-keyed maps use an index signature whose VALUE is a
   real named type).
 - **Types/models** live in `types.ts`; **string/keyword/operator constants** in `vocab.ts`;

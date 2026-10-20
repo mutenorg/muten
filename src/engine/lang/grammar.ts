@@ -6,8 +6,22 @@
 
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { tokenize } from '#engine/lang/lexer.js';
-import { Tk, Pn, Kw, BOp, UOp, Ek, AGG_OPS, SORT_OPS } from '#engine/shared/vocab.js';
-import type { Token, Loc, Expr, Interp, Scalar, Value } from '#engine/shared/types.js';
+import { Tk, Pn, Kw, BOp, UOp, Ek, AGG_OPS, SORT_OPS, NEW } from '#engine/shared/vocab.js';
+import type { Token, Loc, Expr, Interp, Scalar, Value, ChainStep } from '#engine/shared/types.js';
+
+// The index of the `}` that closes the `{` at `open`, counting nested braces and skipping quoted text (a `}` inside
+// "…" belongs to the string), or -1 when it never closes.
+function closingBrace(raw: string, open: number): number {
+  let depth = 0; let quote = '';
+  for (let index = open; index < raw.length; index++) {
+    const char = raw[index];
+    if (quote) { if (char === '\\') index++; else if (char === quote) quote = ''; continue; }
+    if (char === '"' || char === "'") quote = char;
+    else if (char === '{') depth++;
+    else if (char === '}' && --depth === 0) return index;
+  }
+  return -1;
+}
 
 // Comparison operators as a table: [token kind, optional value] -> binary op.
 // Adding an operator is a single new row.
@@ -39,7 +53,9 @@ export class Grammar {
   private rebaseBase = 0;
   private rebaseParent: Grammar | null = null;
 
+  protected readonly source: string;
   constructor(source: string) {
+    this.source = source;
     this.toks = tokenize(source);
     for (let i = 0; i < source.length; i++) if (source[i] === '\n') this.lineStarts.push(i + 1);
   }
@@ -160,7 +176,21 @@ export class Grammar {
       this.eat(Tk.Punct, Pn.BraceR);
       return { kind: Ek.Obj, fields };
     }
-    if (this.at(Tk.String)) return { kind: Ek.Lit, value: this.next().v };
+    if (this.at(Tk.Punct, Pn.BrackL)) {   // `[4.6, -74.08]`: a list written in place (a package's config takes them)
+      this.next();
+      const items: Expr[] = [];
+      while (!this.at(Tk.Punct, Pn.BrackR)) { items.push(this.ternary()); if (this.at(Tk.Punct, Pn.Comma)) this.next(); }
+      this.eat(Tk.Punct, Pn.BrackR);
+      return { kind: Ek.List, items };
+    }
+    // `new mapboxgl.Map({ … })`: a class a package exports (validate checks it came from a `use`)
+    if (this.at(Tk.Ident, NEW) && this.toks[this.pos + 1]?.t === Tk.Ident) {
+      this.next();
+      const made = this.primary();
+      if (made.kind !== Ek.Call) throw new ParseError('`new` makes a class a package exports, with its values: `new Chart("sales", { … })`', this.locOf(this.peek().pos));
+      return { ...made, ctor: true };
+    }
+    if (this.at(Tk.String)) return this.stringExpr(this.next());
     if (this.at(Tk.Number)) return { kind: Ek.Lit, value: Number(this.next().v) };
     let name = this.at(Tk.Param) ? '$' + this.next().v : this.eat(Tk.Ident).v; // $param resolves at compose time
     // `if … then … else` is a STATEMENT (action bodies only); in an expression muten uses a ternary. `if`/`then`/`else`
@@ -208,15 +238,45 @@ export class Grammar {
     if (this.at(Tk.Punct, Pn.ParenL)) {
       if (isAgg) throw new ParseError(`\`${op}\` takes ${op === 'count' ? '`where <cond>`' : '`by <expr>`'} now, not a \`(x => …)\` lambda — write \`${name.slice(0, dot)}.${op} ${op === 'count' ? 'where <cond>' : 'by <expr>'}\` (item fields read bare)`, this.locOf(this.peek().pos));
       // `list.orderBy(…)` / `.limit(…)` / `.filter(…)` — a JS/LINQ method. muten values have no methods (only the
-      // built-ins take/at + `by`/`where` aggregates), so a dotted call here is always the model reaching for JS. Teach the vocabulary.
-      if (dot !== -1) throw new ParseError(`\`.${op}(…)\`: muten values have no JS methods. Filter with \`${name.slice(0, dot)} where <cond>\`, order with \`${name.slice(0, dot)}.sort by <field>\` (or \`sortDesc by\`), take the first n with \`${name.slice(0, dot)}.take(n)\`, total/average/count with \`${name.slice(0, dot)}.sum|avg|count by <field>\`, membership with \`contains\`. A \`use\`'d function is called \`fn(x)\`, never \`x.fn()\`.`, this.locOf(this.peek().pos));
+      // built-ins take/at + `by`/`where` aggregates). One dot may still be a store's `get name(…)` (`format.money(x)`):
+      // only validate knows the stores, so it parses as a call and validate teaches the vocabulary when it is not one.
+      // A deeper path (`a.b.c(…)`) and the steps after the call (`z.string().email()`) are a package's own API: only
+      // validate knows what was `use`d, so they parse here and validate says when the head is a muten value.
       this.next();                                            // a call: fmt(a, b) -> a use'd function
-      const args: Expr[] = [];
-      while (!this.at(Tk.Punct, Pn.ParenR)) { args.push(this.ternary()); if (this.at(Tk.Punct, Pn.Comma)) this.next(); }
-      this.eat(Tk.Punct, Pn.ParenR);
-      return { kind: Ek.Call, fn: name, args };
+      const args = this.callArgs();
+      const chain = this.chainSteps();
+      return chain.length ? { kind: Ek.Call, fn: name, args, chain } : { kind: Ek.Call, fn: name, args };
     }
     return { kind: Ek.Ref, name };
+  }
+
+  // the values of a call, after its `(`
+  protected callArgs(): Expr[] {
+    const args: Expr[] = [];
+    while (!this.at(Tk.Punct, Pn.ParenR)) { args.push(this.ternary()); if (this.at(Tk.Punct, Pn.Comma)) this.next(); }
+    this.eat(Tk.Punct, Pn.ParenR);
+    return args;
+  }
+
+  // `.select("*").eq("shop", id)` / `.success`: the steps after a call, on what a package gave back
+  protected chainSteps(): ChainStep[] {
+    const steps: ChainStep[] = [];
+    while (this.at(Tk.Punct, Pn.Dot)) {
+      this.next();
+      const name = this.eat(Tk.Ident).v;
+      if (this.at(Tk.Punct, Pn.ParenL)) { this.next(); steps.push({ name, args: this.callArgs() }); } else steps.push({ name });
+    }
+    return steps;
+  }
+
+  // A text literal inside an expression interpolates like every other muten string: `t("post.{id}.fee")` is
+  // `"post." + id + ".fee"`. Before, the inner `{…}` closed the outer interpolation early and nothing parsed, so a
+  // key built from a row needed a helper function in a .ts file.
+  private stringExpr(token: Token): Expr {
+    const value = this.parseInterpolation(token.v, token.pos + 1);
+    if (typeof value === 'string') return { kind: Ek.Lit, value };
+    return value.parts.map((part): Expr => (typeof part === 'string' ? { kind: Ek.Lit, value: part } : part))
+      .reduce((left, right): Expr => ({ kind: Ek.Bin, op: BOp.Add, left, right }), { kind: Ek.Lit, value: '' });
   }
 
   // "Hi, {user.name}!" -> interpolation: literal text chunks interleaved with expressions.
@@ -232,7 +292,10 @@ export class Grammar {
       const open = raw.indexOf('{', cursor);
       if (open < 0) { parts.push(raw.slice(cursor)); break; }
       if (open > cursor) parts.push(raw.slice(cursor, open));
-      const close = raw.indexOf('}', open);
+      // `{{z}}` is a literal `{z}`: what a URL template carries (a map's tiles `…/{{z}}/{{x}}/{{y}}.png`), never muten's
+      const literal = raw.startsWith('{{', open) ? raw.indexOf('}}', open + 2) : -1;
+      if (literal >= 0) { parts.push(raw.slice(open + 1, literal + 1)); cursor = literal + 2; continue; }
+      const close = closingBrace(raw, open); // the brace that closes THIS one: `{t("a.{id}")}` holds a `{…}` of its own
       if (close < 0) { parts.push(raw.slice(open)); break; } // unbalanced: keep the rest verbatim
       let sub: Grammar;
       try { sub = new Grammar(raw.slice(open + 1, close)); } // {expr} -> full expression AST
@@ -256,7 +319,7 @@ export class Grammar {
       }
       cursor = close + 1;
     }
-    return { kind: Ek.Interp, parts };
+    return parts.every((part) => typeof part === 'string') ? parts.join('') : { kind: Ek.Interp, parts };
   }
 
   // ── literal values: state initials, mock data, source descriptors (JSON-ish) ──────────

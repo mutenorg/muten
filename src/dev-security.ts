@@ -6,11 +6,11 @@
 //   · a public file is served only from INSIDE public/, and never a secret (.env, keys, dotfiles), whatever the path says;
 //   · what has a side effect (open in editor) needs a POST with this run's token in a header — a page on another
 //     origin can send neither, so a link or an <img> pointed at it does nothing.
-// Consumed by esbuild-muten.ts (devEsbuild). Pure helpers except openInEditor, which spawns the editor.
+// Consumed by dev-server.ts (devEsbuild) and esbuild-muten.ts (the CSP of a bundle). Pure helpers except openInEditor, which spawns the editor.
 
 import { spawn } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
-import { existsSync, statSync, realpathSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, statSync, realpathSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { readMutenConfig } from '#engine/project/config.js';
 import { isAbsolute, join, relative, resolve, sep, extname, basename } from 'node:path';
 
@@ -112,6 +112,36 @@ function inlineScriptHashes(html: string): string[] {
     const attrs = m[1] || '';
     if (/\ssrc\s*=/i.test(attrs) || /type\s*=\s*["']?application\/(ld\+)?json/i.test(attrs)) continue;
     out.push(`'sha256-${createHash('sha256').update(m[2], 'utf8').digest('base64')}'`);
+  }
+  return out;
+}
+
+// the libraries an app loads by their own <script> (`use google from script "https://accounts.google.com/gsi/client"`)
+const FROM_SCRIPT_URL = /from\s+script\s+"(https:\/\/[^"]+)"/g;
+const SCRIPT_DIRECTIVES = ['script-src', 'frame-src', 'style-src'];   // its code, the frames it opens, the styles it brings
+
+/** The origins of the libraries the app's .muten files load by <script>. */
+export function scriptOrigins(appRoot: string): string[] {
+  const origins = new Set<string>();
+  const walk = (dir: string): void => {
+    for (const entry of existsSync(dir) ? readdirSync(dir, { withFileTypes: true }) : []) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'node_modules' && !entry.name.startsWith('.')) walk(path); continue; }
+      if (!/\.(muten|store)$/.test(entry.name)) continue;
+      for (const match of readFileSync(path, 'utf8').matchAll(FROM_SCRIPT_URL)) { try { origins.add(new URL(match[1]).origin); } catch { /* not a URL: check says so */ } }
+    }
+  };
+  walk(join(appRoot, 'src'));
+  return [...origins];
+}
+
+/** The policy with those origins allowed to run their script, open their frames and bring their styles, and nothing else. */
+export function withScriptOrigins(policy: string, origins: string[]): string {
+  if (!policy || !origins.length) return policy;
+  let out = policy;
+  for (const directive of SCRIPT_DIRECTIVES) {
+    const has = new RegExp(`(^|;\\s*)${directive}\\s`).test(out);
+    out = has ? out.replace(new RegExp(`(${directive}[^;]*)`), (found) => `${found} ${origins.join(' ')}`) : `${out}; ${directive} 'self' ${origins.join(' ')}`;
   }
   return out;
 }

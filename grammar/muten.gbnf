@@ -8,7 +8,8 @@ root ::= ws "screen" sp ident ws decls node ws
 decls ::= (decl ws)*
 decl ::= use-decl | param-decl | const-decl | entity-decl | state-decl | store-decl | get-decl | meta-decl | action-decl
 
-use-decl    ::= "use" sp ident (ws "," ws ident)* sp "from" sp string
+use-decl    ::= "use" sp usename (ws "," ws usename)* sp "from" sp string
+usename     ::= ident (ws ":" ws type)?
 param-decl  ::= "param" sp ident
 const-decl  ::= "const" sp ident ws "=" ws scalar
 entity-decl ::= "entity" sp ident ws "{" ws (field ws)* "}"
@@ -17,11 +18,11 @@ constraint  ::= "required" | ("min" | "max") ws ":" ws number
 state-decl  ::= "state" ws "{" ws (statevar ws)* "}"
 store-decl  ::= "store" ws "{" ws (statevar ws)* "}"
 statevar    ::= ident ws "=" ws stateinit ws ":" ws type
-stateinit   ::= "query" sp ident | value
+stateinit   ::= "query" sp dotted (ws callparens chainstep*)? (sp ("live" | "every" sp number ("ms" | "s" | "m")))? | value
 type        ::= ident ("<" ident ">")?
-get-decl    ::= "get" sp ident ws "=" ws expr
+get-decl    ::= "get" sp ident ("(" ws ident (ws "," ws ident)* ws ")")? ws "=" ws expr
 meta-decl   ::= "meta" ws "{" ws (ident sp string ws)* "}"
-action-decl ::= "action" sp ident mutates? input? ws actionbody
+action-decl ::= "action" sp ident mutates? input? ws actionbody (ws "failed" ws actionbody)?
 mutates     ::= sp "mutates" sp ident (ws "," ws ident)*
 input       ::= ws "<-" ws ident
 actionbody  ::= "{" ws (stmt ws)* "}"
@@ -29,21 +30,21 @@ stmt        ::= ifstmt | requeststmt | callstmt | externstmt
 ifstmt      ::= "if" sp expr ws actionbody (ws "else" ws actionbody)?
 requeststmt ::= ("post" | "put" | "delete") sp string (sp "body" sp expr)?
 callstmt    ::= ident "." actionop "(" ws callargs ws ")"
-externstmt  ::= ident "(" ws (expr (ws "," ws expr)*)? ws ")"
-actionop    ::= "push" | "remove" | "patch" | "reset" | "toggle" | "set" | "create" | "update" | "delete" | "refetch"
+externstmt  ::= dotted ws callparens chainstep*
+actionop    ::= "push" | "remove" | "patch" | "reset" | "toggle" | "set" | "create" | "update" | "delete" | "refetch" | "send"
 callargs    ::= refetcharg (ws "," ws refetcharg)* | predarg | expr | ""
 refetcharg  ::= ident ws ":" ws expr
 predarg     ::= ident ws "=>" ws expr
 
 node       ::= whennode | eachnode | linknode | actionnode | customnode | plainnode
-whennode   ::= "when" sp expr ws block
+whennode   ::= "when" sp expr ws block (ws "else" sp "when" sp expr ws block)* (ws "else" ws block)?
 eachnode   ::= "each" sp expr sp "as" sp ident ("," ws ident)? ws block
 block      ::= "{" ws (node ws)* "}"
 linknode   ::= "Link" (sp (commonpart | "->" ws string))* (ws block)?
 actionnode ::= ("RowAction" | "Button") (sp (commonpart | actionarrow))* (ws block)?
 actionarrow ::= "->" ws dotted (ws "(" ws expr? ws ")")?
 customnode ::= "Custom" sp ident (sp modifier)*
-plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Section" | "Article" | "List" | "Details" | "Table" | "Row" | "Cell" | "Text" | "Title" | "Span" | "Image" | "Icon" | "Video" | "SearchField" | "Password" | "Textarea" | "Select" | "Checkbox" | "Number" | "Range" | "Date" | "DataTable" | "Chart" | "Svg" | "Rect" | "Line" | "Circle" | "Path" | "Group" | "Arc" | "Form" | "slot") (sp commonpart)* (ws block)?
+plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Section" | "Article" | "List" | "Details" | "Table" | "Row" | "Cell" | "Text" | "Title" | "Span" | "Image" | "Icon" | "Video" | "Audio" | "Canvas" | "File" | "SearchField" | "Password" | "Textarea" | "Select" | "Checkbox" | "Number" | "Range" | "Date" | "DataTable" | "Chart" | "Svg" | "Rect" | "Line" | "Circle" | "Path" | "Group" | "Arc" | "Form" | "slot") (sp commonpart)* (ws block)?
 commonpart ::= string | ref | level | modifier
 level      ::= "h" [1-6]
 
@@ -82,7 +83,9 @@ cmpop     ::= "==" | "!=" | "<=" | ">=" | "<" | ">" | "contains"
 addexpr   ::= mulexpr (ws ("+" | "-") ws mulexpr)*
 mulexpr   ::= primary (ws ("*" | "/") ws primary)*
 primary   ::= "(" ws ternary ws ")" | string | number | bool | "null" | callorref
-callorref ::= dotted (ws "(" ws (ternary (ws "," ws ternary)*)? ws ")")?
+callorref ::= dotted (ws callparens chainstep*)?
+callparens ::= "(" ws (ternary (ws "," ws ternary)*)? ws ")"
+chainstep ::= "." ident callparens?
 
 value   ::= array | object | scalar
 array   ::= "[" ws (value (ws "," ws value)*)? ws "]"

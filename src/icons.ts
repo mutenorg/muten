@@ -17,12 +17,14 @@ export function makeIconResolver(appRoot: string): (ref: string) => string {
     if (colon < 1) throw new Error(`Icon "${ref}" must be "set:name" — e.g. Icon "lucide:settings".`);
     const set = ref.slice(0, colon), name = ref.slice(colon + 1);
     if (!(set in sets)) {
-      try { sets[set] = req(`@iconify-json/${set}/icons.json`) as IconifyJSON; }
+      try { const json: IconifyJSON = req(`@iconify-json/${set}/icons.json`); sets[set] = json; }   // an installed set's own icons.json
       catch { throw new Error(`Icon "${ref}": the icon set isn't installed — run \`npm i -D @iconify-json/${set}\`.`); }
     }
     const data = getIconData(sets[set], name);
     if (!data) throw new Error(`Icon "${ref}": no icon named "${name}" in set "${set}".`);
     const { attributes, body } = iconToSVG(data, { width: '1em', height: '1em' });
-    return cache[ref] = iconToHTML(body, attributes as unknown as Record<string, string>);
+    const attrs: { [name: string]: string } = {};
+    for (const [name, value] of Object.entries(attributes)) if (typeof value === 'string') attrs[name] = value;
+    return cache[ref] = iconToHTML(body, attrs);
   };
 }

@@ -38,8 +38,9 @@ new Function('document', code)(document);
 let f = 0;
 const ok = (l, c) => { console.log((c ? '✓' : '✗') + ' ' + l); if (!c) f++; };
 const form = reg.find((e) => e.handlers.submit);
-const email = reg.find((e) => e.placeholder === 'email');
-const pass = reg.find((e) => e.placeholder === 'password');
+// a field is found the way its <label for> finds it: by id (the placeholder no longer repeats the field's name)
+const email = reg.find((e) => typeof e.id === 'string' && e.id.endsWith('_email'));
+const pass = reg.find((e) => typeof e.id === 'string' && e.id.endsWith('_password'));
 const errored = () => reg.some((e) => e.className === 'mu-field-error' && e.textContent);
 const done = () => reg.some((e) => e.tag === 'p' && e.textContent === 'true');
 
@@ -79,6 +80,19 @@ Page { Form bind(d) submit(go) "x" }`)));
 const utf = bad.diagnostics.filter((x) => x.code === 'unknown-field-type');
 ok('unknown field type "numbr" flagged with did-you-mean number', utf.some((x) => x.message.includes('"numbr"') && x.suggestion === 'number'));
 ok('unknown field type "url" flagged', utf.some((x) => x.message.includes('"url"')));
+
+// the constraints ride the platform's own attributes (so :valid / :invalid and screen readers see them), the form is
+// novalidate (muten words the errors in the page's language), and pattern stays muten's
+{
+  const js = compile(toDoc(parse(SRC)));
+  ok('required → the native required attribute', /f_\w+_email\.required = true;/.test(js) && /f_\w+_password\.required = true;/.test(js));
+  ok('min:6 on a text → minLength', /f_\w+_password\.minLength = 6;/.test(js));
+  ok('the form is novalidate', /\.noValidate = true;/.test(js));
+}
+
+// no interface text made from code: no «New <Entity>» title, no placeholder that is the field's identifier
+ok('no title made from the entity name', !reg.some((e) => /^New /.test(e.textContent || '')));
+ok('no placeholder repeating the field name', !reg.some((e) => e.placeholder === 'email' || e.placeholder === 'password'));
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);

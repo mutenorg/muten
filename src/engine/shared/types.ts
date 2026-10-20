@@ -3,7 +3,7 @@
 // no `as`, no phantom Record. Open-keyed maps use index signatures with real value types.
 // String/keyword/operator constants live in vocab.ts.
 
-import type { Tk, BOp, UOp, Ek, StOp, Fmt, Fk } from '#engine/shared/vocab.js';
+import type { Tk, BOp, UOp, Ek, StOp, UseKind } from '#engine/shared/vocab.js';
 
 
 // ── 1. Primitive value shapes ───────────────────────────────────────────────
@@ -75,15 +75,30 @@ export interface UnExpr { kind: Ek.Un; op: UOp; operand: Expr; }
 export interface BinExpr { kind: Ek.Bin; op: BOp; left: Expr; right: Expr; }
 export interface TernExpr { kind: Ek.Tern; cond: Expr; then: Expr; else: Expr; }
 /** A call to a `use`'d JS function: `fmt(date, "…")`. `fn` is the imported name; never a muten primitive. */
-export interface CallExpr { kind: Ek.Call; fn: string; args: Expr[]; }
+/** One step after a call on something from npm: `.select("*")` (a method) or `.success` (a property). */
+export interface ChainStep { name: string; args?: Expr[]; }
+/** `fmt(x)`, `format.money(x)`, or a package's own API: `z.string().email()` → fn `z.string`, chain [email()]. */
+export interface CallExpr { kind: Ek.Call; fn: string; args: Expr[]; chain?: ChainStep[]; ctor?: boolean; }   // ctor: `new X(…)`
+/** `[4.6, -74.08]` / `[{ price: id, quantity: 1 }]`: a list written in place, for a package's config (a map's center…). */
+export interface ListExpr { kind: Ek.List; items: Expr[]; }
 export interface ObjExpr { kind: Ek.Obj; fields: Array<{ key: string; value: Expr }>; } // inline object literal, e.g. `{ title: @draft.title, qty: 1 }`
 export interface AggExpr { kind: Ek.Agg; op: string; list: string; body: Expr; member?: string; take?: Expr; } // e.g. `lines.sum by price * qty` (item-implicit). `member` = the field read off an `at(n)` element. `take` = the top-n cap on `sort by … take(n)`.
 export interface FilterExpr { kind: Ek.Filter; list: string; cond: Expr; } // derived list, e.g. `tasks where status == "todo"` (item-implicit)
 export interface ArrExpr { kind: Ek.Arr; items: Value[]; } // inline literal list, ONLY as an `each [ {…} {…} ] as x` source — hoisted to a synthesized state in toDoc (shape inferred from the literal), so it never reaches validate/compile
-export type Expr = LitExpr | RefExpr | UnExpr | BinExpr | TernExpr | CallExpr | ObjExpr | AggExpr | FilterExpr | ArrExpr;
+export type Expr = LitExpr | RefExpr | UnExpr | BinExpr | TernExpr | CallExpr | ObjExpr | AggExpr | FilterExpr | ArrExpr | ListExpr;
 
 /** A `use a, b from "./lib.ts"` — named JS functions muten may call. The seam to the JS ecosystem. */
-export interface ImportDef { names: string[]; from: string; }
+export interface ImportDef {
+  names: string[];
+  from: string;
+  kind?: UseKind;   // a component from npm (element / widget / react); absent = functions
+  tag?: string;     // `use element`: the custom element's tag name ("sl-rating")
+  returns?: { [name: string]: string };   // `use rowsOf: list<Row> from …`: what a function gives back, so its result is checked
+  arity?: { [name: string]: { min: number; max: number } };   // from the package's types: how many values it takes (max -1 = any)
+  loc?: Loc;
+  script?: boolean; // `use google from script "https://…"`: a global its <script> leaves, loaded when first called
+  server?: string;  // set when the package belongs on a server (project/server-packages.ts): why, and what the app uses instead
+}
 
 /** "Hi, {user.name}" → a list of plain strings interleaved with embedded expressions. */
 export interface Interp {
@@ -116,13 +131,15 @@ export interface UpdateStmt { op: StOp.Update; target: string; arg: Expr; }
 export interface DeleteStmt { op: StOp.Delete; target: string; arg: Expr; }
 /** Re-run a query with N query-string params (pagination / search / filters): `products.refetch(q: x, page: n)`. */
 export interface RefetchStmt { op: StOp.Refetch; target: string; params: { [k: string]: Expr }; }
+/** A message up the socket of a `query x live`: `messages.send({ text: draft })`. */
+export interface SendStmt { op: StOp.Send; target: string; arg: Expr; }
 /** Explicit non-REST request (escape hatch): `post "shop:/orders" body item`, `delete "shop:/x/{id}"`. */
 export interface RequestStmt { op: StOp.Request; method: string; url: string | Interp; body: Expr | null; into?: string; } // `into <state>` captures the JSON response (order id / confirmation code)
 export interface CallStmt { op: StOp.Call; target: string; method: string; args: Expr[]; } // page action calling a store action, e.g. `shop.addProduct(draft)`
 /** Calling a `use`'d function as a side-effect statement: `persist(messages)`, `scrollBottom()`. Bounded: the fn is declared + checked. */
-export interface ExternStmt { op: StOp.Extern; fn: string; args: Expr[]; }
+export interface ExternStmt { op: StOp.Extern; fn: string; args: Expr[]; chain?: ChainStep[]; ctor?: boolean; }
 export interface IfStmt { op: StOp.If; cond: Expr; then: Stmt[]; else: Stmt[] | null; }
-export type Stmt = (PushStmt | SetStmt | ResetStmt | ToggleStmt | RemoveStmt | PatchStmt | CreateStmt | UpdateStmt | DeleteStmt | RefetchStmt | RequestStmt | CallStmt | ExternStmt | IfStmt) & { loc?: Loc };
+export type Stmt = (PushStmt | SetStmt | ResetStmt | ToggleStmt | RemoveStmt | PatchStmt | CreateStmt | UpdateStmt | DeleteStmt | RefetchStmt | SendStmt | RequestStmt | CallStmt | ExternStmt | IfStmt) & { loc?: Loc };
 
 
 // ── 6. Entities & validation schema ──────────────────────────────────────────
@@ -158,8 +175,10 @@ export interface EntityConstraints { [field: string]: FieldConstraint; }
 export interface StateDef {
   type: string;       // declared type tag: scalar, list<X>, or an entity name
   source?: string;    // "query:<name>" for async query-backed state
-  refresh?: number;   // parked: `query x every Ns` (polling rejected, kept so it still parses)
+  refresh?: number;   // `query x every 30s`: asked again on that beat while the tab is visible (ms)
   live?: boolean;     // `query x live` -> a WebSocket subscription (server pushes); socket closes via onCleanup
+  feed?: Expr;       // `live db.channel("x").on(…, change).subscribe()`: what keeps it current, one change at a time
+  call?: CallExpr;   // `query lookup(q)` / `query db.from("orders").select("*")`: the data comes from a function (a `use`, async or not), asked again when an arg changes
   initial?: Value;    // declared initial literal (when not query-backed)
   persist?: boolean;  // `state { x = … : T persist }` — auto load/save to localStorage (survives reload)
   loc?: Loc;
@@ -172,7 +191,9 @@ export interface StateDef {
  *  static `$lit`. Carrying both is what keeps the change from rippling through those sinks. */
 export interface LitRef { $lit: string; $interp?: Interp; }
 /** The value of a part-instance arg: a quoted literal, a bare ref string, a number, or a $param. */
-export type ArgValue = string | number | boolean | ParamRef | LitRef;
+/** An object written as a prop (`animate: { opacity: shown ? 1 : 0 }`): a component from npm takes it as it is, live. */
+export interface ExprArg { $expr: Expr; }
+export type ArgValue = string | number | boolean | ParamRef | LitRef | ExprArg;
 /** key → arg value, for part instances and Custom inputs/on. */
 export interface ArgMap { [key: string]: ArgValue; }
 
@@ -197,15 +218,15 @@ export interface ActionDef {
   input: string;
   params?: PartParam[];
   body: Stmt[];
+  failed?: Stmt[];   // `} failed { … }`: runs when the body throws (a `post` answered non-2xx, the network failed)
 }
 
-/** One route line: `routes { /url -> page [guard [not] store.flag else /path] }`. */
+/** One route line: `routes { /url -> page [guard <expr over store members> else /path] }`. */
 export interface Route {
   url: string;
   page: string;
   loc?: Loc;
-  guardNeg?: boolean;
-  guard?: string;
+  guard?: Expr;      // `guard auth.signedIn and not auth.blocked`: any expression, every ref a store member
   redirect?: string;
   layout?: string;   // `-> page in pro`: the route mounts inside the named `layout`, which stays mounted across its routes
 }
@@ -215,6 +236,29 @@ export interface ThemeScale { [step: string]: string; }
 /** The theme.muten file as parsed: section name (space/colors/radius/…) → its scale. Open set:
  *  parseTheme reads any `<section> { <step> "value" }`, so colors/radius come for free. */
 export type ThemeRaw = { [section: string]: ThemeScale };
+
+/** The app's texts: language code → key → text (project/lang-files.ts). */
+export interface Translations { [code: string]: { [key: string]: string } }
+
+/** theme.muten's `provider ThemeProvider(theme: createTheme({ … })) from "@mui/material"`: what wraps every React
+ *  component that comes from that package, so its pages only use the components. */
+export interface ThemeProvider { component: string; args: ArgMap; from: string; loc?: Loc; }
+
+/** theme.muten as a page sees it: its values, its providers and the `use` lines they call. */
+export interface ThemeKit { values: ThemeRaw; providers: ThemeProvider[]; imports: ImportDef[]; }
+
+/** The CSS library a `theme <name> { … }` connects (project/theme-library.ts). */
+export interface ThemeLibrary {
+  name: string;                            // as the theme writes it: shadcn
+  pkg: string;                             // the package it was found as: @muten/shadcn
+  dir: string;
+  css: string[];                           // its base stylesheets, always brought in
+  presets: { [name: string]: string };     // `preset noir` -> themes/noir.css
+  extras: { [name: string]: string };      // `with kit` -> kit.css
+  dark: string;                            // the selector its dark scheme hangs on
+  tailwind: boolean;                       // its stylesheets need Tailwind to be built
+  hasParts: boolean;                       // a muten plugin: its parts become available to every page
+}
 
 /** A theme ADAPTER: pure DATA describing how to render theme.muten's values for ANY styling backend.
  *  The engine has zero per-library logic — a new library is just a new adapter (no engine change). */
@@ -247,6 +291,8 @@ export interface NodeProps {
   label?: StringPropValue;
   src?: StringPropValue;
   alt?: StringPropValue;
+  accept?: string;          // File accept("image/*,.pdf")
+  currency?: string;        // Number currency("COP"): a money field
   name?: StringPropValue;   // Icon "set:name" (a static Iconify ref)
   flags?: string[];         // Video boolean attrs: controls / autoplay / loop / muted / playsinline
   ordered?: boolean;        // List `ordered` -> <ol> instead of <ul>
@@ -318,6 +364,10 @@ export interface IRNode {
 }
 
 /** The nested IR the parser produces. Optional members are populated as the grammar encounters them. */
+/** `get initials(name) = upper(…)`: a derived value that takes parameters, a pure function written in muten's own
+ *  expression grammar (no .ts for the app's own small logic). Called like any function: `initials(user.name)`. */
+export interface FnDef { params: string[]; body: Expr; loc?: Loc }
+
 export interface IR {
   screen: string;
   entities: { [name: string]: Entity };
@@ -326,6 +376,9 @@ export interface IR {
   tree: IRNode | null;
   store?: { [name: string]: StateDef };          // app-global state slice
   gets?: { [name: string]: Expr };               // .store derived/memoized values
+  getLocs?: { [name: string]: Loc };             // where each get is written
+  langFrom?: Expr;                               // `lang from shop.lang`: the language this page's t(…) speaks
+  fns?: { [name: string]: FnDef };               // `get name(params) = expr`: gets that take parameters
   effects?: Stmt[][];                            // .store reactive side-effects (each entry = one body)
   constraints?: { [entity: string]: EntityConstraints };
   mock?: { [name: string]: Value };              // inline test data
@@ -337,6 +390,7 @@ export interface IR {
   parts?: { [name: string]: PartDef };
   consts?: { [name: string]: Scalar };           // compile-time immutable scalars
   theme?: { [scale: string]: ThemeScale };       // project theme (raw blocks)
+  providers?: ThemeProvider[];                   // theme.muten: `provider X(…) from "pkg"`, around every component of that library
   params?: string[];                             // route params declared by the page (`param id`), injected at mount
   meta?: { [k: string]: string };                // page <head> metadata (title/description -> tags + og)
   imports?: ImportDef[];                         // `use a, b from "./lib.ts"` -> named JS functions to call
@@ -370,7 +424,10 @@ export interface Doc {
   constraints: { [entity: string]: EntityConstraints };
   rootId: string | undefined;
   nodes: { [id: string]: FlatNode };
+  fns?: { [name: string]: FnDef };
   gets?: { [name: string]: Expr };
+  getLocs?: { [name: string]: Loc };
+  langFrom?: Expr;
   effects?: Stmt[][];
   params?: string[];   // route params declared by the page (`param id`)
   meta?: { [k: string]: string };   // page <head> metadata (title/description)
@@ -405,214 +462,9 @@ export interface DiagOpts {
 }
 
 
-// ── 11. Compile options & context ────────────────────────────────────────────
+// ── 11. Compile options & context: types-compile.ts (re-exported below) ──────────
 
-/** App-global store slice, by domain: which members are state / gets / actions. */
-export interface StoreSlice {
-  state?: string[];
-  gets?: string[];
-  actions?: string[];
-  queries?: string[];   // subset of state backed by a `query` (holds { data, loading, error }) — a bare ref unwraps to .data
-}
+// ── 12-14. Tooling, runtime and build shapes: types-tooling.ts (re-exported below) ──
 
-export interface CompileOpts {
-  format?: Fmt;
-  stores?: { [domain: string]: StoreSlice };
-  storeCode?: string;                // standalone build only: `.store` slices inlined (CLI SSG has no virtual modules -> `muten build` bakes them into the page)
-  api?: { [name: string]: Value };   // app-wide backend config (base + default headers) applied to `sources`
-  iconResolver?: (ref: string) => string;  // `Icon "set:name"` -> inline SVG, resolved at build (Iconify). Provided by the runner; absent in unit/SSG -> Icon renders empty.
-  storeEntities?: { [domainDotMember: string]: Entity };  // element entity of each store list, so a page aggregate over a store list emits the right item fields
-  persistScope?: string;            // namespaces `persist` keys (a store's domain / a page's screen) so two scopes' same-named state don't share one localStorage key
-  classes?: { [slot: string]: string };  // styling-plugin class map: a primitive's internal parts (Form's input/label/submit/…) emit these instead of the default `mu-*` — so a library (DaisyUI) restyles the auto-generated bits with NO bridge CSS, while the engine stays agnostic (ships only the `mu-*` defaults)
-  sourceMap?: { file: string; source: string };  // emit an inline source map (compiled JS -> this .muten file), so runtime errors map back to the source line
-  ctxRefs?: boolean;     // Fmt.Patch: refs go through the live `ctx` (HMR patch builder rebuilds a node against the SAME signals)
-  patchRoot?: string;    // Fmt.Patch: the node id whose subtree to emit as a `(ctx, nodes, parent) => el` builder
-  dev?: boolean;         // dev server only: emit the HMR node registry + `el.__muten` handle (omitted in prod bundles — dead there)
-}
-
-/** One screen's resolved compile context shared by compile.ts (DOM) and logic.ts.
- *  `usedStores` is mutable: refs/actions add the domains they touch; compile.ts emits an import for each. */
-export interface CompileCtx {
-  state: { [name: string]: StateDef };
-  entities: { [name: string]: Entity };
-  actions: { [name: string]: ActionDef };
-  consts: { [name: string]: Scalar };
-  gets: { [name: string]: Expr };
-  effects: Stmt[][];
-  stateKeys: Set<string>;     // all local state names (for `.get()` resolution)
-  queryStates: Set<string>;   // states backed by a query (expose { data, loading, error } signals)
-  stores: { [domain: string]: StoreSlice };
-  usedStores: Set<string>;    // store domains actually referenced (-> import list)
-  params: Set<string>;        // route params (`param id`) -> local string injected at mount
-  storeEntities?: { [domainDotMember: string]: Entity };  // element entity of each store list, so a cross-store aggregate emits __it.<field>
-  persistScope: string;             // namespace for `persist` localStorage keys (store domain / page screen)
-  format?: Fmt;
-  ctxRefs?: boolean;                // HMR patch builders: read state/actions/gets/params via the live `ctx` object
-  dev?: boolean;                    // dev builds: actions announce themselves to the DevTools (window.__muten_rt.__dispatch)
-}
-
-/** An editable Form field derived from an entity (excludes the auto uuid id). */
-export interface EnumField { name: string; kind: Fk.Enum; options: string[]; }
-export interface SimpleField { name: string; kind: Fk.Text | Fk.Email | Fk.Number | Fk.Bool | Fk.Date | Fk.Password | Fk.Textarea; }
-export type EditableField = EnumField | SimpleField;
-
-/** Input to compileStore(): one .store domain slice (state + get + actions + effects + entities). */
-export interface StoreInput {
-  state?: { [name: string]: StateDef };
-  gets?: { [name: string]: Expr };
-  actions?: { [name: string]: ActionDef };
-  effects?: Stmt[][];
-  entities?: { [name: string]: Entity };
-  imports?: ImportDef[];                          // `use fmt from "./lib.ts"` -> without this, use'd calls in a store have no import (ReferenceError)
-  domain?: string;                                // the store's domain (filename) -> namespaces its `persist` localStorage keys so two stores' same-named state don't collide
-  dev?: boolean;                                  // dev build: self-register the store on window.__muten_stores for the DevTools
-  api?: { [name: string]: Value };                // app-wide backend config (base URL + default headers) so a store's sources/`post` resolve relative URLs, same as a page
-  stores?: { [domain: string]: StoreSlice };      // the OTHER stores, so `ui.lang` / `ui.setLang()` inside this store resolve to their imports
-}
-
-/** The pre-computed pieces an emit target assembles into the final output (HTML/module/store). */
-export interface EmitParts {
-  screen: string;
-  projectCss: string;
-  data: { [name: string]: Value };
-  sources: { [name: string]: Value };
-  api: { [name: string]: Value };
-  meta: { [k: string]: string };
-  queryUuids: { [query: string]: string[] };
-  stateDecls: string;
-  paramDecls: string;
-  actionDecls: string;
-  getDecls: string;
-  effectDecls: string;
-  componentDecls: string;
-  storeImports: string;
-  storeDecls: string;      // standalone HTML/SSR only: `.store` slices inlined as `const __store_X = (...)()`
-  externImports: string;   // `import { fmt } from "./lib.ts"` for each `use` declaration
-  renderBody: string;
-  staticHtml: string;
-  hasSlot: boolean;
-  ctxNames: string[];      // state/action/get/param names exposed as `el.__muten.ctx` for surgical HMR (dev only)
-  dev: boolean;            // dev build: emit the HMR node registry + `el.__muten` stash (off in prod bundles)
-  storeDomain?: string;    // for a .store module: its domain, so dev can self-register it on window.__muten_stores
-}
-
-/** The kind of file being analyzed (drives which top-level blocks are allowed). */
-export type FileKind = 'page' | 'store' | 'app' | 'part' | 'theme';
-
-/** validate()'s project-aware context. */
-/** One invalid token found in a `class()`, with the closest valid class (null if none is near). */
-export interface ClassIssue { cls: string; suggestion: string | null; }
-/** Validates class() names. Provided by a styling PLUGIN (a library knows how to check its own classes);
- *  the engine ships none. `available` is false when no plugin is connected -> class() is left unchecked. */
-export interface ClassValidator { available: boolean; check(classString: string): ClassIssue[]; }
-
-export interface ValidateCtx {
-  parts?: string[];
-  stores?: string[];
-  storeMembers?: { [domain: string]: string[] };  // each store's members (state + gets + actions) -> catch typos like `cart.kount`
-  kind?: FileKind;
-  classValidator?: ClassValidator;                // when set, class() names are validated against the framework's theme
-  apiClients?: string[];                           // named api clients (from app.muten `api {}`); a `post "client:/x"` prefix is checked against these. undefined -> not threaded, skip the check
-  iconExists?: (ref: string) => string | null;     // `Icon "set:name"` existence check (reads the set's icons.json). null -> ok; a string -> the error. undefined -> not threaded (skip)
-  storeSelfMut?: Set<string>;                       // "domain.action" of store actions that update a signal from its own value -> an `effect { domain.action() }` loops forever
-  storeEntities?: { [domainDotMember: string]: Entity };  // element entity of each store list ("orders.items" -> Order fields), so a page can aggregate over a store list (`orders.items.count where …`)
-  routes?: string[];   // every declared route url ("/", "/product/:pid"); a static `Link -> "/x"` must match one. undefined -> not threaded (skip)
-  selfRoute?: string;  // THIS page's own url. A link to it is provably dead: the router's `go()` ignores a nav to the current path
-}
-
-/** A lexical scope while compiling expressions: lambda locals + the action input. */
-export interface Scope {
-  locals: Set<string>;
-  sigLocals?: Set<string>;   // keyed-each row vars backed by a per-row signal -> refs compile to `<v>.get()` so bindings stay live
-  itemBinds?: { [rowVar: string]: string };   // each row var -> the settable source list state, so `bind(row.field)` writes back a patch (inline-editable list items)
-  input?: string;
-  inputIsState?: boolean;
-  item?: { var: string; fields: Set<string> };  // `<list> where <cond>` filter: bare field refs resolve to `<var>.<field>` (item-implicit)
-}
-
-
-// ── 12. Tooling / IO shapes ──────────────────────────────────────────────────
-
-/** One resolved route from app.muten: route slug, page name, and its screen file path. */
-export interface RouteEntry {
-  route: string;
-  page: string;
-  screenPath: string;
-  layout?: string;   // the `layout` the route mounts inside, when it declares `in name`
-}
-
-/** The project stylesheet resolved for a screen (CSS text + the file it came from). */
-export interface ResolvedStyles {
-  css: string;
-  from: string | null;
-}
-
-/** Everything load() produces from a .muten page: ready to compile. */
-export interface LoadResult {
-  ir: IR;
-  doc: Doc;
-  data: { [name: string]: Value };
-  sources: { [name: string]: Value };
-  styles: ResolvedStyles;
-  partNames: string[];
-}
-
-/** Autocomplete context for one file, aware of the whole app. */
-export interface CompletionState { name: string; type: string; query: boolean; }
-export interface CompletionPart { name: string; params: PartParam[]; }
-export interface CompletionResult {
-  parts: CompletionPart[];
-  state: CompletionState[];
-  actions: string[];
-  primitives: string[];
-}
-
-// ── 13. Runtime shapes (the browser side) ────────────────────────────────────
-
-/** A reactive cell: read tracks the current effect, write notifies subscribers. */
-export interface Signal<T> { get(): T; set(next: T): void; }
-/** An effect's run function, carrying its current dependency set + a disposed flag. */
-export interface EffectRun { (): void; deps: Set<Set<EffectRun>>; disposed: boolean; sync?: boolean; }
-/** One mounted node, addressable by id for surgical HMR: its element and the parent it lives under (so a patch
- *  can rebuild + swap it in place). `dispose` is set only by a prior patch — the initial mount's per-node effects
- *  live in the page scope (cleaned on navigation), so a first patch just leaves them on the detached old node. */
-// `loc` is the node's line in the PAGE. A node inlined from a part has none — `owner`/`oloc` say which part file its
-// source lives in and where. The element picker climbs to the nearest `loc` (a line the app owns) and reports `owner`
-// as a hint; it must never turn `owner` into a path, because a plugin part's file lives in node_modules.
-export interface MountedNode { el: Element; parent: Element; dispose?: () => void; type?: string; part?: string; partArgs?: { [name: string]: string }; loc?: { line: number; col: number }; owner?: string; oloc?: { line: number; col: number }; }
-export type NodeRegistry = { [id: string]: MountedNode };
-/** The live HMR handle stashed on a mounted page's root element (`el.__muten`): the reactive context (state/
- *  actions as addressable data, so a patch can rebuild a node against the SAME signals) + the node registry. */
-export interface PageInstance { el: Element; ctx: { [name: string]: unknown }; nodes: NodeRegistry; }
-/** A compiled page/shell module: its scoped CSS + a mount() that builds it into a root element (returning it). */
-export interface PageModule { css: string; mount(root: Element, params?: { [key: string]: string }): Element; meta?: { [key: string]: string }; screen?: string; }
-/** One route's lazy loader + optional guard/redirect (the hash router consumes a map of these). */
-export interface RouteDef { load(): Promise<PageModule>; guard?: () => boolean; redirect?: string; layout?: string; }
-/** The lazy loaders of the app's layouts, by name (a layout module mounts like the shell and returns its outlet). */
-export interface LayoutDefs { [name: string]: () => Promise<PageModule>; }
-
-// ── 14. Build / plugin shapes ────────────────────────────────────────────────
-
-/** A muten STYLING PLUGIN (the seam for library-specific behavior), configured via muten.config `styling`.
- *  The engine ships NONE and expects no library; a plugin provides how to emit the theme (a ThemeAdapter,
- *  data) and optionally how to validate class() (e.g. via that library's own tooling). */
-export type ClassValidatorLoader = (cssPath: string, base: string, themeRaw: ThemeRaw) => Promise<ClassValidator>;
-export interface StylingPlugin { theme?: ThemeAdapter; validate?: ClassValidatorLoader; classes?: { [slot: string]: string }; }
-
-/** The app graph the build emits to app.map.json (+ serves live at /_muten/graph): the root the AI reads. */
-export interface AppMap {
-  app: string;
-  parts: string[];
-  stores: { [domain: string]: StoreSlice };
-  routes: { [url: string]: { file: string; models: string[]; state: { [name: string]: Value }; sources: { [name: string]: string }; layout?: string } };
-  layouts?: string[];   // the app's `layout` names (routes point at them through their `layout` field)
-}
-
-/** Ambient shape for the OPTIONAL `sass` dependency — only imported when a .scss exists. */
-declare module 'sass' {
-  export function compile(path: string): { css: string };
-}
-
-// A file of an imported plugin that could not be parsed: the app still runs without its parts (the plugin is not the
-// user's code), but `muten check` says which file and why, instead of a bare «not a known part» on every caller.
-export interface PluginFileError { file: string; message: string; loc: Loc | null; }
+export * from '#engine/shared/types-compile.js';
+export * from '#engine/shared/types-tooling.js';

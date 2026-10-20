@@ -100,7 +100,7 @@ search.handlers.input({ target: { value: '' } });
 await tick();
 assert('back to 5 when cleared', rows(), 5);              // reactivity on search
 
-const nameField = registry.find((el) => el.placeholder === 'name');
+const nameField = registry.find((el) => typeof el.id === 'string' && el.id.endsWith('_name'));   // by id, as its <label for> finds it
 const roleField = registry.find((el) => el.tag === 'select');
 nameField.handlers.input({ target: { value: 'Zoe Admin' } });
 roleField.handlers.input({ target: { value: 'admin' } });

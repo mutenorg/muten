@@ -93,14 +93,29 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     snippet: 'Image "{${1:item.image}}" alt "${2:description}"',
   },
   Icon: {
-    string: 'name', props: { name: 'text' }, children: false,
-    doc: 'Icon from ANY library via Iconify `set:name`: `Icon "lucide:settings"`, `Icon "tabler:home"`. Inlined as SVG at build (only the icons you use ship — tree-shaken, no runtime). Color + size via class() (uses currentColor + 1em). The set must be installed: `npm i -D @iconify-json/<set>` (scaffold pre-installs lucide). Name is a STATIC literal (resolved at build). Data-driven? per-VALUE (status/type) → `match item.status { active -> Icon "lucide:check"  … }` (each arm tree-shakes); an icon whose URL is in the data → `Image "{item.iconUrl}"`.',
+    string: 'name', props: { name: 'text' }, children: false, interp: true,
+    doc: 'Icon from ANY library via Iconify `set:name`: `Icon "lucide:settings"`, `Icon "tabler:home"`. Inlined as SVG at build (only the icons you use ship, no runtime). Color + size via class() (uses currentColor + 1em). The set must be installed: `npm i -D @iconify-json/<set>` (scaffold pre-installs lucide). From data, when the page spells out every name it can be: a choice `Icon "{done ? "lucide:check" : "lucide:circle"}"`, a prefix `Icon "lucide:{open ? "chevron-up" : "chevron-down"}"`, or a field of a list written in the page `each tabs as tab { Icon "{tab.icon}" }` (only those icons ship). An icon whose URL is in the data → `Image "{item.iconUrl}"`.',
     snippet: 'Icon "${1:lucide:settings}"',
   },
   Video: {
     string: 'src', props: { src: 'text' }, children: false, interp: true,
     doc: 'Video (<video>). Boolean controls are bare keywords: `controls autoplay loop muted playsinline`. `Video "clip.mp4" controls` · `Video "~/media/intro.mp4" autoplay loop muted`. Size via class().',
     snippet: 'Video "${1:clip.mp4}" controls',
+  },
+  Audio: {
+    string: 'src', props: { src: 'text' }, children: false, interp: true,
+    doc: 'Audio (<audio>), the browser\'s own player: `Audio "{msg.voice}" controls` (a voice note). Same bare keywords as Video: `controls autoplay loop muted`. For a short sound fired by an action (a booking bell), `play("chime.mp3")`.',
+    snippet: 'Audio "${1:note.mp3}" controls',
+  },
+  Canvas: {
+    props: {}, children: false,
+    doc: 'A drawing surface (<canvas>) for a package that draws: `Canvas id("sales") class("h-64")` + `effect { new Chart("sales", { type: "bar", data: { … } }) }`. Size it with class(); the package draws the rest.',
+    snippet: 'Canvas id("${1:sales}") class("${2:h-64 w-full}")',
+  },
+  File: {
+    string: 'label', props: { bind: 'state', accept: 'text?', label: 'text?' }, children: false, interp: true,
+    doc: 'Picks files, or takes them dropped on it (it carries `data-over` while one is dragged over): `File bind(photo) accept("image/*") "Subir foto"`. Binds a `file` state (`photo = null : file`), or a `list<file>` to take several. Read `photo.name` / `photo.size` / `photo.type`; show it with `Image "{preview(photo)}"`; send it with `post "/media" body { photo: resize(photo, 1600) }` (a form upload) or `body photo` (the file as it is).',
+    snippet: 'File bind(${1:photo}) accept("${2:image/*}") "${3:Subir foto}"',
   },
   SearchField: {
     string: 'placeholder', props: { bind: 'state', max: 'expr?', placeholder: 'text?' }, children: false, interp: true,
@@ -258,13 +273,16 @@ export const MODIFIER_DOCS = {
 
 // Built-in formatting functions: callable like a `use`'d function but ALWAYS available (no import). The bounded
 // answer to "muten has no dates/string ops" — a FIXED set, so the language stays small and the oracle knows them.
-export const BUILTINS = ['upper', 'lower', 'initial', 'initials', 'hue', 'truncate', 'money', 'map', 'sin', 'cos', 'sqrt', 'abs', 'round', 'floor', 'ceil', 'pow', 'min', 'max', 'pi', 'ago', 'date', 'time', 'datetime', 'calendar', 'weekday', 'now', 'isToday', 'isPast', 'isFuture', 'isEmail', 'before', 'after', 'daysUntil', 'dayKey', 'addDays'];
-// Identifiers the emitted page/store module already binds — the signals runtime (`signal`/`effect`/…), the
-// injected data layer (`query`, `mount`), and the formatting BUILTINS — all in the SAME scope as a state/get/
+export const BUILTINS = ['upper', 'lower', 'initial', 'initials', 'hue', 'truncate', 'money', 'map', 'sin', 'cos', 'sqrt', 'abs', 'round', 'floor', 'ceil', 'pow', 'min', 'max', 'pi', 'ago', 'date', 'time', 'datetime', 'calendar', 'weekday', 'now', 'isToday', 'isPast', 'isFuture', 'isEmail', 'before', 'after', 'daysUntil', 'dayKey', 'addDays', 'fixed', 'percent', 'pad', 'num', 'trim', 'digits', 'slugify', 'replace', 'startsWith', 'endsWith', 'split', 'joined', 'urlParam', 'copy', 'share', 'visit', 'play', 'scrollTo', 'preview', 'resize', 'element'];
+// Identifiers the emitted page/store module already binds — the signals runtime (`signal`/`effect`/…) and the
+// injected data layer (`query`, `mount`) — all in the SAME scope as a state/get/
 // action const. Naming a state `query` compiles to `const query = …` colliding with the runtime's `query`
 // → `SyntaxError: Identifier 'query' already declared`: a BLANK page that lints green. The oracle rejects these
 // (plus any `__`-prefixed name — every runtime internal uses that prefix). Keep in sync with emit.ts's dataLayer.
-export const RESERVED_NAMES = [...BUILTINS, 'signal', 'computed', 'effect', 'root', 'onCleanup', 'query', 'mount', 'app'];
+// The BUILTINS are not here: they compile to `__b_<name>` (vocab BUILTIN_PREFIX), so a state may be called `date`.
+// every name the compiled code imports from the runtime (compile/emit.ts RUNTIME_SYMBOLS, the `__` ones aside: that prefix
+// is reserved whole) — test/diagnostics.ts checks they stay in step
+export const RESERVED_NAMES = ['signal', 'computed', 'effect', 'untrack', 'root', 'onCleanup', 'query', 'mount', 'app'];
 export const BUILTIN_DOCS: { [k: string]: string } = {
   upper: 'upper(text) → UPPERCASE.',
   lower: 'lower(text) → lowercase.',
@@ -272,7 +290,28 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   hue: 'hue(name) → a stable 0-359 hue from a text: the same person always gets the same colour (`style(h: "{hue(user.name)}")` → var(--h)).',
   initials: 'initials(name) → first + last word initials, uppercased ("Valentina Ruiz" → "VR", "Ana" → "A") — what an avatar shows.',
   truncate: 'truncate(text, n) → first n characters, + "…" if longer.',
-  money: 'money(number[, "USD"]) → localized currency, e.g. $1,234.56.',
+  money: 'money(number[, "USD"[, "es-CO"]]) → localized currency: $1,234.56; a whole amount shows no decimals ($1,234). The third value is the locale (the browser\'s by default); `money(x, "")` is the number alone.',
+  fixed: 'fixed(number, decimals[, locale]) → the number with exactly that many decimals, written the locale\'s way: `fixed(4.5, 2)` → "4.50".',
+  percent: 'percent(fraction[, decimals]) → 0.25 → "25%".',
+  pad: 'pad(number, width) → zero-padded: `pad(5, 2)` → "05" (a clock, an order number).',
+  num: 'num(text) → the number a text holds ("4,5" reads as 4.5), 0 when it holds none — for a typed field: `get qty = num(qtyText)`.',
+  trim: 'trim(text) → without the spaces at both ends.',
+  digits: 'digits(text) → only its digits: `digits("+57 300-123")` → "57300123" (phones, documents).',
+  slugify: 'slugify(text) → a URL-safe slug: "Café Luz" → "cafe-luz".',
+  replace: 'replace(text, find, with) → every `find` replaced (plain text, not a pattern): `replace(phone, " ", "")`.',
+  startsWith: 'startsWith(text, prefix) → bool.',
+  endsWith: 'endsWith(text, suffix) → bool.',
+  split: 'split(text[, sep]) → a list<text>, each piece trimmed, empty ones dropped (sep "," by default): `get tags = split(post.tags)`.',
+  joined: 'joined(list[, sep]) → one text: `joined(tags, " · ")` (sep ", " by default).',
+  urlParam: 'urlParam(name) → the `?name=` value of the page URL ("" if absent), e.g. a referral code: `get ref = urlParam("ref")`.',
+  element: 'element("#id") → the page\'s element with that id, for a library that draws into one: `effect { google.accounts.id.renderButton(element("#signin"), { theme: "outline" }) }` with `Stack id("signin")`.',
+  preview: 'preview(file) → an address to show a picked file before it is sent: `Image "{preview(photo)}" alt("")` (a text passes through, so the same Image shows the saved URL later).',
+  resize: 'resize(file, side) → the photo (JPEG, PNG or WebP; anything else as it is) made no larger than `side` pixels on its longest side, as WebP (small, keeps transparency; JPEG or PNG where the browser cannot write WebP), decoded before it is drawn. Sent as it is made: `post "/media" body { photo: resize(photo, 1600) }`.',
+  play: 'play(src) → plays a short sound once, from an action (a booking bell, a chime): `action ring() { play("/chime.mp3") }`. Browsers allow it after the person has touched the page.',
+  scrollTo: 'scrollTo("#id") → brings that part of the page into view, smoothly (at once when the person asked for less motion): `action jump() { scrollTo("#pay") }`.',
+  visit: 'visit(url) → go to an address, the way a Link does: an app path through the router, another site (the Checkout page your API handed back) by leaving for it. In an action: `post "/checkout" body { plan: plan } into session` then `visit(session.url)`. A `javascript:` address goes nowhere.',
+  share: 'share(text[, url]) → the phone\'s share sheet (WhatsApp, Instagram…); where there is none, the text goes to the clipboard. In an action: `action invite { share("Mi tienda", link) }`.',
+  copy: 'copy(text) → puts it on the clipboard; true if it could. In an action: `action share mutates copied { copy(link)  copied.set(true) }`.',
   map: 'map(v, inLo, inHi, outLo, outHi) → linear scale, e.g. a value to an SVG coordinate: `Circle cy(map(p.val, 0, max, 100, 0))`.',
   sin: 'sin(radians) → sine. For a radial position: `cx(cx0 + r * cos(a))`, `cy(cy0 + r * sin(a))`. Degrees → radians with `a * pi() / 180`.',
   cos: 'cos(radians) → cosine (see sin).',
@@ -285,12 +324,12 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   min: 'min(a, b) → the smaller of two numbers (2-arg; for a list minimum use `list.min by field`).',
   max: 'max(a, b) → the larger of two numbers (2-arg; for a list maximum use `list.max by field`).',
   pi: 'pi() → 3.14159… (the constant, as a call).',
-  ago: 'ago(isoText) → relative time: "just now" / "5m ago" / "3h ago" / "2d ago" (the timestamp is a text field holding an ISO string).',
-  date: 'date(isoText) → short date, e.g. "Jan 5".',
-  time: 'time(isoText) → short time, e.g. "3:42 PM".',
-  datetime: 'datetime(isoText) → full date + time, e.g. "Jan 5, 2024, 3:42 PM".',
-  calendar: 'calendar(isoText) → chat/feed-style smart timestamp: "Today at 3:42 PM" / "Yesterday at 3:42 PM" / "Jan 5 at 3:42 PM". The right default for a message timestamp.',
-  weekday: 'weekday(isoText) → the day name, e.g. "Monday".',
+  ago: 'ago(isoText[, locale]) → relative time in the browser\'s language (or the `locale` given): "5 minutes ago" / "hace 5 minutos", "yesterday" / "ayer", "in 3 days". The timestamp is a text field holding an ISO string.',
+  date: 'date(isoText[, locale]) → short date in the browser\'s language, e.g. "Jan 5" / "5 ene".',
+  time: 'time(isoText[, locale]) → short time, e.g. "3:42 PM" / "15:42".',
+  datetime: 'datetime(isoText[, locale]) → full date + time, e.g. "Jan 5, 2024, 3:42 PM".',
+  calendar: 'calendar(isoText[, locale]) → chat/feed-style smart timestamp in the browser\'s language (or the `locale` given): "Today, 3:42 PM" / "Hoy, 15:42" / "Yesterday, …" / "Jan 5, 3:42 PM". The right default for a message timestamp.',
+  weekday: 'weekday(isoText[, locale]) → the day name, e.g. "Monday" / "lunes".',
   now: 'now() → the CURRENT time as an ISO string. Use it to stamp a new record before sending: `messages.push({ text: draft, time: now() })`. (Pairs with ago/date/time, which format a timestamp.)',
   isToday: 'isToday(isoText) → bool: is the date today? For `when`/grouping: `when isToday(msg.time) { … }`.',
   isPast: 'isPast(isoText) → bool: is the date before now? (deadlines, expiry).',
@@ -302,7 +341,7 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   dayKey: 'dayKey(isoText) → the calendar day as "YYYY-MM-DD" (drops the time). Match an event to a day cell or group by day: `when dayKey(event.date) == dayKey(cell.date) { … }`.',
   addDays: 'addDays(isoText, n) → the date shifted by n days (n may be negative), as an ISO string. Compute a due date or a range bound.',
 };
-export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'layout', 'in', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'into', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from'];
+export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'failed', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'layout', 'in', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'into', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from'];
 export const KEYWORD_DOCS = {
   screen: 'Declares the screen name: `screen users_dashboard`.',
   entity: 'Declares a data shape + validation: `entity User { name text required  email email required  zip text pattern:"^\\d{5}$" }` (implicit uuid id). Constraints: `required`, `min:N`, `max:N`, `pattern:"<regex>"`. An `email` field validates its format on submit; `pattern` matches a value against your regex.',
@@ -310,10 +349,11 @@ export const KEYWORD_DOCS = {
   store: 'App-GLOBAL reactive state (shared across pages, no prop drilling): `store { cart = [] : list<number> }`. Referenced by name like local state.',
   const: 'A compile-time IMMUTABLE scalar, inlined (never reactive): `const TAX = 0.21`. Scalars only — structured config uses a block (e.g. theme).',
   theme: 'The project theme block (theme.muten): `theme { space { md "16px" }  breakpoints { md "768px" } }`. Supplies the token SCALE; the engine owns only the vocabulary. The reset/base CSS lives in your stylesheet.',
-  get: 'A `.store` derived/memoized value (getter): `get total = items.length`. Read as `domain.total`, recomputes when deps change.',
+  get: 'A derived value, recomputed when what it reads changes: `get total = items.sum by price`. With parameters it is a function written in muten: `get initials(name) = upper(initial(name))`, called `initials(user.name)`; in a .store, `format.money(x)` from any page.',
   effect: 'A reactive side-effect: `effect { ... }`. Runs on mount and re-runs when the state it reads changes (Angular-style). Valid in a `.store` (app-global) AND on a PAGE — the page-level home for ON-MOUNT side effects (initialize a 3rd-party SDK, analytics, focus). Body is mutations + `use`-fn calls.',
   action: 'Declares a mutation: `action delete(uid: text) mutates users { users.remove where id == uid }`.',
   mutates: 'Lists the state an action may mutate — the linter enforces it.',
+  failed: 'After an action\'s body, what it does when a request in it fails: `action save mutates problem { post "/x" body draft } failed { problem.set("No se pudo guardar") }`. `save.error` holds the reason.',
   mock: 'Inline mock data for queries: `mock { listUsers: [ { name: "Ana", role: admin } ] }`.',
   sources: 'Real data sources for queries: `sources { listChars: { url: "https://api...", at: "results" } }`.',
   api: 'App-wide backend config in app.muten: `api { base: "https://…" headers: { … } }`. A relative `sources` url is joined to `base`; headers merge (the source wins).',
@@ -343,7 +383,7 @@ export const KEYWORD_DOCS = {
   contains: 'Case-insensitive substring match: `name contains @q`.',
 };
 
-export const ACTION_OPS = ['push', 'remove', 'patch', 'reset', 'toggle', 'set', 'create', 'update', 'delete', 'refetch'];
+export const ACTION_OPS = ['push', 'remove', 'patch', 'reset', 'toggle', 'set', 'create', 'update', 'delete', 'refetch', 'send'];
 export const ACTION_OP_DOCS = {
   push: 'Append to a list state: `users.push(draft)` or an inline object `users.push({ name: draft.name, role: "admin" })` (auto-fills uuid fields). Prefer `patch` to edit in place; `remove where … ` + `push(…)` only if you truly need to reorder.',
   remove: 'Remove matching items locally (item fields bare): `users.remove where id == userId`. The param must be named differently from any field (the oracle flags `id == id`).',
@@ -355,6 +395,7 @@ export const ACTION_OP_DOCS = {
   update: 'PUT an item (by id) to a source-backed list, then replace it: `orders.update(order)`.',
   delete: 'DELETE an item (by id) from a source-backed list, then drop it: `orders.delete(order)`.',
   refetch: 'Re-run a query with N query-string params (paginate / search / filter): `products.refetch(q: term, page: n)`.',
+  send: 'Send a value up the socket of a `query x live` (as JSON, queued until it is open): `messages.send({ text: draft })`. It changes nothing locally, so it needs no `mutates`.',
 };
 
 export const PRIMITIVE_NAMES = Object.keys(PRIMITIVES);

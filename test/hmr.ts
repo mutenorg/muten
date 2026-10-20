@@ -33,7 +33,7 @@ const app = makeEl('div');
 globalThis.document = { getElementById: () => app, createElement: (t) => makeEl(t), createComment: (t) => ({ tag: '#c', text: t, parentNode: null }) } as unknown as Document;
 
 const RT = pathToFileURL(join(process.cwd(), 'dist', 'runtime.js')).href;
-const rt = { signal, computed, effect, root, onCleanup, __eq, __order, __has, __id };
+const rt = await import('../dist/runtime.js'); // the whole runtime, as the dev registry hands a patch (window.__muten_rt)
 const findNode = (doc, needle: string): string => Object.keys(doc.nodes).find((id) => doc.nodes[id].type === 'Span' && JSON.stringify(doc.nodes[id].props || {}).includes(needle))!;
 
 const V1 = 'screen home\nstate { count = 0 : number }\naction inc mutates count { count.set(count + 1) }\nPage {\n  Span "Clicked {count}"\n  Button -> inc { Span "more" }\n}';

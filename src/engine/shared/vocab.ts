@@ -34,7 +34,7 @@ export enum Pn {
 /** Keywords and reserved idents the parser matches. */
 export enum Kw {
   Screen = 'screen', Entity = 'entity', State = 'state', Store = 'store',
-  Get = 'get', Effect = 'effect', Action = 'action', Mutates = 'mutates',
+  Get = 'get', Effect = 'effect', Action = 'action', Mutates = 'mutates', Failed = 'failed',
   Mock = 'mock', Sources = 'sources', Routes = 'routes', Shell = 'shell', Layout = 'layout', In = 'in',
   Part = 'part', Const = 'const', Theme = 'theme', Query = 'query', Every = 'every', Live = 'live', Persist = 'persist', Param = 'param', Api = 'api', Body = 'body', Into = 'into', Meta = 'meta',
   Use = 'use', From = 'from',
@@ -53,6 +53,9 @@ export enum Nt {
   Table = 'Table', Row = 'Row', Cell = 'Cell',
   // content
   Text = 'Text', Title = 'Title', Span = 'Span', Image = 'Image', Icon = 'Icon', Video = 'Video',
+  Canvas = 'Canvas',
+  Audio = 'Audio',
+  File = 'File',     // picks files (or takes them dropped on it), bound to a `file` / `list<file>` state   // a sound file with the browser's player: `Audio "nota.mp3" controls` (a voice note, a podcast)   // a <canvas> a package draws on (`new Chart("sales", …)`, a shader): give it an id("…")
   // interactive
   Link = 'Link', Button = 'Button', Form = 'Form', SearchField = 'SearchField',
   Textarea = 'Textarea',   // standalone multi-line text input (<textarea>) two-way bound to a text state — for a message/comment/bio/description outside a Form
@@ -112,7 +115,7 @@ export enum BOp {
 export enum UOp { Not = 'not' }
 
 /** Expression AST node kinds (discriminants). */
-export enum Ek { Lit = 'lit', Ref = 'ref', Un = 'un', Bin = 'bin', Tern = 'tern', Interp = 'interp', Call = 'call', Obj = 'obj', Agg = 'agg', Filter = 'filter', Arr = 'arr' }
+export enum Ek { Lit = 'lit', Ref = 'ref', Un = 'un', Bin = 'bin', Tern = 'tern', Interp = 'interp', Call = 'call', Obj = 'obj', Agg = 'agg', Filter = 'filter', Arr = 'arr', List = 'list' }
 
 // List aggregates: `list.sum by expr` (projection) / `list.count where cond` (predicate).
 // Item-implicit (fields read bare, like a `where` filter); `.length` stays the count-all.
@@ -122,7 +125,7 @@ export const AGG_OPS = new Set<string>(['sum', 'count', 'avg', 'min', 'max']);
 export const SORT_OPS = new Set<string>(['sort', 'sortDesc']);
 
 /** Action-body statement ops (discriminants): mutations + the `if` branch. */
-export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle', Remove = 'remove', Patch = 'patch', Create = 'create', Update = 'update', Delete = 'delete', Refetch = 'refetch', Request = 'request', Call = 'call', Extern = 'extern', If = 'if' }
+export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle', Remove = 'remove', Patch = 'patch', Create = 'create', Update = 'update', Delete = 'delete', Refetch = 'refetch', Send = 'send', Request = 'request', Call = 'call', Extern = 'extern', If = 'if' }
 
 /** The attribute prefix data(...) keys carry once parsed (they share aria's map). */
 export const DATA_PREFIX = 'data-';
@@ -139,6 +142,8 @@ export enum Mod {
   Data = 'data',   // data(slot: "card", state: open) — `data-*` attributes for CSS hooks (component libraries style by them); rides aria()'s machinery
   Group = 'group',   // Details group("faq") — siblings sharing a group open one at a time (native <details name>)
   Eager = 'eager',   // Image eager — load it now (the cover, the first thing seen); every other Image loads as it nears the screen
+  Accept = 'accept',
+  Currency = 'currency',   // Number currency("COP") — a money field: grouped as the page's language writes it, decimals only if the currency has them   // File accept("image/*") — what the picker offers and what a drop takes
   Id = 'id',   // id("features") — a stable DOM id; the target an in-page `Link -> "#features"` anchor scrolls to
   Min = 'min', Max = 'max', Step = 'step',   // Number/Range numeric bounds + step (each takes one number expression)
   Draggable = 'draggable', Droptarget = 'droptarget',   // drag pack: mark an element draggable (carries an id) + a drop zone (fires on(drop: action(id, group)))
@@ -150,9 +155,68 @@ export enum Mod {
 }
 /** Chart mark kinds — the bounded grammar-of-graphics vocabulary. */
 export const CHART_KINDS = new Set<string>(['bar', 'line', 'area', 'point', 'scatter', 'pie', 'donut']);
-/** SVG geometry attributes that take a numeric EXPRESSION (reactive). x/y are shared with Chart encodings. */
-export const SVG_GEO: readonly string[] = ['x', 'y', 'w', 'h', 'cx', 'cy', 'r', 'x1', 'y1', 'x2', 'y2', 'rx', 'start', 'end', 'inner'];
 /** The native vector primitives — marks live inside an `Svg` (or a `Group`). */
 export const SVG_PRIMS = new Set<string>([Nt.Svg, Nt.Rect, Nt.Line, Nt.Circle, Nt.Path, Nt.Group, Nt.Arc]);
-/** SVG geometry attr -> the real SVG attribute name (w/h are shorthands). */
-export const SVG_ATTR: { readonly [k: string]: string } = { x: 'x', y: 'y', w: 'width', h: 'height', cx: 'cx', cy: 'cy', r: 'r', x1: 'x1', y1: 'y1', x2: 'x2', y2: 'y2', rx: 'rx' };
+
+/** A Custom whose file has its own imports is not inlined: its `components` entry is this prefix + the file's path, and
+ *  the page imports `mount` from it (the bundler resolves its npm imports). */
+export const CUSTOM_MODULE = '\u0000module:';
+/** A built-in function's name in the compiled code (`date(x)` → `__b_date(x)`): the page's own `date` state, a `get date(…)` or a
+ *  `use date from …` can then never collide with it, and a new built-in never takes a name an app already uses. */
+export const BUILTIN_PREFIX = '__b_';
+
+/** theme.muten: the words inside `theme [library] { … }` that are not tokens, and where their values are kept. */
+export const THEME_PRESET = 'preset';
+export const THEME_WITH = 'with';
+export const THEME_MODE = 'mode';
+export const THEME_TOKENS = 'tokens';     // section holding tokens written by their own name (`primary "#…"` → --primary)
+export const THEME_LIBRARY = 'library';   // section holding the library's name, preset and extras (not CSS)
+
+/** The keyboard skip link the shell carries, in the page's language (`<html lang>`): it is the framework's own words. */
+export const SKIP_LINK_TEXT: { readonly [lang: string]: string } = {
+  en: 'Skip to content', es: 'Saltar al contenido', pt: 'Pular para o conteúdo', fr: 'Aller au contenu', it: 'Vai al contenuto', de: 'Zum Inhalt springen',
+};
+
+/** `device`: the browser as a store every page can read (runtime-device.ts); an app's own device.store wins. */
+export const DEVICE_STORE = 'device';
+export const DEVICE_MEMBERS: readonly string[] = ['online', 'dark', 'reducedMotion', 'touch', 'width', 'height', 'visible', 'lang', 'now', 'scrollY', 'scrollDir'];
+
+/** `lang`: the language the app speaks, a store every page can read once the app has src/lang/*.lang (runtime-lang.ts). */
+/** `theme.colors.primary`: theme.muten's values, read from a page (style/theme-ref.ts). */
+export const THEME_REF = 'theme';
+/** `provider ThemeProvider(theme: …) from "@mui/material"` in theme.muten: wraps every component of that library. */
+export const THEME_PROVIDER = 'provider';
+/** `new mapboxgl.Map({ … })`: a class a package exports, made as its docs show. */
+export const NEW = 'new';
+/** Inside a `live <feed>`, the callback muten hands the package: each change it gets is applied to the state. */
+export const LIVE_CHANGE = 'change';
+/** `url.s` · `url.set({ s: "pagos" })`: the address bar as a builtin store (runtime-url.ts). */
+export const URL_STORE = 'url';
+/** `use google from script "https://…"`: a library loaded by its own <script> tag, read off the page as a global. */
+export const FROM_SCRIPT = 'script';
+/** What a `file` state tells about the file picked: `photo.name`, `photo.size` (bytes), `photo.type`. */
+export const FILE_MEMBERS: readonly string[] = ['name', 'size', 'type'];
+export const LANG_STORE = 'lang';
+export const LANG_MEMBERS: readonly string[] = ['current', 'list'];
+export const LANG_USE = 'use';            // `lang.use("en")`
+/** `t("key", …)`: a text of the app's src/lang/*.lang, in the page's language (a `use t` of the app's own wins). */
+export const TRANSLATE = 't';
+
+/** The words of a `.test` file (`muten test`): a test is steps a person would take, found the way a person finds them. */
+export enum TestKw {
+  Test = 'test',
+  Open = 'open',     // open "/route"
+  Press = 'press',   // press "Add": a button, link or other control by its text or label
+  Fill = 'fill',     // fill "Email" with "ana@x.co": a field by its label, placeholder or name
+  With = 'with',
+  See = 'see',       // see "Total: $10" / see no "Error": the visible text, retried until it holds
+  No = 'no',
+  Wait = 'wait',     // wait 300: milliseconds
+}
+/** The extension of a test file, next to its page (`home.muten` + `home.test`). */
+export const TEST_EXT = '.test';
+
+/** What a `use` brings in: functions (the default), or a UI component from npm used like a part.
+ *  `use element Rating "sl-rating" from "…"` (a Web Component) · `use widget Map from "…"` (exports `mount(el, inputs, on)`)
+ *  · `use react DayPicker from "…"` (a React component, mounted as an island). */
+export enum UseKind { Element = 'element', Widget = 'widget', React = 'react' }

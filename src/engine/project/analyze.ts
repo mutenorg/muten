@@ -3,22 +3,32 @@
 // and bad store refs are caught in context. Runs in both the extension host and Node (uses node:fs).
 // Consumed by extension.js and the CLI `muten lint` command.
 
+import { pluginNames } from '#engine/project/plugins.js';
 import { layoutDiagnostics } from '#engine/project/layouts.js';
 import { anchorImports } from '#engine/project/imports.js';
 import fs from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { parse } from '#engine/lang/parse.js';
-import { readMutenConfig } from '#engine/project/config.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { validate } from '#engine/ir/validate.js';
 import { closest, diag, ParseError } from '#engine/shared/diagnostics.js';
 import { readApi, apiClientNames, readRoutes } from '#engine/project/routes.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
-import { findStores, storeListEntities } from '#engine/project/load.js';
-import { selfUpdateTargets } from '#engine/ir/refs.js';
+import { findStores } from '#engine/project/load.js';
+import { storeContext } from '#engine/project/context.js';
 import { PRIMITIVE_NAMES } from '#engine/lang/manifest.js';
-import type { PartDef, Route, Diagnostic, ValidateResult, StateDef, CompletionResult, CompletionState } from '#engine/shared/types.js';
+import { checkTestFile } from '#engine/project/check-tests.js';
+import { checkThemeText } from '#engine/project/theme-check.js';
+import { checkConfigText } from '#engine/project/config-check.js';
+import { findAppRoot } from '#engine/project/load.js';
+import { withUseTypes } from '#engine/project/npm-types.js';
+import { readTranslations, LANG_EXT } from '#engine/project/lang-files.js';
+import { readThemeValues } from '#engine/project/theme-values.js';
+import { checkLangText } from '#engine/project/lang-check.js';
+import { storeDiagnostics } from '#engine/project/check-app.js';
+import { TEST_EXT } from '#engine/shared/vocab.js';
+import type { PartDef, Route, RouteEntry, Diagnostic, ValidateResult, StateDef, CompletionResult, CompletionState } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
 
@@ -43,11 +53,9 @@ function loadPartsLite(dir: string): Parts {
 // part is loaded - including Custom-backed ones (Chart, …), which are importable now (their .js resolves at compile).
 function loadPluginPartsLite(appRoot: string): Parts {
   const parts: Parts = {};
-  const plugins = readMutenConfig(appRoot).plugins;
-  if (typeof plugins !== 'object' || plugins === null || Array.isArray(plugins)) return parts;
   let req: NodeRequire;
   try { req = createRequire(join(appRoot, 'package.json')); } catch { return parts; }
-  for (const name of Object.keys(plugins)) {
+  for (const name of pluginNames(appRoot)) {
     let registryPath: string;
     try { registryPath = req.resolve(`@muten/${name}/registry.json`); } catch { continue; }
     let registry: { components?: Array<{ file: string; component?: string }> };
@@ -63,16 +71,6 @@ function loadPluginPartsLite(appRoot: string): Parts {
 }
 
 // Walks up the directory tree to find the app root (identified by src/pages).
-function findAppRoot(filePath: string): string | null {
-  let dir = dirname(filePath);
-  for (let i = 0; i < 30; i++) {
-    if (fs.existsSync(join(dir, 'src', 'pages'))) return dir;
-    const up = dirname(dir);
-    if (up === dir) break;
-    dir = up;
-  }
-  return null;
-}
 
 // Returns every `parts/` folder under src/ (parts are app-global, so all must be scanned).
 function allPartsDirs(root: string): string[] {
@@ -89,71 +87,6 @@ function allPartsDirs(root: string): string[] {
   };
   walk(join(root, 'src'));
   return dirs;
-}
-
-// App-global store domains (every *.store under src/) so .muten store refs like cart.total validate.
-export function projectStores(filePath: string): string[] {
-  const appRoot = findAppRoot(filePath);
-  if (!appRoot) return [];
-  const out: string[] = [];
-  const walk = (d: string): void => {
-    let entries;
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      const full = join(d, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.name.endsWith('.store')) out.push(e.name.slice(0, -'.store'.length));
-    }
-  };
-  walk(join(appRoot, 'src'));
-  return out;
-}
-
-// domain -> member names (state + gets + actions) so validate can allow `cart.count` refs
-// and page-to-store action calls like `cart.add(d)`. Same walk as projectStores but parses each file.
-export function projectStoreMembers(filePath: string): { [domain: string]: string[] } {
-  const appRoot = findAppRoot(filePath);
-  if (!appRoot) return {};
-  const out: { [domain: string]: string[] } = {};
-  const walk = (d: string): void => {
-    let entries;
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      const full = join(d, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.name.endsWith('.store')) {
-        const domain = e.name.slice(0, -'.store'.length);
-        try {
-          const ir = parse(fs.readFileSync(full, 'utf8'));
-          out[domain] = [...Object.keys(ir.state || {}), ...Object.keys(ir.gets || {}), ...Object.keys(ir.actions || {})];
-        } catch { out[domain] = []; }
-      }
-    }
-  };
-  walk(join(appRoot, 'src'));
-  return out;
-}
-
-// "domain.action" of every store action that updates a signal from its own value — so an `effect { domain.action() }`
-// on a PAGE can be flagged as an infinite loop (the effect re-runs on every read, re-triggering the write).
-export function projectStoreSelfMut(filePath: string): string[] {
-  const appRoot = findAppRoot(filePath);
-  if (!appRoot) return [];
-  const out: string[] = [];
-  const walk = (d: string): void => {
-    let entries;
-    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      const full = join(d, e.name);
-      if (e.isDirectory()) walk(full);
-      else if (e.name.endsWith('.store')) {
-        const domain = e.name.slice(0, -'.store'.length);
-        try { const ir = parse(fs.readFileSync(full, 'utf8')); for (const [an, a] of Object.entries(ir.actions || {})) if (selfUpdateTargets(a.body || []).length) out.push(`${domain}.${an}`); } catch { /* unparseable store: skip */ }
-      }
-    }
-  };
-  walk(join(appRoot, 'src'));
-  return out;
 }
 
 export function projectParts(filePath: string): Parts {
@@ -185,6 +118,21 @@ function analyzeRoutes(filePath: string, routes: Route[]): ValidateResult {
 
 // Diagnostics for a file, dispatched by file type (app.muten, theme.muten, .store, or page).
 export function analyze(filePath: string, text: string): ValidateResult {
+  if (basename(filePath) === 'muten.config') {   // the build config: the same checks `muten check` runs (config-check.ts)
+    const diagnostics = checkConfigText(dirname(filePath), text);
+    return { ok: !diagnostics.some((d) => d.severity === 'error'), diagnostics };
+  }
+  if (filePath.endsWith(LANG_EXT)) {   // src/lang/<code>.lang: the same checks `muten check` runs (lang-check.ts)
+    const diagnostics = checkLangText(findAppRoot(filePath) ?? dirname(dirname(dirname(filePath))), filePath, text);
+    return { ok: !diagnostics.some((d) => d.severity === 'error'), diagnostics };
+  }
+  if (filePath.endsWith(TEST_EXT)) {   // a .test file (muten test): its steps and the routes it opens
+    const appRoot = findAppRoot(filePath);
+    let routes: RouteEntry[] = [];
+    try { if (appRoot) routes = readRoutes(appRoot); } catch { routes = []; }
+    const diagnostics = checkTestFile(filePath, text, routes).filter((found) => routes.length || found.code !== 'test-unknown-route');
+    return { ok: !diagnostics.some((found) => found.severity === 'error'), diagnostics };
+  }
   let ir;
   try { ir = parse(text); }
   catch (e) {
@@ -196,17 +144,27 @@ export function analyze(filePath: string, text: string): ValidateResult {
     const diagnostics = [...routeCheck.diagnostics, ...layoutDiagnostics(ir)];
     return { ok: !diagnostics.some((d) => d.severity === 'error'), diagnostics };
   }
-  if (ir.theme) return { ok: true, diagnostics: [] };       // theme.muten: config only, nothing to validate
+  if (ir.theme) {   // theme.muten: the same checks `muten check` runs (theme-check.ts)
+    const diagnostics = checkThemeText(findAppRoot(filePath) ?? dirname(filePath), text);
+    return { ok: !diagnostics.some((d) => d.severity === 'error'), diagnostics };
+  }
   const appRoot = findAppRoot(filePath);
   const apiClients = appRoot ? apiClientNames(readApi(appRoot)) : undefined; // the app's named api clients, so a `post "client:/x"` prefix is checked
   const iconExists = appRoot ? getIconChecker(appRoot) : undefined;          // `Icon "set:name"` existence, so a typo'd icon lights up live instead of only blanking at build
-  if (filePath.endsWith('.store')) { // .store domain slice (state + get + action + effect)
-    return validate({ screen: 'store', state: ir.state || {}, actions: ir.actions || {}, entities: ir.entities || {}, gets: ir.gets || {}, effects: ir.effects || [], consts: {}, constraints: {}, rootId: undefined, nodes: {} }, { kind: 'store', apiClients });
+  // the app's stores, read ONCE and assembled like `check` and `build` do (context.ts), so the editor holds the same
+  // facts: it used to walk src/ four times per lint, and never told a .store about the other stores
+  const store = appRoot ? storeContext(findStores(join(appRoot, 'src'))) : undefined;
+  const translations = appRoot ? readTranslations(appRoot) : undefined;
+  const themeValues = appRoot ? readThemeValues(appRoot) : undefined;   // theme.muten: `theme.colors.primary`   // src/lang/*.lang: what t("key") and `lang` speak
+  if (filePath.endsWith('.store')) { // .store domain slice: the same checks `muten check` runs (check-app.ts storeDiagnostics)
+    const empty = { stores: [], storeMembers: {}, storeFns: {}, storeActions: {}, storeSelfMut: new Set<string>(), storeEntities: {}, storesMeta: {} };
+    const diagnostics = storeDiagnostics(basename(filePath, '.store'), ir, store ?? empty, apiClients, translations);
+    return { ok: !diagnostics.some((d) => d.severity === 'error'), diagnostics };
   }
+
   const parts = { ...projectParts(filePath) };
   for (const [name, def] of Object.entries(ir.parts || {})) parts[name] = { ...def, state: {}, entities: {}, mock: {}, css: '' }; // the page's OWN inline parts (load() composes these too — without this the IDE falsely flags them unknown)
-  const { doc } = composeDoc(ir, parts); // resolve parts (typos flagged) + hoist state -> flat doc
-  const storeEntities = appRoot ? storeListEntities(findStores(join(appRoot, 'src'))) : undefined; // element entity of each store list -> cross-store aggregates resolve in the live editor too
+  const { doc } = composeDoc(appRoot ? withUseTypes(ir, filePath, appRoot) : ir, parts); // resolve parts (typos flagged) + hoist state -> flat doc; a `use` reads its package's types
   // `readRoutes` throws on a missing/broken app.muten — in the editor that must not blind the page's own linting,
   // so a failure just leaves the route list unthreaded and the link check silently skips.
   let routes: string[] | undefined;
@@ -220,7 +178,7 @@ export function analyze(filePath: string, text: string): ValidateResult {
       selfRoute = own ? '/' + own.route : undefined;
     }
   } catch { routes = undefined; selfRoute = undefined; }
-  return validate(doc, { parts: Object.keys(parts), stores: projectStores(filePath), storeMembers: projectStoreMembers(filePath), apiClients, iconExists, storeSelfMut: new Set(projectStoreSelfMut(filePath)), storeEntities, routes, selfRoute });
+  return validate(doc, { parts: Object.keys(parts), stores: store?.stores ?? [], storeMembers: store?.storeMembers ?? {}, storeFns: store?.storeFns, storeActions: store?.storeActions, apiClients, iconExists, storeSelfMut: store?.storeSelfMut ?? new Set(), storeEntities: store?.storeEntities, routes, selfRoute, translations, themeValues });
 }
 
 // Autocomplete context: parts, state, and actions visible to this file across the whole app.

@@ -2,7 +2,7 @@
 // Kept out of compile.ts so that file stays focused on the codegen walk. Consumed by compile.ts and logic.ts.
 
 import { Nt, BOp, Fk } from '#engine/shared/vocab.js';
-import type { Entity, EditableField, ArgValue, FlatNode } from '#engine/shared/types.js';
+import type { Entity, EditableField, ArgValue, FlatNode, Value, ValueObject } from '#engine/shared/types.js';
 
 // Custom input value: @state -> snapshot of the signal; otherwise the JSON literal.
 export const customValue = (v: ArgValue): string =>
@@ -24,6 +24,10 @@ export const JS_BINOP: { [op in BOp]?: string } = {
   [BOp.Eq]: '===', [BOp.Neq]: '!==', [BOp.Lt]: '<', [BOp.Gt]: '>', [BOp.Lte]: '<=', [BOp.Gte]: '>=',
   [BOp.And]: '&&', [BOp.Or]: '||', [BOp.Add]: '+', [BOp.Sub]: '-', [BOp.Mul]: '*', [BOp.Div]: '/',
 };
+
+// The comparisons where an ABSENT value (a field the row did not bring) reads as the zero of the literal it is
+// compared with: `when d.mood == 0` was false for a row without `mood`, so its spot rendered empty.
+export const ZERO_COMPARE: ReadonlySet<BOp> = new Set([BOp.Eq, BOp.Neq, BOp.Lt, BOp.Gt, BOp.Lte, BOp.Gte]);
 
 // Parses a where() clause into an expr string and classifies it as static (literal) or dynamic (@state).
 export function parseClause(clause: string): { dynamic: boolean; expr: string } {
@@ -82,4 +86,17 @@ export function headCellIds(nodes: { [id: string]: FlatNode }): Set<string> {
   };
   for (const id of Object.keys(nodes)) if (nodes[id].type === Nt.Row && nodes[id].props?.head) visit(nodes[id].children || []);
   return heads;
+}
+
+// seed rows need a stable id too: `push` auto-mints one but seeds didn't, so remove/update by id matched
+// `undefined == undefined` (one move hit every row). Filled deterministically at compile time so SSR and CSR
+// agree (a runtime __id() would mismatch on hydration).
+export function withSeedIds(initial: Value, uuids: string[], name: string): Value {
+  if (!Array.isArray(initial)) return initial;
+  return initial.map((row, index): Value => {
+    if (typeof row !== 'object' || row === null || Array.isArray(row)) return row;
+    const filled: ValueObject = { ...row };
+    for (const field of uuids) if (filled[field] === null || filled[field] === undefined) filled[field] = `${name}-${index}`;
+    return filled;
+  });
 }

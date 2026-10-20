@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // CLI entry point for the `muten` command.
-// Commands: dev, bundle, build, check (lint), map, android. Delegates to runner.ts, build.ts, lint.ts, map.js
+// Commands: dev, bundle, build, check (lint), test, map, android. Delegates to runner.ts, build.ts, lint.ts, map.js
 // and android.ts. Consumed by package.json "bin" -> `muten dev|bundle|build|check|map|lint|add|new|android [dir]`.
 import { writeAppMap } from '../app-map-file.js';
 import { resolve, relative } from 'node:path';
@@ -11,7 +11,9 @@ import { lintApp, lintWatch } from '../lint.js';
 import { addComponents } from '../add.js';
 import { scaffoldNew } from '../scaffold.js';
 import { androidCommand } from '../android.js';
+import { testApp } from '../test-runner.js';
 import { mapApp } from '#engine/project/map.js';
+import { hasEnvironment } from '#engine/project/env.js';
 import { ParseError, formatDiagnostic, diag } from '#engine/shared/diagnostics.js';
 
 const args = process.argv.slice(2);
@@ -19,8 +21,16 @@ const cmd = args[0];
 const dir = args.slice(1).find((a) => !a.startsWith('-'));
 const json = args.includes('--json');
 const root = resolve(dir || process.cwd());
+// the environment from muten.config `env { }` (engine/project/env.ts): --env=<name> or MUTEN_ENV, else `local` for the dev
+// server and `prod` for what gets deployed. `check` and the editor read every environment's keys.
+const envFlag = (args.find((a) => a.startsWith('--env=')) || '').slice(6);
+const envDefault: { [command: string]: string } = { dev: 'local', test: 'local', bundle: 'prod', build: 'prod', android: 'prod' };
+const chosenEnv = envFlag || process.env.MUTEN_ENV || envDefault[cmd] || '';
 
 try {
+  // inside the try: a muten.config that does not parse is reported at its line, not as a crash
+  if (chosenEnv && hasEnvironment(root, chosenEnv)) process.env.MUTEN_ENV = chosenEnv;
+  else if (envFlag) { console.error(`✖ --env=${envFlag}: muten.config has no environment "${envFlag}" in env { }`); process.exit(1); }
   if (cmd === 'dev') await dev(root, args.includes('--host'));          // dev server; this machine only unless --host (wifi, a phone)
   else if (cmd === 'bundle') await bundle(root, args.includes('--sourcemap')); // production bundle; source maps only with --sourcemap
   else if (cmd === 'build') await buildApp(root, undefined, (args.find((a) => a.startsWith('--url=')) || '').slice(6)); // SSG → static HTML. --url=https://site.com → absolute sitemap/robots URLs
@@ -28,6 +38,7 @@ try {
     if (args.includes('--watch')) await lintWatch(root, json);          // standing oracle (CI/agents), no dev server
     else process.exit((await lintApp(root, json)) ? 1 : 0);
   }
+  else if (cmd === 'test') process.exit(await testApp(root, (args.find((a) => a.startsWith('--only=')) || '').slice(7)) ? 0 : 1);   // the .test files, in a headless browser, on mock data
   else if (cmd === 'map') {
     const map = await mapApp(root);
     if (json) console.log(JSON.stringify(map, null, 2));
@@ -47,7 +58,7 @@ try {
     if (!kind || (kind !== 'app' && !names.length)) { console.error('usage: muten new <page|store|app> <name...>\n  muten new page /  /dms  /settings   -> page skeleton + its route in src/app.muten (each COMPILES)\n  muten new store servers  channels    -> store skeleton (entity + empty list)\n  muten new app                        -> ensure src/app.muten (the routes entry) exists'); process.exit(1); }
     for (const f of scaffoldNew(cwd, kind, names)) console.log('✓ ' + relative(cwd, f));
   } else {
-    console.error('usage: muten <dev|bundle|build|check|map|lint|add|new|android> [dir] [--json]\nto create an app:  npm create muten@latest <dir>');
+    console.error('usage: muten <dev|bundle|build|check|test|map|lint|add|new|android> [dir] [--json]\nto create an app:  npm create muten@latest <dir>');
     process.exit(1);
   }
 } catch (e) {

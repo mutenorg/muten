@@ -3,6 +3,8 @@
 // hoist entity/state/mock of used parts -> gather styles (page + used parts) -> flatten data.
 // Consumed by build.ts, map.ts, and the runner.
 
+import { withUseTypes } from '#engine/project/npm-types.js';
+import { pluginNames } from '#engine/project/plugins.js';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { createRequire } from 'node:module';
@@ -12,7 +14,7 @@ import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { resolveStyles } from '#engine/project/styles.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { anchorImports } from '#engine/project/imports.js';
-import { readMutenConfig } from '#engine/project/config.js';
+import { envStore, ENV_DOMAIN } from '#engine/project/env.js';
 import type { PartDef, Value, LoadResult, IR, Entity, PluginFileError } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
@@ -39,11 +41,9 @@ export const pluginFileErrors: PluginFileError[] = [];
 export async function loadPluginParts(appRoot: string): Promise<Parts> {
   const out: Parts = {};
   pluginFileErrors.length = 0;
-  const plugins = readMutenConfig(appRoot).plugins;
-  if (typeof plugins !== 'object' || plugins === null || Array.isArray(plugins)) return out;
   let req;
   try { req = createRequire(join(appRoot, 'package.json')); } catch { return out; }
-  for (const name of Object.keys(plugins)) {
+  for (const name of pluginNames(appRoot)) {
     let regPath;
     try { regPath = req.resolve(`@muten/${name}/registry.json`); } catch { continue; } // not installed / not a registry plugin
     let reg: PluginRegistry;
@@ -72,11 +72,9 @@ export async function loadPluginParts(appRoot: string): Promise<Parts> {
 // A LOCAL src/components/<Name>.js still wins at compile (that's how `muten add` ejects + owns a Custom).
 export function loadPluginComponents(appRoot: string): { [component: string]: string } {
   const out: { [component: string]: string } = {};
-  const plugins = readMutenConfig(appRoot).plugins;
-  if (typeof plugins !== 'object' || plugins === null || Array.isArray(plugins)) return out;
   let req;
   try { req = createRequire(join(appRoot, 'package.json')); } catch { return out; }
-  for (const name of Object.keys(plugins)) {
+  for (const name of pluginNames(appRoot)) {
     let regPath;
     try { regPath = req.resolve(`@muten/${name}/registry.json`); } catch { continue; }
     let reg: PluginRegistry;
@@ -108,13 +106,33 @@ export function storeListEntities(stores: { [domain: string]: IR }): { [k: strin
 
 // Every *.store file under a directory -> parsed IR keyed by domain name.
 // Shared by the runner, the linter, and `muten map` so store refs resolve everywhere.
-export function findStores(dir: string, out: { [domain: string]: IR } = {}): { [domain: string]: IR } {
+/** Every .store under `dir` (an app's src/), plus `env` when muten.config declares environments (env.ts). */
+export function findStores(dir: string): { [domain: string]: IR } {
+  const out = collectStores(dir, {});
+  const env = ENV_DOMAIN in out ? null : envStore(dirname(dir));   // a hand-written env.store wins
+  if (env) out[ENV_DOMAIN] = env;
+  return out;
+}
+
+/** Where each store is written, by domain: more than one file for a domain is a mistake `check` reports. */
+export function storeFiles(dir: string, out: { [domain: string]: string[] } = {}): { [domain: string]: string[] } {
   let entries;
   try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
   for (const entry of entries) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) findStores(full, out);
-    else if (entry.name.endsWith('.store')) out[basename(entry.name, '.store')] = parseFile(full);
+    if (entry.isDirectory()) { if (entry.name !== 'node_modules') storeFiles(full, out); }
+    else if (entry.name.endsWith('.store')) (out[basename(entry.name, '.store')] ||= []).push(full);
+  }
+  return out;
+}
+
+function collectStores(dir: string, out: { [domain: string]: IR }): { [domain: string]: IR } {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) collectStores(full, out);
+    else if (entry.name.endsWith('.store')) out[basename(entry.name, '.store')] = withUseTypes(parseFile(full), full, findAppRoot(full) ?? dirname(dirname(full)));   // a `use` reads its package's types
   }
   return out;
 }
@@ -155,8 +173,21 @@ export async function loadAllParts(appRoot: string): Promise<Parts> {
   return all;
 }
 
+/** The app a file belongs to: the nearest folder above it with src/pages. */
+export function findAppRoot(filePath: string): string | null {
+  let dir = dirname(filePath);
+  for (let i = 0; i < 30; i++) {
+    if (existsSync(join(dir, 'src', 'pages'))) return dir;
+    const up = dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  return null;
+}
+
 export async function load(screenPath: string, sharedParts: Parts = {}): Promise<LoadResult> {
-  const ir = parseFile(screenPath);
+  const root = findAppRoot(screenPath);
+  const ir = root ? withUseTypes(parseFile(screenPath), screenPath, root) : parseFile(screenPath);   // a `use` reads its package's types
 
   const localParts = await loadParts(join(dirname(screenPath), 'parts')); // parts local to this page
   const inlineParts: Parts = {};                                          // parts declared inline in the .muten

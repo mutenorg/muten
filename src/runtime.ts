@@ -2,11 +2,17 @@
 // Shared by every compiled .muten module. The runner serves it as the `virtual:muten/runtime`
 // module (imported per-use, tree-shaken); the standalone HTML format inlines an equivalent. No dependencies.
 
-import type { Signal, EffectRun, PageModule, RouteDef, LayoutDefs, PageInstance, NodeRegistry } from '#engine/shared/types.js';
+import type { PageModule, RouteDef, LayoutDefs, PageInstance, NodeRegistry } from '#engine/shared/types.js';
 // the way out of a block (`__leave`): its own module, re-exported for the compiled pages
 import { __leave } from './runtime-leave.js';
 import { __rowKey } from './runtime-key.js';
-export { __leave, __rowKey };
+import { __drag, __drop } from './dnd.js';
+export { __leave, __rowKey, __drag, __drop };
+import { __device } from './runtime-device.js';
+import { __urlRead, __urlSet } from './runtime-url.js';
+import { __watchImages } from './runtime-media.js';
+import { __t, __lang, __langUse, __langInit, __langList } from './runtime-lang.js';
+export { __device, __urlRead, __urlSet, __watchImages, __t, __lang, __langUse, __langInit, __langList };
 
 // The HMR handle lives on the mounted page element (`el.__muten`); the dev client reaches it + the runtime via window.
 declare global {
@@ -14,63 +20,9 @@ declare global {
   interface Window { __muten_page?: PageInstance; __muten_screen?: string; __muten_rt?: { [k: string]: unknown }; }
 }
 
-let current: EffectRun | null = null;            // effect currently running, so reads can subscribe it
-let owner: Array<EffectRun | (() => void)> | null = null;   // effects + onCleanup teardowns in the current scope, disposed together
-
-// Reactive cell: reading inside an effect subscribes it; writing notifies subscribers.
-export function signal<T>(value: T): Signal<T> {
-  const subs = new Set<EffectRun>();
-  return {
-    get() { if (current) { subs.add(current); current.deps.add(subs); } return value; },
-    set(next: T) { if (next === value) return; value = next; for (const run of [...subs]) run.sync ? run() : schedule(run); },
-  };
-}
-
-// Batching (Solid-style): many sets in one tick flush effects once, in a microtask, so a burst
-// of updates re-renders each spot a single time. Computed effects are `sync` (run immediately)
-// so a `get` read elsewhere in the same tick is never stale.
-let pending: Set<EffectRun> | null = null;
-function flush(): void { const runs = pending; pending = null; if (runs) for (const run of runs) run(); }
-function schedule(run: EffectRun): void { if (!pending) { pending = new Set(); queueMicrotask(flush); } pending.add(run); }
-
-// Runs `fn`, tracking every signal it reads; re-runs whenever any of those signals changes.
-export function effect(fn: () => void, sync?: boolean): EffectRun {
-  const run: EffectRun = Object.assign(
-    () => {
-      if (run.disposed) return;
-      for (const dep of run.deps) dep.delete(run); // drop previous subscriptions before re-tracking
-      run.deps.clear();
-      const prev = current; current = run;
-      try { fn(); } finally { current = prev; }
-    },
-    { deps: new Set<Set<EffectRun>>(), disposed: false, sync },
-  );
-  if (owner) owner.push(run); // belongs to the current scope, disposable on unmount/navigation
-  run();
-  return run;
-}
-
-// Runs `fn` without subscribing the effect that called it. Every action runs this way: an action is a command, so
-// what it reads (a counter it bumps, a list it appends to) must never make the calling `effect` depend on it, or an
-// effect that calls an action re-runs itself for ever (notice.error bumping its own counter froze the page).
-export function untrack<T>(fn: () => T): T { const prev = current; current = null; try { return fn(); } finally { current = prev; } }
-
-// Runs `fn`, collecting every effect it creates, and returns a disposer that stops them all.
-// The router uses this so an unmounted page's effects stop firing on shared store signals,
-// avoiding detached-DOM crashes (anchor.parentNode === null).
-function disposeOwned(owned: Array<EffectRun | (() => void)>): void {
-  for (const o of owned) {
-    if ('deps' in o) { o.disposed = true; for (const dep of o.deps) dep.delete(o); o.deps.clear(); } // effect
-    else o(); // onCleanup teardown (keyed list disposing rows, when disposing its block)
-  }
-}
-export function root<T>(fn: () => T): { value: T; dispose: () => void } {
-  const prev = owner; const owned: Array<EffectRun | (() => void)> = []; owner = owned;
-  let value: T; try { value = fn(); } finally { owner = prev; }
-  return { value, dispose: () => disposeOwned(owned) };
-}
-export function scope(fn: () => void): () => void { return root(fn).dispose; }
-export function onCleanup(fn: () => void): void { if (owner) owner.push(fn); }
+// The reactive core (signals, derived values, effects, scopes) lives in runtime-signals.ts.
+import { signal, computed, effect, untrack, root, scope, onCleanup } from './runtime-signals.js';
+export { signal, computed, effect, untrack, root, scope, onCleanup };
 
 // SURGICAL HMR: rebuild ONE node by id against the SAME live signals (ctx), keeping its CHILDREN (their DOM,
 // effects and state) and every sibling intact — muten's "address + mutate by id" made real at runtime, no VDOM,
@@ -103,7 +55,7 @@ export function __eq(a: unknown, b: unknown): boolean {
   if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
   const ka = Object.keys(a), kb = Object.keys(b);
   if (ka.length !== kb.length) return false;
-  for (const k of ka) if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) return false;
+  for (const k of ka) if (Reflect.get(a, k) !== Reflect.get(b, k)) return false;
   return true;
 }
 
@@ -251,265 +203,36 @@ export function __arc(cx: number, cy: number, r: number, a0: number, a1: number,
   return `M${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} L${xi0},${yi0} A${RI},${RI} 0 ${large} 0 ${xi1},${yi1} Z`;
 }
 
-// ── Pointer-based drag & drop (dnd-kit-inspired, NOT flaky HTML5 DnD) ──────────────────────────────────
-// Two shapes, one engine. PLAIN: a floating clone follows the pointer, the INNERMOST zone under it
-// highlights, and on drop that zone fires (kanban: a card into a column). SORTABLE (a list whose
-// container carries `.mu-sortable`): the dragged row is lifted out and a real PLACEHOLDER element is
-// slotted where it will land — the browser's own layout reflows the rest as you move over them, so
-// what you see is exactly the final order. On drop the placeholder's neighbour tells us the sort to
-// land before. Pointer events → touch; the clone is a 1:1 copy grabbed at the exact point you took it.
-interface DndZone { group: string; onDrop: (id: string, before?: string) => void; }
-const __dndZones = new Map<Element, DndZone>();
-const SORTABLE_MARK = 'mu-sortable';
+// Pointer-based drag & drop lives in ./dnd.ts (one engine for the DSL's draggable/droptarget and @muten/core/dnd).
 
-// `ox`/`oy` correct for a transformed ancestor: the overlay is `position:fixed` but lives under the item's
-// parent (to keep scoped CSS matching), and a `transform`/`filter`/`will-change` on any ancestor makes
-// `fixed` resolve against THAT box, not the viewport — which threw the clone far from the finger on mobile,
-// where such transforms are common. We measure the containing-block origin once and subtract it from the
-// viewport pointer coords, so the clone sits under the finger regardless.
-interface DragBase { id: string; overlay: HTMLElement; item: HTMLElement; dx: number; dy: number; ox: number; oy: number; }
-interface PlainDrag extends DragBase { mode: 'plain'; over: Element | null; }
-interface SortDrag extends DragBase { mode: 'sort'; container: HTMLElement; placeholder: HTMLElement; onDrop: (id: string, before?: string) => void; seen: Set<HTMLElement>; }
-type Drag = PlainDrag | SortDrag;
-let __dndActive: Drag | null = null;
-// THE GRAB CURSOR lives on a sheet over the page while a drag lasts. Setting it on <body> (inherited) restyled every
-// element of the page twice per drag, at pick-up and at drop (60 ms each on a 3,500-node page; on a phone, for nothing).
-let __dndShield: HTMLElement | null = null;
-function __shieldOn(z: string): void {
-  const sheet = document.createElement('div');
-  sheet.className = 'mu-dnd-shield';
-  sheet.style.cssText = `position:fixed;inset:0;z-index:${Math.max(0, (parseInt(z, 10) || 99999) - 1)};cursor:grabbing;background:transparent;`;
-  document.body.appendChild(sheet); __dndShield = sheet;
-}
-function __shieldOff(): void { if (__dndShield) { __dndShield.remove(); __dndShield = null; } }
-
-// nearest ancestor (incl. el) that is a registered drop zone
-function __zoneOf(el: Element | null): HTMLElement | null {
-  for (let n: Element | null = el; n; n = n.parentElement) if (__dndZones.has(n) && n instanceof HTMLElement) return n;
-  return null;
-}
-// the zones inside a sortable container, in DOM order, skipping the hidden source and the placeholder
-function __zonesIn(d: SortDrag): HTMLElement[] {
-  const out: HTMLElement[] = [];
-  for (const c of Array.from(d.container.children))
-    if (c instanceof HTMLElement && __dndZones.has(c) && c !== d.item) out.push(c);
-  return out;
+// A reactive text or attribute: written when its value really changed, never just because the effect ran again (a row
+// patched elsewhere comes back as a new object and re-runs all its bindings). One call per binding in the output.
+export function __bind(element: Element, property: string, read: () => unknown): void {
+  let was: unknown;
+  effect(() => { const now = read(); if (now !== was) { was = now; Reflect.set(element, property, now); } });
 }
 
-// A sortable container under the pointer that belongs to the SAME family as `like` — both item lists
-// (`mu-sort-items`) or both the groups list — so a dragged item lands in an item list, never in the
-// list of groups. This is what lets a row cross from one group (or the ungrouped list) into another.
-// The drag "family" is a container's `mu-sort-<name>` class: a row only crosses into another sortable
-// of the SAME family (items into item lists; groups among groups). Generic and reusable — a new
-// draggable section just gives its lists a shared `mu-sortable mu-sort-<name>` and cross-list drag works.
-function __family(el: HTMLElement): string {
-  for (const c of Array.from(el.classList)) if (c.startsWith('mu-sort-')) return c;
-  return '';
-}
-function __sortableFor(x: number, y: number, like: HTMLElement): HTMLElement | null {
-  const fam = __family(like);
-  for (const el of document.elementsFromPoint(x, y))
-    for (let n: Element | null = el; n; n = n.parentElement)
-      if (n instanceof HTMLElement && n.classList.contains(SORTABLE_MARK) && __dndZones.has(n) && __family(n) === fam) return n;
-  return null;
-}
-
-// SORTABLE: slot the placeholder where the pointer sits, and let native layout reflow the rest — then
-// FLIP the rows that moved (measure before/after, invert with a transform, play back to 0) so the
-// reorganisation glides instead of snapping. If the pointer is over a DIFFERENT sortable of the same
-// family, the row crosses into it (the placeholder moves there and the drop targets that list).
-function __dndSort(d: SortDrag, pointerX: number, pointerY: number): void {
-  d.overlay.style.visibility = 'hidden';
-  const target = __sortableFor(pointerX, pointerY, d.container);
-  d.overlay.style.visibility = 'visible';
-  const switching = target !== null && target !== d.container;
-  const oldC = d.container;
-  if (switching && target) { d.container = target; d.seen.add(target); }
-  const newZones = __zonesIn(d);                                   // cells of the list we're now over
-  // WHERE THE POINTER LANDS. A column compares against each row's vertical middle (the classic list). A
-  // flex-row or a wrapping grid reads left-to-right, top-to-bottom: land before the first cell the
-  // pointer is ahead of in that order (an earlier row, or the same row but left of the cell's middle).
-  // This is what gives a gallery grid the same auto-sorting a list has.
-  const flow = getComputedStyle(d.container);
-  const horizontal = flow.display.includes('grid') || (flow.display.includes('flex') && flow.flexDirection.startsWith('row'));
-  let before: Element | null = null;
-  for (const z of newZones) {
-    const r = z.getBoundingClientRect();
-    const hit = horizontal
-      ? (pointerY < r.top || (pointerY <= r.bottom && pointerX < r.left + r.width / 2))
-      : (pointerY < r.top + r.height / 2);
-    if (hit) { before = z; break; }
+// A static subtree as HTML: parsed into a template the first time, cloned every time after (the compiler sends every
+// subtree with nothing reactive inside this way, instead of one createElement per node).
+const templates = new Map<string, Element>();
+export function __clone(html: string): Element {
+  let template = templates.get(html);
+  if (!template) {
+    const holder = document.createElement('template');
+    holder.innerHTML = html;
+    const first = holder.content.firstElementChild;
+    if (!first) throw new Error('muten: an empty static template');
+    template = first; templates.set(html, template);
   }
-  // The first trailing child that is NOT a sortable cell — an «Add» tile, an upload skeleton, a note.
-  // Landing goes before it, so those never become a drop slot and a piece can't end up «behind» them.
-  let tail: Element | null = null;
-  for (const c of Array.from(d.container.children)) {
-    if (c === d.item || c === d.placeholder) continue;
-    if (c instanceof HTMLElement && __dndZones.has(c)) continue;   // a real cell
-    tail = c; break;
+  const copy = template.cloneNode(true);
+  if (!(copy instanceof Element)) throw new Error('muten: a static template cloned to a non-element');
+  // a link is born active on its own path (genNode marks each one it builds; the router marks them on navigation)
+  if (typeof location !== 'undefined') {
+    for (const link of [copy, ...copy.querySelectorAll('a.mu-link')]) {
+      if (link.matches('a.mu-link') && link.getAttribute('href') === location.pathname) { link.classList.add('is-active'); link.setAttribute('aria-current', 'page'); }
+    }
   }
-  const anchor = before ?? tail;
-  const moves = switching || (anchor ? d.placeholder.nextElementSibling !== anchor : d.container.lastElementChild !== d.placeholder);
-  if (!moves) return;
-  // FIRST — measure BOTH lists so the one we leave closes its gap and the one we enter opens for the cell.
-  const oldZones = switching
-    ? Array.from(oldC.children).filter((c): c is HTMLElement => c instanceof HTMLElement && __dndZones.has(c) && c !== d.item && c !== d.placeholder)
-    : [];
-  // FLIP on BOTH axes: in a grid a cell shifts sideways as well as down; in a column dx is simply 0.
-  const first = new Map<HTMLElement, { x: number; y: number }>();
-  for (const z of [...oldZones, ...newZones]) { const r = z.getBoundingClientRect(); first.set(z, { x: r.left, y: r.top }); }
-  if (anchor) d.container.insertBefore(d.placeholder, anchor);
-  else d.container.appendChild(d.placeholder);
-  const all = [...oldZones, ...newZones];
-  for (const z of all) {                                           // INVERT: jump each moved cell back to where it was
-    const f = first.get(z);
-    const r = z.getBoundingClientRect();
-    const dx = (f ? f.x : 0) - r.left;
-    const dy = (f ? f.y : 0) - r.top;
-    if (dx || dy) { z.style.transition = 'none'; z.style.transform = `translate(${dx}px, ${dy}px)`; }
-  }
-  requestAnimationFrame(() => {                                    // PLAY: release to the new spot, animated
-    for (const z of all) if (z.style.transform) { z.style.transition = 'transform .18s cubic-bezier(.2,.8,.2,1)'; z.style.transform = ''; }
-  });
-}
-
-// EDGE SCROLL. Near the top or bottom of its scroll box a drag scrolls it, faster the closer it gets, so a
-// target out of view can be reached — on a phone the grip takes the finger, and the finger cannot also scroll.
-const DND_EDGE = 64;
-let __dndPoint = { x: 0, y: 0 };
-let __dndTick = 0;
-function __scrollerOf(el: Element): HTMLElement {
-  for (let n = el.parentElement; n; n = n.parentElement) {
-    const overflow = getComputedStyle(n).overflowY;
-    if ((overflow === 'auto' || overflow === 'scroll') && n.scrollHeight > n.clientHeight) return n;
-  }
-  const page = document.scrollingElement;
-  return page instanceof HTMLElement ? page : document.documentElement;
-}
-function __dndEdge(): void {
-  const d = __dndActive; if (!d) { __dndTick = 0; return; }
-  const box = __scrollerOf(d.mode === 'sort' ? d.container : d.item);
-  const whole = box === document.scrollingElement || box === document.documentElement;
-  const top = whole ? 0 : box.getBoundingClientRect().top;
-  const bottom = whole ? window.innerHeight : box.getBoundingClientRect().bottom;
-  const y = __dndPoint.y;
-  const step = y < top + DND_EDGE ? -Math.ceil((top + DND_EDGE - y) / 4) : (y > bottom - DND_EDGE ? Math.ceil((y - bottom + DND_EDGE) / 4) : 0);
-  if (step !== 0) { box.scrollTop += step; if (d.mode === 'sort') __dndSort(d, __dndPoint.x, __dndPoint.y); }
-  __dndTick = requestAnimationFrame(__dndEdge);
-}
-
-function __dndMove(e: PointerEvent): void {
-  const d = __dndActive; if (!d) return;
-  __dndPoint = { x: e.clientX, y: e.clientY };
-  d.overlay.style.transform = `translate(${e.clientX - d.dx - d.ox}px, ${e.clientY - d.dy - d.oy}px)`;
-  if (d.mode === 'sort') { __dndSort(d, e.clientX, e.clientY); return; }
-  d.overlay.style.visibility = 'hidden';                                   // don't let the overlay eat the hit-test
-  const stack = document.elementsFromPoint(e.clientX, e.clientY);
-  d.overlay.style.visibility = 'visible';
-  let zone: Element | null = null;
-  for (const el of stack) { if (__dndZones.has(el)) { zone = el; break; } } // top-of-stack first → innermost zone wins
-  if (zone !== d.over) { if (d.over) d.over.classList.remove('mu-dnd-over'); if (zone) zone.classList.add('mu-dnd-over'); d.over = zone; }
-}
-
-function __dndEnd(): void {
-  window.removeEventListener('pointermove', __dndMove);
-  window.removeEventListener('pointerup', __dndEnd);
-  const d = __dndActive; __dndActive = null; if (!d) return;
-  cancelAnimationFrame(__dndTick); __dndTick = 0;
-  __shieldOff();
-  document.documentElement.classList.remove('mu-dnd-on');
-  d.overlay.remove();
-  d.item.classList.remove('mu-dnd-ghost');
-  if (d.mode === 'plain') {
-    if (d.over) { d.over.classList.remove('mu-dnd-over'); const z = __dndZones.get(d.over); if (z) z.onDrop(d.id); }
-    return;
-  }
-  // sortable: the zone right after the placeholder is what the dropped row lands BEFORE; none → the end.
-  let before: string | undefined;
-  let n: Element | null = d.placeholder.nextElementSibling;
-  while (n && (!__dndZones.has(n) || n === d.item)) n = n.nextElementSibling;
-  if (n) before = __dndZones.get(n)?.group;
-  else { let max = 0; for (const z of __zonesIn(d)) { const v = Number(__dndZones.get(z)?.group); if (Number.isFinite(v) && v > max) max = v; } before = String(max + 1); }
-  for (const c of d.seen) for (const z of Array.from(c.children)) {   // drop the FLIP leftovers on every list touched
-    if (z instanceof HTMLElement) { z.style.transition = ''; z.style.transform = ''; }
-  }
-  d.placeholder.remove();
-  d.item.style.display = '';                                               // restore the lifted row before re-render
-  // The drop belongs to the container the row LANDED in (it may have crossed into another list), which
-  // carries the group + the action. Its onDrop closure adds the container's group as the third arg.
-  const landed = __dndZones.get(d.container)?.onDrop ?? d.onDrop;
-  landed(d.id, before);
-}
-
-// register a drag source. Config from CSS custom props: `--mu-dnd-z` (overlay stacking) and
-// `--mu-dnd-activation` (px the pointer must move before a drag starts — so a click never drags). The
-// handle may be the item itself or a grip inside it; the id is read live, at grab time.
-export function __drag(el: HTMLElement, getId: () => string): void {
-  el.style.touchAction = 'none'; el.classList.add('mu-dnd-item');
-  el.addEventListener('pointerdown', (e: PointerEvent) => {
-    if (e.button !== 0 || __dndActive) return;
-    const cs = getComputedStyle(el);
-    const threshold = parseFloat(cs.getPropertyValue('--mu-dnd-activation')) || 0;
-    const z = cs.getPropertyValue('--mu-dnd-z').trim() || '99999';
-    const sx = e.clientX, sy = e.clientY;
-    const begin = (ev: PointerEvent): void => {
-      const zone = __zoneOf(el);
-      const item = zone ?? el;                                             // the ROW lifts, not the little grip
-      const container = item.parentElement;
-      const sortable = zone !== null && container instanceof HTMLElement && container.classList.contains(SORTABLE_MARK);
-      const r = item.getBoundingClientRect();
-      const clone = item.cloneNode(true); if (!(clone instanceof HTMLElement)) return;
-      clone.classList.add('mu-dnd-overlay'); clone.style.animation = 'none';
-      clone.style.cssText += `;position:fixed;left:0;top:0;width:${r.width}px;height:${r.height}px;margin:0;pointer-events:none;z-index:${z};animation:none;`;
-      // Keep the clone under the SAME ancestors so scoped CSS still matches (a 1:1 copy of the row).
-      (item.parentElement ?? document.body).appendChild(clone);
-      item.classList.add('mu-dnd-ghost');
-      __shieldOn(z);
-      document.documentElement.classList.add('mu-dnd-on');   // a hook for enlarging drop zones while dragging
-      // Grab point stays exactly under the cursor — the row hangs from where you took it. The clone is at
-      // left:0;top:0 with no transform yet, so its rect gives the containing-block origin (0,0 unless a
-      // transformed ancestor shifted it); we subtract that in __dndMove so the clone tracks the finger.
-      const o = clone.getBoundingClientRect();
-      const base = { id: getId(), overlay: clone, item, dx: sx - r.left, dy: sy - r.top, ox: o.left, oy: o.top };
-      if (sortable && container instanceof HTMLElement) {
-        const placeholder = document.createElement(item.tagName);
-        placeholder.className = 'mu-dnd-placeholder';
-        // Width AND height, so the gap is a true copy of the item — a full-width slot in a column, a
-        // proper cell in a grid or row (without the width, a grid placeholder collapsed and the preview
-        // looked broken).
-        placeholder.style.cssText = `box-sizing:border-box;width:${r.width}px;height:${r.height}px;flex:0 0 auto;`;
-        container.insertBefore(placeholder, item);
-        item.style.display = 'none';                                       // lift it out; native layout closes up
-        // The drop action comes from the CONTAINER (the list), not the row — so a row landing in a
-        // different list uses that list's action + group. The row's own droptarget only marks position.
-        __dndActive = { ...base, mode: 'sort', container, placeholder, seen: new Set([container]), onDrop: __dndZones.get(container)?.onDrop ?? __dndZones.get(item)?.onDrop ?? (() => {}) };
-      } else {
-        __dndActive = { ...base, mode: 'plain', over: null };
-      }
-      __dndMove(ev);
-      if (!__dndTick) __dndTick = requestAnimationFrame(__dndEdge);
-      window.addEventListener('pointermove', __dndMove);
-      window.addEventListener('pointerup', __dndEnd);
-    };
-    if (threshold <= 0) { e.preventDefault(); begin(e); return; }
-    const pre = (ev: PointerEvent): void => {                              // activation constraint: click-safe
-      if (Math.abs(ev.clientX - sx) + Math.abs(ev.clientY - sy) < threshold) return;
-      window.removeEventListener('pointermove', pre); window.removeEventListener('pointerup', cancel);
-      ev.preventDefault(); begin(ev);
-    };
-    const cancel = (): void => { window.removeEventListener('pointermove', pre); window.removeEventListener('pointerup', cancel); };
-    window.addEventListener('pointermove', pre); window.addEventListener('pointerup', cancel);
-  });
-}
-// register a drop zone; on drop the zone reports the dragged id and (sortable) the sort it lands before.
-export function __drop(el: Element, group: string, onDrop: (id: string, before?: string) => void): void { __dndZones.set(el, { group, onDrop }); }
-
-// Derived/memoized value (a store `get`): recomputes when the signals it reads change.
-// Seeded eagerly, then kept current by a sync effect that tracks its dependencies.
-export function computed<T>(fn: () => T): Signal<T> {
-  const cell = signal(fn());
-  effect(() => cell.set(fn()), true); // sync: a `get` read in the same tick is always fresh
-  return cell;
+  return copy;
 }
 
 let seq = 0;
@@ -585,14 +308,27 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
   };
   // mark the current nav link: any internal `<a>` whose href equals the path gets `aria-current="page"` + `.is-active`
   // (shell nav + page links). So `class(active when …)` isn't needed for nav highlight, and the a11y state is real.
+  // Below a section (a sub-route like /shop/design/colors) the link of the section it is in stays marked: `.is-active`
+  // + `aria-current="true"`, only the longest such link (a menu never lights two entries). A link that stands for
+  // several pages says so with `data(match: "/a /b")`: on any of them it is marked as the section too.
   const markActive = (): void => {
     const here = location.pathname;
-    document.querySelectorAll('a[href]').forEach((a) => {
+    const links = [...document.querySelectorAll('a[href]')].filter((a) => { const h = a.getAttribute('href') || ''; return h[0] === '/' && h.slice(0, 2) !== '//'; }); // internal absolute paths only
+    const covers = (a: Element): boolean => { const h = a.getAttribute('href') || ''; return (h !== '/' && here.startsWith(h.replace(/\/$/, '') + '/')) || (a.getAttribute('data-match') || '').split(/\s+/).includes(here); };
+    // per menu (its nav, sidebar or header): a menu that already shows the page itself does not also light the section
+    const menuOf = (a: Element): Element | null => a.closest('nav, aside, header, [role="navigation"]');
+    const shown = new Set(links.filter((a) => a.getAttribute('href') === here).map(menuOf));
+    const best = new Map<Element | null, Element>();
+    for (const a of links.filter(covers)) {
+      const m = menuOf(a); if (shown.has(m)) continue;
+      const was = best.get(m); if (!was || (a.getAttribute('href') || '').length > (was.getAttribute('href') || '').length) best.set(m, a);
+    }
+    const sections = new Set(best.values());
+    links.forEach((a) => {
       const href = a.getAttribute('href') || '';
-      if (href[0] !== '/' || href.slice(0, 2) === '//') return; // internal absolute paths only
-      const on = href === here;
-      if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
-      a.classList.toggle('is-active', on);
+      const on = href === here, inside = !on && sections.has(a);
+      if (on) a.setAttribute('aria-current', 'page'); else if (inside) a.setAttribute('aria-current', 'true'); else a.removeAttribute('aria-current');
+      a.classList.toggle('is-active', on || inside);
     });
   };
   // every in-app entry carries how many steps into the app it is (`history.state.muDepth`): 0 on the page the visitor
@@ -663,4 +399,4 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
 declare const __MUTEN_DEV__: boolean;
 // `typeof window` FIRST so an unbundled consumer (a Node import of runtime.js, where __MUTEN_DEV__ is undefined)
 // short-circuits before touching it — no ReferenceError. In a browser bundle the `define` folds `… && false` → DCE.
-if (typeof window !== 'undefined' && __MUTEN_DEV__) window.__muten_rt = { patchNode, signal, computed, effect, root, onCleanup, __eq, __rowKey, __order, __leave, __has, __id, __chart, __arc, __drag, __drop };
+if (typeof window !== 'undefined' && __MUTEN_DEV__) window.__muten_rt = { patchNode, signal, computed, effect, root, onCleanup, __device, __urlRead, __urlSet, __watchImages, __t, __lang, __langUse, __langInit, __langList, __eq, __rowKey, __order, __leave, __has, __id, __chart, __arc, __drag, __drop, __clone, __bind };

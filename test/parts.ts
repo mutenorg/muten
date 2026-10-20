@@ -185,4 +185,30 @@ check('single-root part keeps its own root, no mu-part', !(multi.parts.One.tree.
   check('the compiled wrapper carries the class', /mu-part/.test(typeof js === 'string' ? js : JSON.stringify(js)), '');
 }
 
+// A FIELD OF A ROW PARAM CAN BE PASSED ON: `Badge(label: $item.name)` was a syntax error, so every part took the
+// whole row just to show one field. It resolves to the caller's row (`$item.name` -> `r.name`).
+{
+  const lib2 = parse('part Badge(label: text) { Span "{$label}" }\npart RowView(item: Row) { Stack { Badge(label: $item.name) } }');
+  const parts2 = {};
+  for (const [n, d] of Object.entries(lib2.parts)) parts2[n] = d;
+  const page2 = parse('screen t\nentity Row { name text }\nstate { rows = [] : list<Row> }\nPage { each rows as r { RowView(item: r) } }');
+  const { tree: t2 } = compose(page2.tree, parts2);
+  const span = JSON.stringify(t2);
+  check('$item.name reaches the nested part as r.name', span.includes('"name":"r.name"'), span.slice(0, 300));
+}
+
+// a ref passed to a part's text param shows its VALUE (it used to write out its name: «tab.label»), and an Icon param
+// takes the names the page spells out
+{
+  const { composeDoc } = await import('#engine/ir/compose.js');
+  const { compileModule } = await import('#engine/compile/compile.js');
+  const part = parse('part TabIcon(icon: text, label: text) {\n  Stack { Icon $icon  Text $label }\n}').parts.TabIcon;
+  const ir = parse('screen s\nstate { tabs = [ { label: "a", icon: "lucide:x" } ] : list }\nPage { each tabs as tab { TabIcon(icon: tab.icon, label: tab.label) } }');
+  const { doc } = composeDoc(ir, { TabIcon: { ...part, state: {}, entities: {}, mock: {}, css: '' } });
+  const js = compileModule(doc);
+  check('a ref passed to a text param reads its value', js.includes('tab.get().label') && !js.includes('>tab.label<'), js.match(/[^\n]*tab[^\n]*label[^\n]*/)?.[0]);
+  const icon = Object.values(doc.nodes).find((n) => n.type === 'Icon');
+  check('an Icon param fed a list field becomes a data-driven name', !!icon && typeof icon.props.name === 'object', JSON.stringify(icon?.props.name));
+}
+
 process.exit(fails ? 1 : 0);

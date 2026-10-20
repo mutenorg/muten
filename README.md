@@ -115,6 +115,7 @@ muten is **Solid's fine-grained signals + Svelte's compile-to-direct-DOM**, with
 
 - **Reads subscribe, writes notify.** Each `{count}`, `class(active when x)`, `when`, `each` compiles to its own tiny effect that reads exactly the signals it needs - when one changes, only that spot updates, never a re-render of the tree.
 - **Lists reconcile by `id`** (never by index): `each`/`DataTable` keep a per-row signal, so on new data only the rows whose fields changed touch the DOM (the rest are reused or moved in place), and removed rows dispose their effects - no leaks, no zombies. Focus, scroll and input survive live updates.
+- **Derived values are lazy and glitch-free.** A `get` is computed when read, once per change, never from a half-updated input; an effect whose derived inputs come out unchanged does not run. Static subtrees are cloned from a template instead of built node by node, and a reactive text or attribute touches the DOM only when its value really changed.
 - **Updates batch** into one microtask, the way Solid does: a burst of writes in a tick re-renders each spot **once**, not per write - so a real-time feed (a `live` socket) costs one render per frame, not one per message.
 
 No diffing, no virtual-DOM memory, no framework interpreter to ship. That is what keeps muten fast as apps grow; for *huge* lists you still virtualize (render only the visible rows) and send server-side deltas, exactly as you would in any framework.
@@ -128,7 +129,7 @@ right tier, and the compiler still checks the seam. Reach for the **lowest tier 
 | Tier | What it reaches | Typical examples | The trade |
 |---|---|---|---|
 | **1 · Pure muten** | the declarative 80% - pages, routing (params, guards, `/404`), `state`/`store`/`get`, the **list toolkit**, `Form` (+validation), `query` over REST, SSG + SEO | a whole **CRUD / SaaS / catalog / dashboard / content** app | **zero extra deps** |
-| **2 · muten + the platform** | native HTML + CSS libs via `class()`, **vanilla JS via `Custom`**, JS logic via `use … from "./lib.ts"` | `<dialog>`, Tailwind/DaisyUI, Leaflet, Quill, zod, date-fns | a JS dep - **no framework runtime** |
+| **2 · muten + npm** | CSS libs via `class()`, components via `use element \| widget \| react` (used like parts, no `.js` in the app), JS logic via `use fn from "pkg"`, your own canvas/map via `Custom` | Web Components, Leaflet, a React date picker, zod, date-fns | a JS dep; React only on the pages with a React island |
 
 **Check tier 1 first.** Charts, icons, video, sliders, date pickers, dropdowns and drag-and-drop look like tier-2
 widgets and are **native primitives** (`Chart`, `Icon`, `Video`, `Range`, `Date`, `Select`, `draggable`). Escaping
@@ -141,14 +142,14 @@ coupling in Leaflet or zod never costs you the oracle on the muten side.
 
 **Deploy - the honest caveat.** Two production paths, both muten's own runner. `muten build` (the CLI SSG)
 **inlines the theme + project `styles.css`** and **pre-renders (SSR) your stores/`query` data**, so each route
-ships fully styled with real content as zero-JS HTML. The two things a static export can't do: bundle `use`
-functions and persist store state across full-page navigations - for those, `muten bundle` produces a CSR
-build (per-route chunks + source maps + a ship-size report). `npm run dev` runs every tier regardless.
+ships fully styled with real content as zero-JS HTML. `use` functions, npm components and route guards work there
+too; what a static export can't do is persist store state across full-page navigations - for that, `muten bundle`
+produces a CSR build (per-route chunks, a ship-size report, source maps with `--sourcemap`). `npm run dev` runs every tier regardless.
 
 | Your app uses... | Deploy with |
 |---|---|
 | Pure muten, static/content pages (styled, with data) | `muten build` (zero-JS HTML) or `muten bundle` |
-| `use` JS functions, `Custom`, or a shared store across pages | **`muten bundle`** (bundles `use` + keeps state across navigations) |
+| a shared store across pages (state that must survive navigation) | **`muten bundle`** (keeps state across navigations) |
 
 **Most real apps use `muten bundle`.**
 
@@ -209,6 +210,7 @@ muten dev    [dir] [--host]  # dev server - esbuild, in-memory, SURGICAL HMR + t
 muten bundle [dir] [--sourcemap]  # production build → ./dist (per-route chunks + ship-size report; maps only if asked)
 muten build  [dir]           # SSG: pre-render every route to zero-JS HTML (+ .muten/app.map.json, never deployed)
 muten check  [dir] [--json]  # parse + validate every page, no compile - the deterministic ORACLE
+muten test   [dir] [--only=x]# the .test files next to each page, in headless Chrome, on mock data, network closed
                              #   --json → structured diagnostics (code + loc + "did you mean…?") in ms, no browser
 muten map    [dir] [--json]  # emit app.map.json COLD (no build) - the app graph an AI reads FIRST
 muten add    <name...>       # a PLUGIN (lowercase, e.g. `devtools`) → install @muten/<name> + enable it in muten.config;
@@ -358,11 +360,11 @@ what keeps it small and analyzable; closing it would just make another general-p
 These are honest gaps found during stress-testing. They are known and tracked; none are design mistakes, just things not built yet.
 
 **Build tooling**
-- `muten build` (CLI SSG) inlines the theme + project `styles.css` and SSRs your store/`query` data, but a no-bundler static export still can't bundle `use` functions or persist store state across full-page navigations. Use `npm run dev` for development and `muten bundle` for a stateful production app.
+- `muten build` (CLI SSG) inlines the theme + project `styles.css`, SSRs your store/`query` data and bundles `use` functions and npm components per page, but a static export can't persist store state across full-page navigations. Use `muten bundle` for a stateful production app.
 
 **Language features not yet available**
 - `query x live` (WebSocket) requires the server to send an `id` per row for keyed diffing; without it, reconciliation falls back to full re-render.
-- An `Icon` name must be a static literal (it inlines the SVG at build). A per-value icon is a `match` over static Icons; an icon whose URL is in your data is an `Image`.
+- An `Icon` name from data must be one the page spells out (a choice of names, or a field of a list written in the page): its SVGs are inlined at build. A name from the server is an error; an icon whose URL is in your data is an `Image`.
 
 **DataTable**
 - Renders raw cell values only; no per-column formatting yet. For formatted cells, use `each` with a `Part`.

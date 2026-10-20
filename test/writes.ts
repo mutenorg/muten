@@ -27,6 +27,14 @@ ok('__write helper emitted', js.includes('function __write(name, method, id, bod
 ok('__write JSON-encodes the body', js.includes('init.body = JSON.stringify(body)'));
 ok('__write appends /:id', js.includes('encodeURIComponent(id)'));
 ok('__write throws on !ok', js.includes("if (!r.ok) return r.json().catch(() => null).then((j) => {") && js.includes("throw new Error('HTTP ' + r.status + why)"));
+// a query loads on its FIRST READ (a store's used to start at app boot, before any session: a 401 that stuck), a
+// refetch that comes first marks it started (no bare load on top), and a first load already in flight is shared
+ok('a query starts on its first read', js.includes('sig.get = () => { if (!sig.__started) { sig.__started = true;'));
+ok('a refetch marks the query started', js.includes('sig.__started = true; const tok = (sig.__tok'));
+ok('a first load shares an identical GET in flight, app-wide', js.includes('return __shared(q.url, init)') && js.includes('globalThis.__mutenFlight'));
+ok('a GET query starts from the last rows it showed (stale-while-revalidate)', js.includes('const __hit = __cache.get(sig.__key); if (__hit) sig.set({ data: __hit, loading: false, error: null }); __remember(sig);'));
+ok('the cache is keyed with the session headers and bounded', js.includes('function __cacheKey(url) { return JSON.stringify([url, __hdrs(url)]); }') && js.includes('if (__cache.size > 50)'));
+ok('the key is taken again when the request leaves (a store query is created before any session)', js.includes('if (sig.__key) sig.__key = __cacheKey(__src.url);'));
 ok('actions are generated', js.includes('function buy(item)') && js.includes('function drop(item)'));
 
 // The emitted __crud, run for real against a fake server that answers late. The bug it exists for: a
@@ -277,6 +285,34 @@ const pendAt = pendJs.indexOf('const __pending_save = signal(false)');
 const getAt = pendJs.indexOf('const saving = computed(');
 ok('an action\'s .pending signal is declared before a get that reads it', pendAt >= 0 && getAt > pendAt, `pending@${pendAt} get@${getAt}`);
 ok('the .pending signal is declared once', pendJs.split('const __pending_save = signal(false)').length === 2);
+
+// `} failed { … }`: what an action does when its request fails, right where the request is (it was only `name.error`)
+{
+  const src = 'screen s\nstate { n = 0 : number  problem = "" : text }\naction save mutates problem {\n  post "/x" body n\n} failed {\n  problem.set("no")\n}\nPage { Button "Save" -> save }';
+  const ir = parse(src);
+  ok('failed parses as its own block', ir.actions.save.failed?.length === 1 && ir.actions.save.body.length === 1, JSON.stringify(ir.actions.save));
+  const js = compileModule(toDoc(ir));
+  ok('failed runs in the catch, after .error is set', /catch \(__e\) \{\s*__error_save\.set\(String\(__e\)\);\s*problem\.set\("no"\);\s*\}/.test(js), js.match(/catch[\s\S]{0,120}/)?.[0]);
+  const local = compileModule(toDoc(parse('screen s\nstate { a = 0 : number  problem = "" : text }\naction bump mutates a, problem {\n  a.set(a + 1)\n} failed {\n  problem.set("no")\n}\nPage { Button "+" -> bump }')));
+  ok('an action with failed has .pending/.error even with no request', local.includes('const __error_bump = signal(null)'));
+  const { validate } = await import('#engine/ir/validate.js');
+  const bad = validate(toDoc(parse(src.replace('problem.set("no")', 'problm.set("no")')))).diagnostics.map((d) => d.code);
+  ok('the failed block is checked like the body', bad.length > 0, bad.join(','));
+  const { print } = await import('#engine/ir/print.js');
+  ok('print keeps the failed block', print(ir).includes('} failed {'), print(ir));
+}
+
+// `x.send(…)` goes up the socket of a `query x live`; it changes nothing here, so it needs no `mutates`
+{
+  const { validate } = await import('#engine/ir/validate.js');
+  const base = 'screen s\nentity M { name text }\nstate { msgs = query feed live : list<M>  local = [] : list<M> }\nsources { feed: "/live" }\n';
+  const codes = (action) => validate(toDoc(parse(base + action + '\nPage { Button "s" -> say }'))).diagnostics.map((d) => d.code);
+  ok('send on a live query needs no mutates', codes('action say { msgs.send({ name: "x" }) }').length === 0, codes('action say { msgs.send({ name: "x" }) }').join(','));
+  ok('send on a list that is not live is an error', codes('action say { local.send({ name: "x" }) }').includes('send-not-live'));
+  const js = compileModule(toDoc(parse(base + 'action say { msgs.send({ name: "x" }) }\nPage { Button "s" -> say }')));
+  ok('send compiles to the socket', js.includes('msgs.__send({ "name": "x" })'), js.match(/msgs\.__send[^\n]*/)?.[0]);
+  ok('a live message can upsert/remove rows (the data layer carries __live)', js.includes('function __live('));
+}
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);

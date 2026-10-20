@@ -97,9 +97,9 @@ check('empty stays empty', __safeUrl('', false) === '' && __safeUrl(null, false)
 // the compiler routes an interpolated href/src through __safeUrl, and leaves an authored one alone
 const src = 'screen t\nstate { u = "" : text }\nPage { Link "go" -> "{u}"  Image "{u}" alt("x")  Link "home" -> "/home" }';
 const js = compileModule(toDoc(parse(src)));
-check('interpolated href goes through __safeUrl', /href = __safeUrl\(/.test(js), js.slice(0, 200));
-check('interpolated src goes through __safeUrl', /src = __safeUrl\(/.test(js));
-check('an authored href is left as written', js.includes('.href = "/home"'));
+check('interpolated href goes through __safeUrl', /__bind\(el_\w+, "href", \(\) => __safeUrl\([^;]*, false\)\);/.test(js), js.slice(0, 400));
+check('interpolated src goes through __safeUrl', /__bind\(el_\w+, "src", \(\) => __safeUrl\([^;]*, true\)\);/.test(js));
+check('an authored href is left as written', js.includes('.href = "/home"') || js.includes('href=\\"/home\\"'), js.match(/__clone\([^)]*home[^)]*\)/)?.[0]); // a static link may go out inside a template clone
 
 
 // a value spliced into a request url stays ONE path segment / ONE query value (no `../admin` with the user's session)

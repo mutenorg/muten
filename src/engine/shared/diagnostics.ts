@@ -18,6 +18,11 @@ export class ParseError extends Error {
 }
 
 // `from` + `suggestion` together auto-build the `fix` (deterministic replacement an AI can apply).
+/** A dotted call on a value (`items.orderBy(…)`): muten values have no JS methods, so teach its list vocabulary. */
+export function noMethodsMessage(list: string, method: string): string {
+  return `\`.${method}(…)\`: muten values have no JS methods. Filter with \`${list} where <cond>\`, order with \`${list}.sort by <field>\` (or \`sortDesc by\`), take the first n with \`${list}.take(n)\`, total/average/count with \`${list}.sum|avg|count by <field>\`, membership with \`contains\`. A \`use\`'d function is called \`fn(x)\`, never \`x.fn()\`; a store's \`get name(…)\` is called \`store.name(x)\`.`;
+}
+
 export function diag(code: string, message: string, opts: DiagOpts = {}): Diagnostic {
   const { loc = null, suggestion = null, severity = 'error', from = null, related = null } = opts;
   return { code, severity, message, loc, suggestion, fix: (from && suggestion) ? { from, to: suggestion } : null, related };

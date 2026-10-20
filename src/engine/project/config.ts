@@ -9,7 +9,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Tk, Pn } from '#engine/shared/vocab.js';
 import { tokenize } from '#engine/lang/lexer.js';
-import type { ThemeAdapter, ThemeBlock } from '#engine/shared/types.js';
+import { ParseError } from '#engine/shared/diagnostics.js';
+import type { Loc, ThemeAdapter, ThemeBlock } from '#engine/shared/types.js';
 
 export type ConfigValue = string | number | boolean | ConfigValue[] | ConfigBlock;
 export interface ConfigBlock { [key: string]: ConfigValue; }
@@ -19,47 +20,67 @@ export type MutenConfig = { [block: string]: ConfigBlock };
 // SSG build) so the theme adapter and Form class map are applied identically everywhere — no per-path drift.
 export function readMutenConfig(appRoot: string): MutenConfig {
   const file = join(appRoot, 'muten.config');
-  return existsSync(file) ? parseConfig(readFileSync(file, 'utf8')) : {};
+  if (!existsSync(file)) return {};
+  try { return parseConfig(readFileSync(file, 'utf8')); }
+  catch (e) { if (e instanceof ParseError && !e.file) e.file = file; throw e; }   // reported as muten.config:line:col
 }
 
-export function parseConfig(source: string): MutenConfig {
+/** Where each key of muten.config is written, by its path (`security.csp`), so `check` can point at it. */
+export interface ConfigLocs { [path: string]: Loc }
+
+export function parseConfig(source: string, locs: ConfigLocs = {}): MutenConfig {
   const tokens = tokenize(source);
   let i = 0;
+  const locOf = (pos: number): Loc => { const before = source.slice(0, pos); return { line: before.split('\n').length, col: pos - before.lastIndexOf('\n') }; };
   const at = (t: Tk, v?: string): boolean => tokens[i].t === t && (v === undefined || tokens[i].v === v);
+  const fail = (message: string): never => { const error = new ParseError(`muten.config: ${message}`, locOf(tokens[i].pos)); throw error; };
   const eat = (t: Tk, v?: string): string => {
-    if (!at(t, v)) throw new Error(`muten.config: expected ${v ?? t}, got ${JSON.stringify(tokens[i].v || '<eof>')}`);
+    if (!at(t, v)) fail(`expected ${v ? `\`${v}\`` : t === Tk.Ident ? 'a name' : t}, got ${JSON.stringify(tokens[i].v || 'the end of the file')}`);
     return tokens[i++].v;
   };
 
-  const value = (): ConfigValue => {
+  const value = (path: string): ConfigValue => {
     const tok = tokens[i];
     if (tok.t === Tk.String) { i++; return tok.v; }
     if (tok.t === Tk.Number) { i++; return Number(tok.v); }
-    if (at(Tk.Punct, Pn.BraceL)) return block();
-    if (at(Tk.Punct, Pn.BrackL)) return list();
+    if (at(Tk.Punct, Pn.BraceL)) return block(path);
+    if (at(Tk.Punct, Pn.BrackL)) return list(path);
     if (tok.t === Tk.Ident) { i++; return tok.v === 'true' ? true : tok.v === 'false' ? false : tok.v; } // bool or bare enum
-    throw new Error(`muten.config: unexpected ${JSON.stringify(tok.v || '<eof>')}`);
+    return fail(`a value is a "string", a number, true/false, a name, a [list] or a { block }, not ${JSON.stringify(tok.v || 'the end of the file')}`);
   };
 
-  const list = (): ConfigValue[] => {
+  const list = (path: string): ConfigValue[] => {
     eat(Tk.Punct, Pn.BrackL);
     const out: ConfigValue[] = [];
-    while (!at(Tk.Punct, Pn.BrackR)) { out.push(value()); if (at(Tk.Punct, Pn.Comma)) i++; }
+    while (!at(Tk.Punct, Pn.BrackR)) { if (at(Tk.Eof)) fail('a [list] is never closed with `]`'); out.push(value(path)); if (at(Tk.Punct, Pn.Comma)) i++; }
     eat(Tk.Punct, Pn.BrackR);
     return out;
   };
 
-  const block = (): ConfigBlock => {
+  const block = (path: string): ConfigBlock => {
     eat(Tk.Punct, Pn.BraceL);
     const out: ConfigBlock = {};
     // keys are idents or quoted strings (hyphenated CSS keys like "color-scheme", "base-100")
-    while (!at(Tk.Punct, Pn.BraceR)) { const key = at(Tk.String) ? tokens[i++].v : eat(Tk.Ident); out[key] = value(); }
+    while (!at(Tk.Punct, Pn.BraceR)) {
+      if (at(Tk.Eof)) fail(`\`${path}\` is never closed with \`}\``);
+      const pos = tokens[i].pos;
+      // `api http://x`: the bare `http` was read as the value, and the `:` that follows is where it shows
+      if (at(Tk.Punct, Pn.Colon) && tokens[i - 1]?.t === Tk.Ident) fail(`a value with \`:\` or \`/\` (a url) goes in quotes: "${tokens[i - 1].v}:…"`);
+      const key = at(Tk.String) ? tokens[i++].v : eat(Tk.Ident);
+      locs[`${path}.${key}`] = locOf(pos);
+      out[key] = value(`${path}.${key}`);
+    }
     eat(Tk.Punct, Pn.BraceR);
     return out;
   };
 
   const config: MutenConfig = {};
-  while (tokens[i].t !== Tk.Eof) { const name = eat(Tk.Ident); config[name] = block(); }
+  while (tokens[i].t !== Tk.Eof) {
+    const pos = tokens[i].pos;
+    const name = eat(Tk.Ident);
+    locs[name] = locOf(pos);
+    config[name] = block(name);
+  }
   return config;
 }
 

@@ -1,11 +1,16 @@
 # lang - the front-end (`.muten` text → IR)
 
-Turns source text into the nested IR the rest of the pipeline consumes. Three layers, each building
-on the one below so the cursor and the expression grammar are never duplicated.
+Turns source text into the nested IR the rest of the pipeline consumes. The parser is a stack of classes, each
+building on the one below (grammar → readers → actions → declarations → tree), so the cursor and the expression
+grammar are never duplicated and every file stays one concern.
 
 | File | What it does |
 |---|---|
-| `lexer.ts` | `Lexer`: source text → a flat token stream. Two-char operators come from a table; scanners are named methods; the loop is a flat dispatch (no growing if-chain). |
-| `grammar.ts` | `Grammar`: the reading foundation - the token cursor (`peek`/`at`/`next`/`eat`), the **expression grammar** (a precedence ladder + `{ }` interpolation), and the literal-value reader. |
-| `parse.ts` | `Parser extends Grammar`: the **screen grammar** - top-level declarations (entity/state/action/routes/…) and the node tree. Dispatch is data-driven (keyword→handler, modifier→handler, method→builder are Maps). |
-| `manifest.ts` | The language's vocabulary **and its docs**: every primitive's props/snippet/doc, the keywords, modifiers and action ops. The single source the parser, the validator and the editor autocomplete all read. |
+| `lexer.ts` | Source → tokens; JS-isms get a hint instead of «unexpected character». |
+| `grammar.ts` | The token cursor and the expression/value grammar (the base class). |
+| `readers.ts` | Small shared readers: types, dotted names, args, clauses, durations, constraints. |
+| `parse-actions.ts` | `get` (with parameters too), `action` (+ `failed { }`) and the statements of a body, by a dispatch table. |
+| `parse-decls.ts` | The data declarations: entity, state/store, mock, sources, api, meta, routes, const, theme, `use` of a component. |
+| `parse.ts` | `Parser`: the entry, the declarations that hold a tree (shell, layout, part) and the node tree with its modifiers. |
+| `manifest.ts` | The vocabulary: primitives and their props, keywords, built-ins, action ops, and the docs the editor shows for each. |
+| `test-parse.ts` | A `.test` file → its tests (`open`, `press`, `fill … with`, `see`, `see no`, `wait`). |

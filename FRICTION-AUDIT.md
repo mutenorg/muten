@@ -49,16 +49,16 @@ it earns the oracle / AI-locatability / the closed escape.** The audit question 
 | `action f mutates { }` (empty) | `action f { }` | **KEEP** (teach) | Neutral — `mutates` with no target is meaningless; the located error is enough. |
 
 ## Gaps — muten lacks something the model reasonably reached for
-- **`round(n)` / number rounding** — the model wrote `Math.round(x)` / `.toFixed(0)` for discounted prices. muten has
-  `money()` but no plain rounding. **Consider a built-in `round(n)` / `round(n, dp)`.**
-- **`when … else …` in the tree** — the model writes `else` constantly (star ratings, submitted/not-submitted). Forcing
-  two `when`s is real friction. **Strong candidate to add `else`.**
+- ~~**`round(n)` / number rounding**~~ — **covered (2026-10)**: `round(n)`, `fixed(n, decimals)`.
+- ~~**`when … else …` in the tree**~~ — **added (2026-10).**
 - **A "repeat N times"** — `each [1,2,3,4,5] as i` works (tolerated inline), so this is covered.
 
 ## Recommended audit actions (prune / align, in priority order)
-1. **Add `when/else`** in the tree — high-frequency, gratuitous friction.
-2. **Remove `Form`** (or make it a first-class teaching-only alias) — it's a pure trap; the builder never wants it.
-3. **Add `round(n)`** — closes the `Math.round`/`.toFixed` gap.
+1. ~~**Add `when/else`** in the tree~~ — **done (2026-10)**: `when … else when … else { }`.
+2. **Remove `Form`** (or make it a first-class teaching-only alias) — still a trap for real forms; it now marks fields
+   with native `required`/`minlength`/`min`/`max` (so `:valid` works) and submits through `noValidate` + its own check.
+3. ~~**Add `round(n)`**~~ — **done**: `round` plus `fixed(n, decimals)`, `percent`, `pad`, `num`, and the text built-ins
+   (`trim`, `digits`, `slugify`, `replace`, `split`, `joined`…) that replaced the small `.ts` helpers.
 4. **Tolerate `class="x"`** (and `attr="v"` → `attr("v")`) — align with universal HTML/JSX habit.
 5. **Consider tolerating `'single quotes'`** — align with JS (weigh against the nested-quote lexer).
 6. Standardize constraint syntax on `min(8)` (drop the `:` form) OR keep both.

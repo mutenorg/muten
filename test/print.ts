@@ -8,7 +8,7 @@ const ok = (l: string, c: boolean, e = '') => { console.log((c ? '✓' : '✗') 
 // canonicalize: drop source positions (`loc`/`endLoc`), sort object keys (a props bag is
 // order-independent) — array order is kept. Positions are not part of semantic IR equality:
 // print is canonical, so a re-parse lands the same nodes at different offsets.
-const POSITIONS = new Set(['loc', 'endLoc']);
+const POSITIONS = new Set(['loc', 'endLoc', 'getLocs']);   // getLocs: where each get is written
 function norm(o: unknown): unknown {
   if (Array.isArray(o)) return o.map(norm);
   if (o && typeof o === 'object') {

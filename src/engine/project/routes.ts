@@ -1,6 +1,7 @@
 // routes: reads src/app.muten and returns typed route + api entries.
 // Uses the real engine parser (same path as the linter) so the CLI and editor never disagree.
 // Throws with a formatted message on missing app.muten or bad input. Consumed by build.ts and map.ts.
+import { apiWithEnv } from '#engine/project/env.js';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parse } from '#engine/lang/parse.js';
@@ -20,6 +21,7 @@ export function readRoutes(appRoot: string): RouteEntry[] {
   const routes: RouteEntry[] = (ir.routes || []).map((r) => ({
     route: r.url.replace(/^\//, ''), page: r.page, screenPath: join(pagesDir, r.page, r.page + '.muten'),
     ...(r.layout ? { layout: r.layout } : {}),
+    ...(r.guard ? { guard: r.guard, redirect: r.redirect } : {}),
   }));
   if (!routes.length) throw new Error(`${rel(root)} has no routes. Add:  routes { /url -> page }`);
   for (const r of routes) {
@@ -32,7 +34,7 @@ export function readRoutes(appRoot: string): RouteEntry[] {
 export function readApi(appRoot: string): { [name: string]: Value } {
   const root = join(appRoot, 'src', 'app.muten');
   if (!existsSync(root)) return {};
-  try { return parse(readFileSync(root, 'utf8')).api || {}; }
+  try { return apiWithEnv(parse(readFileSync(root, 'utf8')).api || {}, appRoot); }   // `base: "{env.api}"` -> the active environment
   catch { return {}; }
 }
 

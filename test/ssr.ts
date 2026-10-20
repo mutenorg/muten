@@ -28,7 +28,7 @@ ok('when true renders body', ssr(`screen c\nstate { on = true : bool }\nPage { w
 ok('when false omits body', !ssr(`screen c\nstate { on = false : bool }\nPage { when on { Text "no" } }`).includes('no'));
 
 // containers + class() pass straight through to the mu- base class
-ok('containers + classes', ssr(`screen c\nPage class("p-6") { Title "T" }`).includes('<main class="mu-page p-6">'));
+ok('containers + classes', ssr(`screen c\nPage class("p-6") { Title "T" }`).includes('<main class="mu-page p-6"'));
 
 // HTML is escaped (no injection from data)
 ok('text is escaped', ssr(`screen c\nstate { x = "<b>hi</b>" : text }\nPage { Text "{x}" }`).includes('&lt;b&gt;'));
@@ -67,7 +67,7 @@ ok('reactive page exports meta (for the router)', compileModule(toDoc(parse('scr
 
 // real-path navigation: Links emit a real path (no #), so the history router / MPA navigation works
 ok('Link emits a real path (no #)', compile(toDoc(parse('screen a\nPage { Link "About" -> "/about" }'))).includes('href="/about"'));
-ok('reactive Link real path (no #)', compileModule(toDoc(parse('screen a\nstate { n = 0 : number }\nPage { Link "x" -> "/about"  Text "{n}" }'))).includes('.href = "/about"'));
+{ const js = compileModule(toDoc(parse('screen a\nstate { n = 0 : number }\nPage { Link "x" -> "/about"  Text "{n}" }'))); ok('reactive Link real path (no #)', js.includes('.href = "/about"') || js.includes('href=\\"/about\\"')); } // built or cloned from a template
 
 // remote sources fetched at build (stubbed fetch): GET runs, non-GET is skipped (no side effects), offline → skip
 const realFetch = globalThis.fetch;
@@ -78,6 +78,14 @@ ok('non-GET source NOT fetched at build', !('w' in await fetchSources({ w: { url
 globalThis.fetch = async () => { throw new Error('offline'); };
 ok('offline fetch → skipped (no crash)', !('c' in await fetchSources({ c: 'http://x' })));
 globalThis.fetch = realFetch;
+
+// style() IS PART OF THE PAGE: a bar's width or a card's color lives in a CSS variable, and the static build used to
+// drop it (every bar at its default). It lands as a style attribute now, interpolated from the initial state.
+{
+  const bar = ssr('screen c\nstate { pct = 40 : number }\nPage { Stack class("bar") style(w: "{pct}%", tone: "red") { Text "x" } }');
+  ok('style() vars land in the static HTML', /style="--w:40%;--tone:red"/.test(bar), bar);
+  ok('a quote in a style value is escaped', ssr('screen c\nstate { v = "a\\"b" : text }\nPage { Stack style(x: "{v}") { Text "x" } }').includes('&quot;'));
+}
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);

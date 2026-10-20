@@ -6,6 +6,12 @@ import { join, relative, isAbsolute } from 'node:path';
 import { readFileSync, existsSync, watch } from 'node:fs';
 import { readRoutes, readApi, apiClientNames } from '#engine/project/routes.js';
 import { load, loadAllParts, findStores, pluginFileErrors } from '#engine/project/load.js';
+import { checkTests } from '#engine/project/check-tests.js';
+import { checkTheme } from '#engine/project/theme-check.js';
+import { checkConfig } from '#engine/project/config-check.js';
+import { readTranslations } from '#engine/project/lang-files.js';
+import { readThemeValues } from '#engine/project/theme-values.js';
+import { checkLang } from '#engine/project/lang-check.js';
 import { storeContext } from '#engine/project/context.js';
 import { validateStoresAndGuards } from '#engine/project/check-app.js';
 import { lintComponents } from '#engine/project/js-antipatterns.js';
@@ -15,7 +21,8 @@ import { composeDoc } from '#engine/ir/compose.js';
 import { validate } from '#engine/ir/validate.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { formatDiagnostic, ParseError, diag } from '#engine/shared/diagnostics.js';
-import type { Diagnostic } from '#engine/shared/types.js';
+import type { Diagnostic, Doc } from '#engine/shared/types.js';
+import { packageTypeDiagnostics } from '#engine/project/ts-check.js';
 
 export async function lintApp(appRoot: string, json = false): Promise<number> {
   const rel = (p: string) => relative(appRoot, p);
@@ -31,17 +38,22 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
   const iconExists = getIconChecker(appRoot);                    // `Icon "set:name"` existence, so a typo'd icon fails `check` instead of only the build
   const sharedParts = await loadAllParts(appRoot);               // all src/**/parts + parts imported from plugins (muten.config)
   const storeIRs = findStores(join(appRoot, 'src'));             // store domains + members needed to validate cross-page refs like cart.add / cart.count
-  const { stores, storeMembers, storeSelfMut, storeEntities } = storeContext(storeIRs); // ONE assembly, shared with build + plugin (no drift)
+  const storeCtx = storeContext(storeIRs);
+  const { stores, storeMembers, storeFns, storeActions, storeSelfMut, storeEntities } = storeCtx; // ONE assembly, shared with build + plugin (no drift)
+  const translations = readTranslations(appRoot);
+  const themeValues = readThemeValues(appRoot);                  // theme.muten: what `theme.colors.primary` reads                // src/lang/*.lang: t("key") and `lang` speak them
   const apiClients = apiClientNames(readApi(appRoot));           // the app's named api clients, so a `post "client:/x"` prefix is checked
   const pages = readRoutes(appRoot);
   const routes = pages.map((p) => '/' + p.route);                // declared urls, leading slash restored ("/", "/product/:pid")
 
   const found: Array<{ file: string } & Diagnostic> = [];
+  const loaded: Array<{ file: string; doc: Doc }> = [];   // for TypeScript's word on their calls into packages (ts-check.ts)
   for (const page of pages) {
     let diagnostics: Diagnostic[] = [];
     try {
       const { doc, partNames } = await load(page.screenPath, sharedParts);
-      diagnostics = validate(doc, { parts: partNames, stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities, routes, selfRoute: '/' + page.route }).diagnostics;
+      loaded.push({ file: page.screenPath, doc });
+      diagnostics = validate(doc, { parts: partNames, stores, storeMembers, storeFns, storeActions, apiClients, iconExists, storeSelfMut, storeEntities, routes, selfRoute: '/' + page.route, translations, themeValues }).diagnostics;
     } catch (e) {
       if (!(e instanceof ParseError)) throw e;             // a syntax error becomes one diagnostic; anything else is a real bug
       diagnostics = [{ code: e.code, severity: 'error', message: e.message, loc: e.loc, suggestion: null }];
@@ -51,13 +63,19 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
       found.push({ file: rel(page.screenPath), ...d });
     }
   }
+  for (const [file, diagnostics] of packageTypeDiagnostics(loaded, appRoot, themeValues)) {
+    for (const d of diagnostics) {
+      if (!json) console.log(formatDiagnostic(d, rel(file), srcOf(file)));
+      found.push({ file: rel(file), ...d });
+    }
+  }
   // app.muten wraps every route, so validate its store refs too (e.g. the navbar's cart count)
   const appFile = join(appRoot, 'src', 'app.muten');
   if (existsSync(appFile)) {
     try {
       const appIr = parse(readFileSync(appFile, 'utf8'));
       if (appIr.shell) {
-        for (const d of validate(toDoc({ ...appIr, tree: appIr.shell }), { stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities, routes }).diagnostics) {
+        for (const d of validate(toDoc({ ...appIr, tree: appIr.shell }), { stores, storeMembers, storeFns, storeActions, apiClients, iconExists, storeSelfMut, storeEntities, routes, translations, themeValues }).diagnostics) {
           if (!json) console.log(formatDiagnostic(d, rel(appFile), srcOf(appFile)));
           found.push({ file: rel(appFile), ...d });
         }
@@ -65,7 +83,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
       // each layout composes like a page (it may call parts), keeping its `slot` as the page outlet
       for (const tree of Object.values(appIr.layouts || {})) {
         const { doc } = composeDoc({ ...appIr, tree }, sharedParts, true);
-        for (const d of validate(doc, { parts: Object.keys(sharedParts), stores, storeMembers, apiClients, iconExists, storeSelfMut, storeEntities, routes }).diagnostics) {
+        for (const d of validate(doc, { parts: Object.keys(sharedParts), stores, storeMembers, storeFns, storeActions, apiClients, iconExists, storeSelfMut, storeEntities, routes, translations, themeValues }).diagnostics) {
           if (!json) console.log(formatDiagnostic(d, rel(appFile), srcOf(appFile)));
           found.push({ file: rel(appFile), ...d });
         }
@@ -74,7 +92,7 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
   }
 
   // .store bodies + route guards: shared with `build` via check-app.ts so check and build never disagree.
-  for (const d of validateStoresAndGuards(appRoot, storeIRs, storeMembers)) {
+  for (const d of validateStoresAndGuards(appRoot, storeIRs, storeCtx, translations)) {
     if (!json) console.log(formatDiagnostic(d, d.file, srcOf(d.file)));
     found.push(d);
   }
@@ -84,6 +102,26 @@ export async function lintApp(appRoot: string, json = false): Promise<number> {
     found.push(d);
   }
 
+  // muten.config: it parses, its blocks and keys exist, its values fit, its plugins are installed (config-check.ts)
+  for (const d of checkConfig(appRoot)) {
+    if (!json) console.log(formatDiagnostic(d, 'muten.config', srcOf('muten.config')));
+    found.push({ file: 'muten.config', ...d });
+  }
+  // theme.muten: it parses, its library and tokens exist, its values are values (theme-check.ts)
+  for (const d of checkTheme(appRoot)) {
+    if (!json) console.log(formatDiagnostic(d, 'theme.muten', srcOf('theme.muten')));
+    found.push({ file: 'theme.muten', ...d });
+  }
+  // src/lang/*.lang: each parses, every language has every key, a text fills the same values in all (lang-check.ts)
+  for (const d of checkLang(appRoot)) {
+    if (!json) console.log(formatDiagnostic(d, d.file, srcOf(d.file)));
+    found.push(d);
+  }
+  // the .test files: a step that does not parse, an `open` to a route that does not exist (check-tests.ts, shared with `muten test`)
+  for (const d of checkTests(appRoot, pages)) {
+    if (!json) console.log(formatDiagnostic(d, d.file, srcOf(d.file)));
+    found.push(d);
+  }
   // a plugin file that does not parse is skipped (the app still runs) - but never silently: its parts vanish, and
   // without this every caller only learns «not a known part»
   for (const f of pluginFileErrors) {

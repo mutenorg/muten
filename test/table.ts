@@ -127,10 +127,10 @@ state { who = "Valentina Ruiz" : text }
 Span "{initials(who)} {hue(who)}"`));
   ok('initials() is a known builtin', validate(doc).ok, JSON.stringify(validate(doc).diagnostics));
   const out = compile(doc, {});
-  const fn = /function initials\(s\) \{[^\n]*\}/.exec(out)?.[0] ?? '';
-  const initials = new Function(fn + '; return initials;')();
+  const fn = /function __b_initials\(s\) \{[^\n]*\}/.exec(out)?.[0] ?? '';   // a built-in is emitted as __b_<name>
+  const initials = new Function(fn + '; return __b_initials;')();
   ok('initials("Valentina Ruiz") = VR', initials('Valentina Ruiz') === 'VR', initials('Valentina Ruiz'));
-  const hueFn = new Function((/function hue\(s\) \{[^\n]*\}/.exec(out)?.[0] ?? '') + '; return hue;')();
+  const hueFn = new Function((/function __b_hue\(s\) \{[^\n]*\}/.exec(out)?.[0] ?? '') + '; return __b_hue;')();
   ok('hue() is stable and 0-359 ("Valentina Ruiz" twice = same)', hueFn('Valentina Ruiz') === hueFn('Valentina Ruiz') && hueFn('Valentina Ruiz') >= 0 && hueFn('Valentina Ruiz') < 360 && hueFn('Ana') !== hueFn('Valentina Ruiz'), String(hueFn('Valentina Ruiz')));
   ok('initials("ana") = A, "  María  José  Pérez " = MP, "" = ""', initials('ana') === 'A' && initials('  María  José  Pérez ') === 'MP' && initials('') === '', '');
 }

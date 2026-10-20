@@ -46,12 +46,15 @@ function inferLiteralListShapes(ir: IR): IR {
     const items: Value[] = def.initial;
     if (items.every((it) => it != null && typeof it === 'object' && !Array.isArray(it))) {         // list of records -> synth entity
       const fields: Entity = {};
-      for (const it of items) for (const key of Object.keys(it as { [k: string]: Value })) if (key !== 'id' && !(key in fields)) fields[key] = scalarFieldType((it as { [k: string]: Value })[key]);
+      for (const it of items) {
+        if (!it || typeof it !== 'object' || Array.isArray(it)) continue;
+        for (const [key, value] of Object.entries(it)) if (key !== 'id' && !(key in fields)) fields[key] = scalarFieldType(value);
+      }
       entities = { ...entities, ['__' + name]: fields };
       state[name] = { ...def, type: `list<__${name}>` };
       changed = true;
     } else if (items.every((it) => it == null || typeof it !== 'object')) {                        // list of scalars -> list<text|number|bool>
-      state[name] = { ...def, type: `list<${scalarFieldType(items.find((x) => x != null) as Value)}>` };
+      state[name] = { ...def, type: `list<${scalarFieldType(items.find((x) => x != null) ?? null)}>` };
       changed = true;
     }
   }
@@ -89,5 +92,5 @@ export function toDoc(ir: IR): Doc {
   ir = inferLiteralListShapes(ir);   // literal-initialized lists get their element shape inferred (no `entity` needed)
   // a .store slice has state + actions but no node tree: produce an empty node map.
   const { rootId, nodes } = ir.tree ? flatten(ir.tree) : { rootId: undefined, nodes: {} };
-  return { screen: ir.screen, entities: ir.entities, state: ir.state, actions: ir.actions, gets: ir.gets || {}, effects: ir.effects || [], consts: ir.consts || {}, constraints: ir.constraints || {}, params: ir.params, meta: ir.meta, imports: ir.imports, rootId, nodes };
+  return { screen: ir.screen, entities: ir.entities, state: ir.state, actions: ir.actions, gets: ir.gets || {}, getLocs: ir.getLocs, langFrom: ir.langFrom, fns: ir.fns || {}, effects: ir.effects || [], consts: ir.consts || {}, constraints: ir.constraints || {}, params: ir.params, meta: ir.meta, imports: ir.imports, rootId, nodes };
 }

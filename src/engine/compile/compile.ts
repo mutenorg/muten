@@ -14,14 +14,29 @@
 // Static filters (role == admin) are pushed to the query; dynamic ones (name contains @q) stay
 // reactive. A page with no reactivity compiles to plain HTML with zero runtime (Astro-like).
 
-import { Nt, Ek, Fmt, Fk, DATA_PREFIX, URL_ATTRS } from '#engine/shared/vocab.js';
-import { CONTAINERS, parseClause, editableFields, headCellIds } from '#engine/compile/helpers.js';
+import { Nt, Ek, Fmt, URL_ATTRS, CUSTOM_MODULE, UseKind, SKIP_LINK_TEXT } from '#engine/shared/vocab.js';
+import { CONTAINERS, editableFields, headCellIds } from '#engine/compile/helpers.js';
 import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, emitPatch } from '#engine/compile/emit.js';
 import { inlineSourceMap } from '#engine/compile/sourcemap.js';
 import { Logic } from '#engine/compile/logic.js';
+import { getOrder } from '#engine/ir/refs.js';
+import { formLines } from '#engine/compile/form.js';
+import { staticRenderer } from '#engine/compile/static.js';
+import { callReturns } from '#engine/ir/refs.js';
+import { FIELDS_NODES } from '#engine/compile/fields.js';
+import { SVG_NODES } from '#engine/compile/svg.js';
+import { TABLES_NODES } from '#engine/compile/tables.js';
+import { CUSTOM_NODES } from '#engine/compile/custom.js';
+import { dynamicsLines } from '#engine/compile/dynamics.js';
+import { MEDIA_NODES } from '#engine/compile/media.js';
+import { CONTROLS_NODES } from '#engine/compile/controls.js';
+import { foreignImport, REACT_RUNTIME, scriptGlobals } from '#engine/compile/foreign.js';
+import { speakTable } from '#engine/compile/translate.js';
+import { REACT_HELPERS, withThemeImports } from '#engine/compile/react-tree.js';
+import { foreignNames } from '#engine/ir/calls.js';
 import type {
-  Doc, NodeProps, Scope, Interp, StringPropValue, Value, Expr, ArgValue, Loc,
-  CompileOpts, CompileCtx, EditableField, FieldConstraint, StoreInput, EmitParts,
+  Doc, NodeProps, Scope, Interp, StringPropValue, Value, Expr, Loc,
+  CompileOpts, CompileCtx, StoreInput, EmitParts, Emitter, NodeEmitter,
 } from '#engine/shared/types.js';
 
 // Emit a .muten page as an ESM module (for the Vite pipeline): exports mount(root) + css.
@@ -36,15 +51,19 @@ export function compileNodePatch(doc: Doc, nodeId: string, opts: CompileOpts = {
   return compile(doc, {}, '', {}, {}, { ...opts, format: Fmt.Patch, patchRoot: nodeId, ctxRefs: true });
 }
 
+// the primitives whose code lives in a file of its family, by node type
+const NODE_EMITTERS: ReadonlyMap<string, NodeEmitter> = new Map([...FIELDS_NODES, ...SVG_NODES, ...TABLES_NODES, ...MEDIA_NODES, ...CONTROLS_NODES, ...CUSTOM_NODES]);
+
 // Emit one .store domain slice (state + get + actions + effects) as a shared ESM module.
 export function compileStore(input: StoreInput = {}, data: { [name: string]: Value } = {}, sources: { [name: string]: Value } = {}): string {
-  const { state = {}, gets = {}, actions = {}, effects = [], entities = {}, imports = [] } = input;
+  const { state = {}, gets = {}, fns = {}, actions = {}, effects = [], entities = {}, imports = [] } = input;
   // A store reads and calls the OTHER stores exactly like a page does; its own name stays local.
   const others = Object.fromEntries(Object.entries(input.stores || {}).filter(([domain]) => domain !== input.domain));
-  return compile({ screen: 'store', entities, state, actions, gets, effects, imports, consts: {}, constraints: {}, rootId: undefined, nodes: {} }, data, '', {}, sources, { format: Fmt.Store, persistScope: input.domain, dev: input.dev, api: input.api, stores: others });
+  return compile({ screen: 'store', entities, state, actions, gets, fns, effects, imports, consts: {}, constraints: {}, rootId: undefined, nodes: {} }, data, '', {}, sources, { format: Fmt.Store, persistScope: input.domain, dev: input.dev, api: input.api, stores: others, translations: input.translations, themeValues: input.themeValues });
 }
 
-export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectCss = '', components: { [name: string]: string } = {}, sources: { [name: string]: Value } = {}, opts: CompileOpts = {}): string {
+export function compile(page: Doc, data: { [name: string]: Value } = {}, projectCss = '', components: { [name: string]: string } = {}, sources: { [name: string]: Value } = {}, opts: CompileOpts = {}): string {
+  const doc = withThemeImports(page, opts.themeKit);   // what theme.muten's providers call (react-tree.ts)
   const { nodes, rootId, state, entities, screen } = doc;
 
   let lines: string[] = [];
@@ -77,83 +96,15 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const usedStores = new Set<string>();
   const ctx: CompileCtx = {
     state, entities, actions: doc.actions, consts: doc.consts || {}, gets: doc.gets || {}, effects: doc.effects || [],
-    stateKeys, queryStates, stores: opts.stores || {}, usedStores, params: new Set(doc.params || []), storeEntities: opts.storeEntities, persistScope: opts.persistScope ?? screen, format: opts.format, ctxRefs: opts.ctxRefs, dev: !!opts.dev,
+    stateKeys, queryStates, stores: opts.stores || {}, usedStores, params: new Set(doc.params || []), storeEntities: opts.storeEntities,
+    fns: doc.fns || {}, calls: callReturns(doc.imports), translations: opts.translations, themeValues: opts.themeValues ?? opts.themeKit?.values, langFrom: doc.langFrom, tKeys: new Set(), tPatterns: [], foreign: foreignNames(doc), useCalls: new Set((doc.imports || []).filter((def) => !def.kind).flatMap((def) => def.names)),
+    ownCalls: new Set([...Object.keys(doc.fns || {}), ...(doc.imports || []).filter((def) => !def.kind).flatMap((def) => def.names)]), persistScope: opts.persistScope ?? screen, format: opts.format, ctxRefs: opts.ctxRefs, dev: !!opts.dev,
   };
   const logic = new Logic(ctx);
   const pageScope: Scope = { locals: new Set() }; // page-level scope for interpolation, when/each
 
-  // reactive element bits: conditional classes (`class(active when cond)`) + events (`on(keydown: fn)`).
-  const genDynamics = (id: string, p: NodeProps): void => {
-    if (p.id) lines.push(`el_${id}.id = ${JSON.stringify(p.id)};`);   // id("features") — the anchor a `-> "#features"` scrolls to
-    for (const c of p.class || []) if (typeof c !== 'string') {
-      if ('interp' in c) {
-        // `class("status-{x}")` — interpolated token, applied reactively: swap the previous computed token(s)
-        // for the new whenever the value changes (split() so a multi-word result is handled token-by-token).
-        const js = c.interp.parts.map((pt) => typeof pt === 'string' ? JSON.stringify(pt) : `String(${logic.compileExpr(pt, pageScope)})`).join(' + ');
-        lines.push(`{ let __cp = ''; effect(() => { const __c = ${js}; if (__c === __cp) return; if (__cp) el_${id}.classList.remove(...__cp.split(' ').filter(Boolean)); if (__c) el_${id}.classList.add(...__c.split(' ').filter(Boolean)); __cp = __c; }); }`);
-        continue;
-      }
-      // `class("a b c" when cond)` may hold MULTIPLE tokens; classList.toggle rejects a token with
-      // spaces, so split (at compile time) and toggle each with the condition computed once.
-      const toggles = c.name.trim().split(/\s+/).map((t) => `el_${id}.classList.toggle(${JSON.stringify(t)}, __on);`).join(' ');
-      lines.push(`effect(() => { const __on = !!(${logic.compileExpr(c.cond, pageScope)}); ${toggles} });`);
-    }
-    // on(event: action): table-driven event PAYLOAD → the natural scalar flows to the action (value / key). An
-    // action that takes no arg simply ignores it. `drop` is the drag-pack target (fires action(draggedId, group)).
-    // `scroll` hands over how many pixels are left below the fold, so a list can ask for its next page as it
-    // nears the end: `on(scroll: more)` + `action more(left: number) { if left < 200 { … } }`.
-    const EVENT_ARG: { readonly [event: string]: string } = { input: 'e.target.value', change: 'e.target.value', keydown: 'e.key', keyup: 'e.key', keypress: 'e.key', scroll: 'Math.round(e.target.scrollHeight - e.target.scrollTop - e.target.clientHeight)' };
-    for (const [event, act] of Object.entries(p.on || {})) {
-      if (typeof act !== 'string') continue;
-      if (event === 'enter') lines.push(`el_${id}.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ${logic.actionRef(act)}(); } });`); // synthetic: Enter submits (no newline); Shift+Enter is a newline
-      // synthetic: `typed` fires ONCE the user stops typing (300ms after the last key), with the value — a search
-      // asks the server once per pause instead of once per keystroke.
-      else if (event === 'typed') lines.push(`{ let __pause = 0; el_${id}.addEventListener('input', (e) => { const __v = e.target.value; clearTimeout(__pause); __pause = setTimeout(() => ${logic.actionRef(act)}(__v), 300); }); }`);
-      else if (event === 'drop') { // register a pointer-DnD drop zone (innermost-wins collision → nested-safe)
-        // The group interpolates: `droptarget("{row.id}")` compiles to `String(row.id ?? '')`, so each row in a
-        // list is a zone that passes its OWN id as the drop's second arg → `reorder(draggedId, targetId)`.
-        let groupJs = "''"; let arg = '';
-        if (p.dropGroup !== undefined) {
-          groupJs = typeof p.dropGroup === 'string' ? JSON.stringify(p.dropGroup)
-            : 'kind' in p.dropGroup ? interpConcat(p.dropGroup) : "''";
-          // Second arg: where the row LANDS in a sortable (`__before`), else the zone's own group.
-          // Third arg: ALWAYS the zone's group — so a nested sortable can get BOTH the landing
-          // position AND which group it landed in (`move(id, before, group)`). Actions that take two
-          // args ignore it, so this stays backward compatible with `reorder(id, target)`.
-          arg = ', (__before !== undefined ? __before : ' + groupJs + '), ' + groupJs;
-        }
-        lines.push(`__drop(el_${id}, ${groupJs}, (__dragId, __before) => ${logic.actionRef(act)}(__dragId${arg}));`);
-      }
-      else lines.push(`el_${id}.addEventListener(${JSON.stringify(event)}, (e) => ${logic.actionRef(act)}(${EVENT_ARG[event] || ''}));`);
-    }
-    // draggable(<id>): a pointer-DnD source — a styled clone tracks the pointer; the id is read live at grab time.
-    if (p.draggable !== undefined) lines.push(`__drag(el_${id}, () => String(${logic.compileExpr(p.draggable, pageScope)}));`);
-    // aria(...) / data(...) — author-expressed attributes: `key` → `aria-<key>` (`role` → `role`). A literal value is a
-    // static attribute; a value that reads state is wrapped in an effect, so e.g. `aria(expanded: open)` stays in sync.
-    // An EMPTY value means «no attribute»: a part's optional `label: text = ""` must not stamp aria-label="" (that
-    // erases the element's accessible name), so an empty literal is skipped and an empty live value removes it.
-    for (const [key, expr] of Object.entries(p.aria || {})) {
-      const attr = JSON.stringify(key === 'role' || key.startsWith(DATA_PREFIX) ? key : 'aria-' + key);   // data(...) keys arrive already named `data-*`
-      const val = logic.compileExpr(expr, pageScope);
-      if (expr.kind === Ek.Lit) { if (expr.value !== '') lines.push(`el_${id}.setAttribute(${attr}, String(${val}));`); }
-      else lines.push(`effect(() => { const __av = String(${val}); if (__av === '') el_${id}.removeAttribute(${attr}); else el_${id}.setAttribute(${attr}, __av); });`);
-    }
-    // disabled: `disabled when <cond>` → `el.disabled`. A literal (bare `disabled`) sets it once; a cond that
-    // reads state is wrapped in an effect so the control enables/disables live (the "disable until valid" gate).
-    if (p.disabled !== undefined) {
-      const js = logic.compileExpr(p.disabled, pageScope);
-      if (p.disabled.kind === Ek.Lit) lines.push(`el_${id}.disabled = ${js};`);
-      else lines.push(`effect(() => { el_${id}.disabled = !!(${js}); });`);
-    }
-    // style(name: "..") → CSS custom property `--name`, reactive when the value interpolates state. Bounded to
-    // CSS variables only (muten prepends `--`), so it never competes with class()/Tailwind; CSS reads var(--name).
-    for (const [name, sv] of Object.entries(p.styleVars || {})) {
-      const prop = JSON.stringify('--' + name.replace(/^-+/, ''));
-      if (typeof sv === 'string') { lines.push(`el_${id}.style.setProperty(${prop}, ${JSON.stringify(sv)});`); continue; }
-      const js = sv.parts.map((pt) => typeof pt === 'string' ? JSON.stringify(pt) : `String(${logic.compileExpr(pt, pageScope)})`).join(' + ');
-      lines.push(`effect(() => el_${id}.style.setProperty(${prop}, ${js}));`);
-    }
-  };
+  // reactive element bits: id, conditional classes, events, drag, aria/data, disabled, style() (dynamics.ts)
+  const genDynamics = (id: string, p: NodeProps): void => { dynamicsLines(emitter, id, p); };
 
   const genChildren = (id: string, parentVar: string): void => {
     if (opts.format === Fmt.Patch) return; // HMR patch: emit the node's OWN element only; patchNode re-parents the live children
@@ -200,6 +151,21 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     }
   };
 
+  // A reactive text or attribute writes the DOM only when its value really changed. A row that comes back as a new
+  // object (one field of it patched) re-runs every binding of the row: rewriting an unchanged text replaced its text
+  // node anyway (two DOM mutations per field, per row, per change). __bind (runtime) keeps the last value.
+  function writeOnChange(element: string, property: string, value: string): string {
+    return `__bind(${element}, ${JSON.stringify(property)}, () => ${value});`;
+  }
+
+  // A field's accessible name: its text («Buscar», «Mensaje para #{canal}», kept in step when it interpolates). With
+  // no text there is no name: the oracle warns (field-unnamed). It used to be the primitive's own English name
+  // («Number», «Select»), which a screen reader read out on a Spanish page and an audit could no longer catch.
+  function nameField(id: string, text: StringPropValue | undefined): void {
+    if (typeof text === 'string') { if (text) lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(text)});`); }
+    else if (text && 'kind' in text) lines.push(`effect(() => el_${id}.setAttribute('aria-label', ${interpConcat(text)}));`);
+  }
+
   // text-bearing primitives (Text/Span/Title): plain string or a (possibly reactive) interpolation.
   function genTextEl(id: string, tag: string, className: string, value: StringPropValue | undefined, parentVar: string): void {
     declEl(id, tag, className);
@@ -208,7 +174,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     } else if (value && 'kind' in value) {
       const concat = interpConcat(value);
       const reactive = value.parts.some((part) => typeof part !== 'string'); // an embedded {expr} -> wrap in an effect
-      lines.push(reactive ? `effect(() => { el_${id}.textContent = ${concat}; });` : `el_${id}.textContent = ${concat};`);
+      lines.push(reactive ? writeOnChange(`el_${id}`, 'textContent', concat) : `el_${id}.textContent = ${concat};`);
     }
     appendEl(id, parentVar);
   }
@@ -236,7 +202,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       const reactive = value.parts.some((part) => typeof part !== 'string');
       const raw = interpConcat(value);
       const concat = URL_ATTRS.has(attr) && reactive ? `__safeUrl(${raw}, ${attr === 'href' ? 'false' : 'true'})` : raw;
-      lines.push(reactive ? `effect(() => { el_${id}.${attr} = ${concat}; });` : `el_${id}.${attr} = ${concat};`);
+      lines.push(reactive ? writeOnChange(`el_${id}`, attr, concat) : `el_${id}.${attr} = ${concat};`);
     }
   }
 
@@ -249,9 +215,23 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
 
   // Emit one node + its subtree into `parentVar`. Semantic containers share one generic path;
   // every other primitive has a case below. Logic (refs, exprs, actions) is delegated to `logic`.
+  // the page, as the per-family generators see it (types.ts Emitter)
+  const emitter: Emitter = {
+    push: (...code) => { lines.push(...code); }, capture, declEl, appendEl, classFor, slot, genDynamics, genChildren,
+    interpAttr: genInterpAttr, textEl: genTextEl, genNode: (id, parentVar) => genNode(id, parentVar), nameField, textWrite: emitTextWrite, geo: genGeo, svgStr: genSvgStr, writeOnChange, interpConcat,
+    logic, scope: pageScope, nodes, doc, opts, headCells, queryStates,
+  };
+
   function genNode(id: string, parentVar: string): void {
+    if (cloneable(id)) {
+      lines.push(`const el_${id} = __clone(${JSON.stringify(renderStatic(id))});`);
+      appendEl(id, parentVar);
+      return;
+    }
     const n = nodes[id];
     const p = n.props || {};
+    const family = NODE_EMITTERS.get(n.type);   // a primitive whose code lives in its family's file (fields, svg, tables)
+    if (family) { family(emitter, id, n, parentVar); return; }
     const cont = CONTAINERS[n.type]; // regions (Header/Nav/...) + Stack: [tag, baseClass]
     if (cont) {
       const [tag, base] = cont;
@@ -262,7 +242,7 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       // a11y by default: a keyboard skip-link as the shell's first child, so Tab jumps past the chrome to content.
       // It ships its OWN hide-until-focus CSS (the compiler emits the element, so it must guarantee it's invisible
       // until focused — not rely on the app's stylesheet, or a non-scaffolded app shows a naked "Skip to content").
-      if (n.type === Nt.Shell) lines.push(`{ if (!document.getElementById('mu-a11y-css')) { const st = document.createElement('style'); st.id = 'mu-a11y-css'; st.textContent = '.mu-skip-link{position:absolute;left:-9999px;top:8px;z-index:1000;padding:8px 16px;border-radius:6px;background:#111;color:#fff;text-decoration:none}.mu-skip-link:focus{left:8px}#mu-main:focus{outline:none}'; document.head.appendChild(st); } const sk = document.createElement('a'); sk.href = '#mu-main'; sk.className = 'mu-skip-link'; sk.textContent = 'Skip to content'; el_${id}.appendChild(sk); }`);
+      if (n.type === Nt.Shell) lines.push(`{ if (!document.getElementById('mu-a11y-css')) { const st = document.createElement('style'); st.id = 'mu-a11y-css'; st.textContent = '.mu-skip-link{position:absolute;left:-9999px;top:8px;z-index:1000;padding:8px 16px;border-radius:6px;background:#111;color:#fff;text-decoration:none}.mu-skip-link:focus{left:8px}#mu-main:focus{outline:none}'; document.head.appendChild(st); } const sk = document.createElement('a'); sk.href = '#mu-main'; sk.className = 'mu-skip-link'; sk.textContent = (${JSON.stringify(SKIP_LINK_TEXT)})[(document.documentElement.lang || 'en').slice(0, 2)] || ${JSON.stringify(SKIP_LINK_TEXT.en)}; el_${id}.appendChild(sk); }`);
       appendEl(id, parentVar);
       genDynamics(id, p);
       genChildren(id, `el_${id}`);
@@ -270,441 +250,22 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     }
     switch (n.type) {
 
-      case Nt.List: { // semantic list: <ul> (or <ol> with `ordered`); every direct child becomes an <li>
-        declEl(id, p.ordered ? 'ol' : 'ul', classFor('list', p));
-        appendEl(id, parentVar);
-        genDynamics(id, p);
-        for (const childId of nodes[id].children || []) {
-          if (nodes[childId].type === Nt.Each) genNode(childId, `el_${id}`);       // each row wraps itself in <li> (listItemEach)
-          else { lines.push(`const li_${childId} = document.createElement('li');`); genNode(childId, `li_${childId}`); lines.push(`el_${id}.appendChild(li_${childId});`); }
-        }
-        break;
-      }
-
-      case Nt.Table: { // native <table>: Row children group into a real <thead> (head rows) + <tbody> (the rest)
-        declEl(id, 'table', classFor('table', p));
-        appendEl(id, parentVar);
-        genDynamics(id, p);
-        const kids = nodes[id].children || [];
-        const isHead = (k: string): boolean => nodes[k].type === Nt.Row && !!nodes[k].props?.head;
-        const heads = kids.filter(isHead), body = kids.filter((k) => !isHead(k));
-        if (heads.length) { lines.push(`const thead_${id} = document.createElement('thead'); el_${id}.appendChild(thead_${id});`); for (const k of heads) genNode(k, `thead_${id}`); }
-        if (body.length) { lines.push(`const tbody_${id} = document.createElement('tbody'); el_${id}.appendChild(tbody_${id});`); for (const k of body) genNode(k, `tbody_${id}`); }
-        break;
-      }
-
-      case Nt.Row: { // <tr> inside a Table; its Cell children emit <td>/<th> straight into it
-        declEl(id, 'tr', classFor('row', p));
-        appendEl(id, parentVar);
-        genDynamics(id, p);
-        genChildren(id, `el_${id}`);
-        break;
-      }
-
-      case Nt.Cell: { // <td> (or <th> if its Row is a header row) — text value OR rich children
-        declEl(id, headCells.has(id) ? 'th' : 'td', classFor('cell', p));
-        if (n.children && n.children.length) genChildren(id, `el_${id}`);
-        else if (p.value !== undefined) genInterpAttr(id, 'textContent', p.value);
-        genDynamics(id, p);
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Details: { // native disclosure: <details> + <summary>, the browser owns the toggle (no JS, no state)
-        declEl(id, 'details', classFor('details', p));
-        if (p.open) lines.push(`el_${id}.open = true;`);
-        if (p.group) lines.push(`el_${id}.name = ${JSON.stringify(p.group)};`); // one open at a time, native
-        appendEl(id, parentVar);
-        genDynamics(id, p);
-        genTextEl(id + 's', 'summary', 'mu-summary', p.summary, `el_${id}`); // <summary> is the first child (the clickable header)
-        genChildren(id, `el_${id}`);
-        break;
-      }
-
-      case Nt.SearchField: {
-        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
-        lines.push(`const el_${id} = document.createElement('input');`);
-        lines.push(`el_${id}.type = 'search';`);
-        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Search')});`); // a11y: an accessible name (a placeholder is not one)
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('search', p))};`);
-        genInterpAttr(id, 'placeholder', p.placeholder); // static OR interpolated ("Message #{channel}" stays reactive)
-        if (p.max !== undefined) { // `max(n)` on a text input caps its LENGTH natively (maxlength): the browser refuses the n+1 char, no JS truncation to race
-          const mj = logic.compileExpr(p.max, pageScope);
-          lines.push(p.max.kind === Ek.Lit ? `el_${id}.maxLength = ${mj};` : `effect(() => { el_${id}.maxLength = ${mj}; });`);
-        }
-        lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // two-way: state->input so `.reset()` clears the box; guarded to avoid yanking the caret
-        emitTextWrite(id, p.bind, writeJS);
-        genDynamics(id, p); // wire on(enter: send) / on(...) + conditional class on the input
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Textarea: { // standalone multi-line input, two-way bound to a text state (same wiring as SearchField, a <textarea>)
-        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
-        lines.push(`const el_${id} = document.createElement('textarea');`);
-        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Message')});`); // a11y: an accessible name (a placeholder is not one)
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('textarea', p))};`);
-        genInterpAttr(id, 'placeholder', p.placeholder);
-        if (p.max !== undefined) { // `max(n)` caps the textarea LENGTH natively (maxlength), same as SearchField
-          const mj = logic.compileExpr(p.max, pageScope);
-          lines.push(p.max.kind === Ek.Lit ? `el_${id}.maxLength = ${mj};` : `effect(() => { el_${id}.maxLength = ${mj}; });`);
-        }
-        lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // state -> input (so .reset() clears), caret-safe
-        emitTextWrite(id, p.bind, writeJS);
-        genDynamics(id, p); // wire on(enter: send) / on(...) + conditional class
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Password: { // standalone masked input, two-way bound to a text state (same wiring as SearchField, type=password)
-        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
-        lines.push(`const el_${id} = document.createElement('input');`);
-        lines.push(`el_${id}.type = 'password';`);
-        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Password')});`); // a11y: an accessible name (a placeholder is not one)
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('password', p))};`);
-        genInterpAttr(id, 'placeholder', p.placeholder);
-        lines.push(`effect(() => { if (el_${id}.value !== ${readJS}) el_${id}.value = ${readJS}; });`); // state -> input (so .reset() clears), caret-safe
-        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
-        genDynamics(id, p);
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Select: { // standalone dropdown, two-way bound to a text state; options() is the fixed value list
-        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
-        lines.push(`const el_${id} = document.createElement('select');`);
-        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Select')});`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('select', p))};`);
-        if (typeof p.placeholder === 'string' && p.placeholder) lines.push(`{ const o = document.createElement('option'); o.value = ''; o.textContent = ${JSON.stringify(p.placeholder)}; o.disabled = true; el_${id}.appendChild(o); }`); // non-selectable prompt while empty
-        for (const opt of p.options || []) lines.push(`{ const o = document.createElement('option'); o.value = ${JSON.stringify(opt)}; o.textContent = ${JSON.stringify(opt)}; el_${id}.appendChild(o); }`);
-        lines.push(`effect(() => { const __v = ${readJS}; if (el_${id}.value !== __v) el_${id}.value = __v; });`);
-        if (writeJS) lines.push(`el_${id}.addEventListener('change', (e) => ${writeJS});`); else lines.push(`el_${id}.disabled = true;`);
-        genDynamics(id, p);
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Checkbox: { // bool checkbox wrapped in a <label> (clickable text + a11y). `disabled` targets the inner input.
-        lines.push(`const el_${id} = document.createElement('label');`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('checkbox', p))};`);
-        lines.push(`const cb_${id} = document.createElement('input'); cb_${id}.type = 'checkbox';`);
-        if (p.checked !== undefined) { // display a bool one-way; `-> action` toggles it (the store/query list-row pattern)
-          lines.push(`effect(() => { cb_${id}.checked = !!(${logic.compileExpr(p.checked, pageScope)}); });`);
-          if (p.action) {
-            const arg = p.arg !== undefined ? [p.arg, ...(p.argRest || [])].map((e) => logic.compileExpr(e, pageScope)).join(', ') : '';
-            lines.push(`cb_${id}.addEventListener('change', () => ${logic.actionRef(p.action)}(${arg}));`);
-          } else lines.push(`cb_${id}.disabled = true;`); // read-only display: no toggle handler
-        } else { // bind: two-way to a page state
-          const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.checked');
-          lines.push(`effect(() => { cb_${id}.checked = !!${readJS}; });`);
-          if (writeJS) lines.push(`cb_${id}.addEventListener('change', (e) => ${writeJS});`); else lines.push(`cb_${id}.disabled = true;`);
-        }
-        lines.push(`el_${id}.appendChild(cb_${id});`);
-        if (p.label !== undefined) genTextEl(id + 'l', 'span', 'mu-checkbox-label', p.label, `el_${id}`);
-        if (p.disabled !== undefined) { // the <label> can't be disabled — target the control
-          const js = logic.compileExpr(p.disabled, pageScope);
-          lines.push(p.disabled.kind === Ek.Lit ? `cb_${id}.disabled = ${js};` : `effect(() => { cb_${id}.disabled = !!(${js}); });`);
-        }
-        genDynamics(id, { ...p, disabled: undefined }); // class/aria/on on the label; disabled handled above
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Date: { // native date picker (<input type=date>), two-way bound to a date/text state (ISO string)
-        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'e.target.value');
-        lines.push(`const el_${id} = document.createElement('input');`);
-        lines.push(`el_${id}.type = 'date';`);
-        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : 'Date')});`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor('date', p))};`);
-        lines.push(`effect(() => { const __v = String(${readJS} ?? ''); if (el_${id}.value !== __v) el_${id}.value = __v; });`);
-        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
-        genDynamics(id, p);
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Number:
-      case Nt.Range: { // numeric input two-way bound to a NUMBER state; Range = a slider. Value coerced with Number().
-        const isRange = nodes[id].type === Nt.Range;
-        const readJS = logic.bindRead(p.bind, pageScope), writeJS = logic.bindWrite(p.bind, pageScope, 'Number(e.target.value)');
-        lines.push(`const el_${id} = document.createElement('input');`);
-        lines.push(`el_${id}.type = ${JSON.stringify(isRange ? 'range' : 'number')};`);
-        lines.push(`el_${id}.setAttribute('aria-label', ${JSON.stringify(typeof p.placeholder === 'string' && p.placeholder ? p.placeholder : (isRange ? 'Range' : 'Number'))});`);
-        lines.push(`el_${id}.className = ${JSON.stringify(classFor(isRange ? 'range' : 'number', p))};`);
-        if (!isRange) genInterpAttr(id, 'placeholder', p.placeholder);
-        for (const [attr, ex] of [['min', p.min], ['max', p.max], ['step', p.step]] as const) { // static literal OR reactive (a state-driven bound)
-          if (ex === undefined) continue;
-          const js = logic.compileExpr(ex, pageScope);
-          lines.push(ex.kind === Ek.Lit ? `el_${id}.setAttribute(${JSON.stringify(attr)}, ${js});` : `effect(() => { el_${id}.setAttribute(${JSON.stringify(attr)}, ${js}); });`);
-        }
-        lines.push(`effect(() => { const __v = String(${readJS} ?? ''); if (el_${id}.value !== __v) el_${id}.value = __v; });`); // state -> input, caret-safe
-        if (writeJS) lines.push(`el_${id}.addEventListener('input', (e) => ${writeJS});`); else lines.push(`el_${id}.readOnly = true;`);
-        genDynamics(id, p); // class/aria/on + disabled
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Chart: { // native dataviz -> a <figure> wrapping a <svg> (+ optional title/legend), redrawn by __chart. No JS, no VDOM.
-        const dataSig = logic.bindSig(p.data);
-        const dataExpr = queryStates.has(dataSig) ? `${dataSig}.get().data` : `${dataSig}.get()`;
-        declEl(id, 'figure', classFor('chart-wrap', p)); // the wrapper carries class() + sizing; mu-chart-wrap base
-        lines.push(`el_${id}.style.display = 'flex'; el_${id}.style.flexDirection = 'column';`); // the svg grows, an optional legend sits below (so a fixed height() splits between them, not clips)
-        if (p.label !== undefined) genTextEl(id + 't', 'figcaption', 'mu-chart-title', p.label, `el_${id}`); // optional title (static or interpolated)
-        lines.push(`const svg_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'svg');`);
-        lines.push(`svg_${id}.setAttribute('viewBox', '0 0 320 200'); svg_${id}.setAttribute('class', 'mu-chart'); svg_${id}.setAttribute('role', 'img'); svg_${id}.style.cssText = 'display:block;width:100%;flex:1 1 auto;min-height:11rem'; el_${id}.appendChild(svg_${id});`);
-        let legendArg = 'null';
-        if (p.color || p.kind === 'pie' || p.kind === 'donut') { lines.push(`const leg_${id} = document.createElement('ul'); leg_${id}.className = 'mu-chart-legend'; el_${id}.appendChild(leg_${id});`); legendArg = `leg_${id}`; } // color(field) or a pie/donut -> a reactive legend
-        appendEl(id, parentVar);
-        const xf = p.x && p.x.kind === Ek.Ref ? p.x.name : '', yf = p.y && p.y.kind === Ek.Ref ? p.y.name : ''; // Chart reads x/y as FIELD refs
-        const enc = `{ x: ${JSON.stringify(xf)}, y: ${JSON.stringify(yf)}, kind: ${JSON.stringify(p.kind || 'bar')}, color: ${JSON.stringify(p.color || '')} }`;
-        lines.push(`effect(() => { __chart(svg_${id}, ${dataExpr}, ${enc}, ${legendArg}); });`); // reactive: redraws marks + legend when the data changes
-        // Redraw at the REAL pixel size after layout + on resize, so the SVG renders 1:1 (crisp axis text, no
-        // clipping) instead of scaling a fixed viewBox. Two guards, because a naive observer here is the classic
-        // "ResizeObserver loop completed with undelivered notifications":
-        //   · redrawing writes viewBox and rebuilds the marks (and the legend, a SIBLING that can change the
-        //     card's height and hand the flexed SVG a new one) — so a redraw can resize what is being observed.
-        //     Bail out when the measured box has not actually changed, which is most deliveries.
-        //   · run the redraw in the NEXT frame, never inside the observer's own delivery cycle, so a size change
-        //     it does cause is delivered normally instead of overflowing the current one.
-        lines.push(`if (typeof ResizeObserver !== 'undefined') { let rw_${id} = -1, rh_${id} = -1, rf_${id} = 0; const ro_${id} = new ResizeObserver(() => { const w = svg_${id}.clientWidth, h = svg_${id}.clientHeight; if (w === rw_${id} && h === rh_${id}) return; rw_${id} = w; rh_${id} = h; if (rf_${id}) return; rf_${id} = requestAnimationFrame(() => { rf_${id} = 0; __chart(svg_${id}, ${dataExpr}, ${enc}, ${legendArg}); }); }); ro_${id}.observe(svg_${id}); onCleanup(() => { if (rf_${id}) cancelAnimationFrame(rf_${id}); ro_${id}.disconnect(); }); }`);
-        genDynamics(id, p);
-        break;
-      }
-
       // ── native vector layer: SVG marks. Created via createElementNS; geometry from number expressions
       // (the `map` built-in scales data → coordinates). Style with class() + CSS. The escape UNDER Chart.
-      case Nt.Svg: {
-        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'svg');`);
-        if (p.viewBox) lines.push(`el_${id}.setAttribute('viewBox', ${JSON.stringify(p.viewBox)});`);
-        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('svg', p))});`);
-        appendEl(id, parentVar); genDynamics(id, p); genChildren(id, `el_${id}`);
-        break;
-      }
-      case Nt.Group: {
-        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'g');`);
-        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('group', p))});`);
-        genSvgStr(id, 'transform', p.transform);
-        appendEl(id, parentVar); genDynamics(id, p); genChildren(id, `el_${id}`);
-        break;
-      }
-      case Nt.Rect: {
-        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'rect');`);
-        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('rect', p))});`);
-        genGeo(id, 'x', p.x); genGeo(id, 'y', p.y); genGeo(id, 'width', p.w); genGeo(id, 'height', p.h); genGeo(id, 'rx', p.rx);
-        genSvgStr(id, 'transform', p.transform);
-        appendEl(id, parentVar); genDynamics(id, p);
-        break;
-      }
-      case Nt.Line: {
-        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'line');`);
-        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('line', p))});`);
-        genGeo(id, 'x1', p.x1); genGeo(id, 'y1', p.y1); genGeo(id, 'x2', p.x2); genGeo(id, 'y2', p.y2);
-        appendEl(id, parentVar); genDynamics(id, p);
-        break;
-      }
-      case Nt.Circle: {
-        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'circle');`);
-        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('circle', p))});`);
-        genGeo(id, 'cx', p.cx); genGeo(id, 'cy', p.cy); genGeo(id, 'r', p.r);
-        appendEl(id, parentVar); genDynamics(id, p);
-        break;
-      }
-      case Nt.Path: {
-        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'path');`);
-        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('path', p))});`);
-        genSvgStr(id, 'd', p.d); genSvgStr(id, 'transform', p.transform);
-        appendEl(id, parentVar); genDynamics(id, p);
-        break;
-      }
-      case Nt.Arc: { // a <path> whose d is computed by __arc(cx,cy,r,from,to,inner) — pie slice / donut segment / gauge
-        lines.push(`const el_${id} = document.createElementNS('http://www.w3.org/2000/svg', 'path');`);
-        lines.push(`el_${id}.setAttribute('class', ${JSON.stringify(classFor('arc', p))});`);
-        const arcParts = [p.cx, p.cy, p.r, p.start, p.end, p.inner];
-        const arcArgs = arcParts.map((e) => (e ? logic.compileExpr(e, pageScope) : '0')).join(', ');
-        const arcReactive = arcParts.some((e) => e !== undefined && e.kind !== Ek.Lit);
-        lines.push(arcReactive ? `effect(() => el_${id}.setAttribute('d', __arc(${arcArgs})));` : `el_${id}.setAttribute('d', __arc(${arcArgs}));`);
-        appendEl(id, parentVar); genDynamics(id, p);
-        break;
-      }
-
-      case Nt.DataTable: {
-        const dataSig = logic.bindSig(p.data);
-        const dataExpr = queryStates.has(dataSig) ? `${dataSig}.get().data` : `${dataSig}.get()`;
-        const columns = p.columns || [];
-        const clauses = (p.where || []).map(parseClause);
-        const staticExpr = clauses.filter((c) => !c.dynamic).map((c) => `.filter((row) => ${c.expr})`).join(''); // pushed to the source (literal RHS)
-        const dynExpr = clauses.filter((c) => c.dynamic).map((c) => `.filter((row) => ${c.expr})`).join('');      // applied reactively (@state RHS)
-        const rowActions = n.children.map((cid) => nodes[cid]).filter((c) => c.type === Nt.RowAction);
-
-        declEl(id, 'table', classFor('datatable', p));
-        lines.push(`const head_${id} = el_${id}.createTHead().insertRow();`);
-        for (const col of columns) {
-          lines.push(`{ const th = document.createElement('th'); th.scope = 'col'; th.textContent = ${JSON.stringify(col)}; head_${id}.appendChild(th); }`); // a11y: scope ties data cells to their column header
-        }
-        if (rowActions.length) lines.push(`{ const th = document.createElement('th'); th.scope = 'col'; head_${id}.appendChild(th); }`);
-        lines.push(`const body_${id} = el_${id}.createTBody();`);
-        appendEl(id, parentVar);
-
-        // one row -> a <tr>; `row` is the row signal, so each cell reacts to its data (granular:
-        // a changed field rewrites only its <td>). RowAction args read the current row (`row.get()`).
-        lines.push(`function renderRow_${id}(row) {`);
-        lines.push(`  const tr = document.createElement('tr');`);
-        for (const col of columns) {
-          lines.push(`  { const td = document.createElement('td'); effect(() => { td.textContent = (row.get()[${JSON.stringify(col)}] ?? ''); }); tr.appendChild(td); }`);
-        }
-        for (const ra of rowActions) {
-          const rp = ra.props || {};
-          const rowScope = { locals: new Set<string>(), sigLocals: new Set(['row']) };
-          const arg = rp.arg !== undefined ? [rp.arg, ...(rp.argRest || [])].map((e) => logic.compileExpr(e, rowScope)).join(', ') : '';
-          lines.push(`  { const td = document.createElement('td'); const b = document.createElement('button'); b.className = ${JSON.stringify(classFor('row-action', rp))}; b.textContent = ${JSON.stringify(rp.label)}; b.addEventListener('click', () => ${logic.actionRef(rp.action)}(${arg})); td.appendChild(b); tr.appendChild(td); }`);
-        }
-        lines.push(`  return tr;`);
-        lines.push(`}`);
-
-        // Keyed reconciliation (same engine as `each`): rows matched by id, reused/moved/disposed, never a full rebuild.
-        lines.push(`function base_${id}() { const __l = ${dataExpr}; return (Array.isArray(__l) ? __l : [])${staticExpr}; }`);   // fail-closed: a non-array never crashes the table
-        lines.push(`const start_${id} = document.createComment('rows');`);
-        lines.push(`const anchor_${id} = document.createComment('/rows');`);
-        lines.push(`body_${id}.appendChild(start_${id}); body_${id}.appendChild(anchor_${id});`);
-        lines.push(`const map_${id} = new Map();`);
-        lines.push(`onCleanup(() => { for (const __e of map_${id}.values()) __e.dispose(); map_${id}.clear(); });`);
-        lines.push(`let order_${id} = [];`);
-        lines.push(`effect(() => {`);
-        lines.push(`  const __rows = base_${id}()${dynExpr};`);
-        lines.push(`  const __seen = new Set(); const __next = []; const __twins = new Map();`);
-        lines.push(`  for (const __row of __rows) {`);
-        lines.push(`    const __k = __rowKey(__row, __twins); __seen.add(__k);`);   // by id, else by content (runtime-key.ts)
-        lines.push(`    let __e = map_${id}.get(__k);`);
-        lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
-        lines.push(`    else { const __sig = signal(__row); const __r = root(() => [renderRow_${id}(__sig)]); __e = { sig: __sig, nodes: __r.value, dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
-        lines.push(`    __next.push(__e);`);
-        lines.push(`  }`);
-        lines.push(`  for (const [__k, __e] of map_${id}) if (!__seen.has(__k)) { __e.dispose(); for (const __n of __e.nodes) __n.remove(); map_${id}.delete(__k); }`);
-        lines.push(`  __order(anchor_${id}.parentNode, anchor_${id}, __next, order_${id}); order_${id} = __next;`);
-        lines.push(`});`);
-        break;
-      }
-
       case Nt.Form: {
-        // The built-in validation copy, in the language the PAGE declares (`meta { lang "es" }`).
-        // These strings are the engine's, not the author's — there is nowhere in a `.muten` file to
-        // translate them — so a Spanish app showed "Required" under a field labelled "Correo".
-        // English is the fallback for any language not carried here.
-        const FORM_COPY: { [lang: string]: { [key: string]: string } } = {
-          es: { required: 'Obligatorio', email: 'Escribe un correo válido', pattern: 'Formato no válido',
-                min: 'Mínimo {0}', max: 'Máximo {0}', minChars: 'Mínimo {0} caracteres', maxChars: 'Máximo {0} caracteres' },
-          en: { required: 'Required', email: 'Enter a valid email', pattern: 'Invalid format',
-                min: 'Min {0}', max: 'Max {0}', minChars: 'Min {0} characters', maxChars: 'Max {0} characters' },
-        };
-        const formLang = (doc.meta?.lang || 'en').slice(0, 2).toLowerCase();
-        const msg = (key: string, n?: number): string => {
-          const table = FORM_COPY[formLang] ?? FORM_COPY.en;
-          const line = (table?.[key] ?? FORM_COPY.en?.[key] ?? key).replace('{0}', String(n ?? ''));
-          return JSON.stringify(line);
-        };
         const sig = logic.bindSig(p.bind);
         const entityName = state[sig]?.type; // validate rejects a non-local/non-entity bind; guard so a gap never throws a raw TypeError
         if (!entityName || !entities[entityName]) throw new Error(`Form must bind a page-local entity draft, not "${p.bind}"`);
-        const fields = editableFields(entities[entityName]);
-        const fc = (doc.constraints || {})[entityName] || {}; // per-field validation constraints from the entity schema
-
-        declEl(id, 'form', classFor('form', p));
-        lines.push(`{ const t = document.createElement('div'); t.className = ${JSON.stringify(slot('form-title', 'mu-form-title'))}; t.textContent = ${JSON.stringify('New ' + entityName)}; el_${id}.appendChild(t); }`);
-
-        const fieldVars: Array<EditableField & { var: string; c?: FieldConstraint }> = [];
-        for (const f of fields) {
-          const fv = `f_${id}_${f.name}`;
-          const grp = `g_${fv}`;
-          const labelText = f.name.charAt(0).toUpperCase() + f.name.slice(1); // a11y: a real label, never just a placeholder
-          fieldVars.push({ ...f, var: fv, c: fc[f.name] });
-          // a11y BY DEFAULT (compiler-emitted, the author writes nothing): every field is a group =
-          // <label for=id> + the control + its error, with id/for paired and the error linked back.
-          lines.push(`const ${grp} = document.createElement('div'); ${grp}.className = ${JSON.stringify(slot('field-group', 'mu-field-group'))};`);
-          lines.push(`{ const lb = document.createElement('label'); lb.className = ${JSON.stringify(slot('label', 'mu-label'))}; lb.htmlFor = ${JSON.stringify(fv)}; lb.textContent = ${JSON.stringify(labelText)}; ${grp}.appendChild(lb); }`);
-          if (f.kind === Fk.Enum) {
-            lines.push(`const ${fv} = document.createElement('select');`);
-            lines.push(`${fv}.className = ${JSON.stringify(slot('field-select', 'mu-field'))};`);
-            for (const opt of f.options) {
-              lines.push(`{ const o = document.createElement('option'); o.value = ${JSON.stringify(opt)}; o.textContent = ${JSON.stringify(opt)}; ${fv}.appendChild(o); }`);
-            }
-          } else if (f.kind === Fk.Bool) {
-            lines.push(`const ${fv} = document.createElement('input');`);
-            lines.push(`${fv}.type = 'checkbox';`);
-            lines.push(`${fv}.className = ${JSON.stringify(slot('field-check', 'mu-field-check'))};`);
-          } else if (f.kind === Fk.Textarea) {
-            lines.push(`const ${fv} = document.createElement('textarea');`);              // multi-line; .value + 'input' event work the same as a text <input>
-            lines.push(`${fv}.className = ${JSON.stringify(slot('field-area', 'mu-field mu-field-area'))}; ${fv}.rows = 4;`);
-            lines.push(`${fv}.placeholder = ${JSON.stringify(f.name)};`);
-          } else {
-            lines.push(`const ${fv} = document.createElement('input');`);
-            lines.push(`${fv}.type = ${JSON.stringify(f.kind === Fk.Email ? 'email' : f.kind === Fk.Number ? 'number' : f.kind === Fk.Date ? 'date' : f.kind === Fk.Password ? 'password' : 'text')};`);
-            lines.push(`${fv}.className = ${JSON.stringify(slot('field', 'mu-field'))};`);
-            lines.push(`${fv}.placeholder = ${JSON.stringify(f.name)};`);
-          }
-          lines.push(`${fv}.id = ${JSON.stringify(fv)};`);                                         // matches the label's htmlFor
-          if (fc[f.name]?.required) lines.push(`${fv}.setAttribute('aria-required', 'true');`);   // SR announces the field is required
-          // each edit patches the draft's sub-field immutably so the reflect effect re-runs.
-          // Checkbox stores `checked` boolean; number coerces via Number(), else value is a raw string.
-          if (f.kind === Fk.Bool) lines.push(`${fv}.addEventListener('change', (e) => ${sig}.set({ ...${sig}.get(), ${JSON.stringify(f.name)}: e.target.checked }));`);
-          else {
-            const val = f.kind === Fk.Number ? '(Number(e.target.value) || 0)' : 'e.target.value';
-            lines.push(`${fv}.addEventListener('input', (e) => ${sig}.set({ ...${sig}.get(), ${JSON.stringify(f.name)}: ${val} }));`);
-          }
-          lines.push(`${grp}.appendChild(${fv});`);
-          // error span: linked to its input via aria-describedby + announced live (a11y by default). Email
-          // fields always get one (they now validate format even without an explicit constraint).
-          if (fc[f.name] || f.kind === Fk.Email) lines.push(`const err_${fv} = document.createElement('small'); err_${fv}.className = ${JSON.stringify(slot('field-error', 'mu-field-error'))}; err_${fv}.id = ${JSON.stringify('err_' + fv)}; err_${fv}.setAttribute('aria-live', 'polite'); ${fv}.setAttribute('aria-describedby', ${JSON.stringify('err_' + fv)}); ${grp}.appendChild(err_${fv});`);
-          lines.push(`el_${id}.appendChild(${grp});`);
-        }
-
-        // The submit label goes through the SAME interpolation as any other text. It used to be
-        // JSON.stringify'd, so a `Form … "{t(ui.lang, "id.in")}"` put the braces on the button —
-        // the literal source, in front of the user, on the first screen of the app.
+        // The submit label goes through the SAME interpolation as any other text (a `Form … "{t(ui.lang, "id.in")}"`
+        // once put the braces on the button).
         const submitLabel = p.submitLabel;
         const submitText = typeof submitLabel === 'string' ? JSON.stringify(submitLabel)
-          : submitLabel && 'parts' in submitLabel
-            ? submitLabel.parts.map((pt: string | Expr) => typeof pt === 'string' ? JSON.stringify(pt) : `String(${logic.compileExpr(pt, pageScope)})`).join(' + ')
-            : JSON.stringify('Submit');
-        lines.push(`{ const sb = document.createElement('button'); sb.type = 'submit'; sb.className = ${JSON.stringify(slot('submit', 'mu-submit'))}; el_${id}.appendChild(sb); effect(() => { sb.textContent = ${submitText}; }); }`);
-        // submit: validate against schema constraints; only call the action when every field passes.
-        const vChecks: string[] = [];
-        for (const fv of fieldVars) {
-          if (!fv.c && fv.kind !== Fk.Email) continue; // email always validates its format; others only if they carry a constraint
-          const err = `err_${fv.var}`, val = `String(__d[${JSON.stringify(fv.name)}] ?? '')`;
-          vChecks.push(`${err}.textContent = '';`);
-          if (fv.c?.required) vChecks.push(fv.kind === Fk.Bool
-            ? `if (!__d[${JSON.stringify(fv.name)}]) { ${err}.textContent = ${msg('required')}; __ok = false; }`   // a required checkbox must be CHECKED (String(false) is truthy — the old guard let it through)
-            : `if (!${val}.trim()) { ${err}.textContent = ${msg('required')}; __ok = false; }`);
-          // email type now ACTUALLY validates format (was cosmetic): a non-empty value must look like an email.
-          if (fv.kind === Fk.Email) vChecks.push(`if (${val} && !/^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$/.test(${val})) { ${err}.textContent = ${msg('email')}; __ok = false; }`);
-          // `pattern:"<regex>"`: a non-empty value must match the author's regex (phone / zip / SKU / …).
-          if (fv.c?.pattern) vChecks.push(`if (${val} && !new RegExp(${JSON.stringify(fv.c.pattern)}).test(${val})) { ${err}.textContent = ${msg('pattern')}; __ok = false; }`);
-          // number field: min/max is a value bound; text field: min/max is a character-length bound.
-          if (fv.c?.min != null) vChecks.push(fv.kind === Fk.Number
-            ? `if (${val} !== '' && Number(${val}) < ${fv.c.min}) { ${err}.textContent = ${msg('min', fv.c.min)}; __ok = false; }`
-            : `if (${val} && ${val}.length < ${fv.c.min}) { ${err}.textContent = ${msg('minChars', fv.c.min)}; __ok = false; }`);
-          if (fv.c?.max != null) vChecks.push(fv.kind === Fk.Number
-            ? `if (${val} !== '' && Number(${val}) > ${fv.c.max}) { ${err}.textContent = ${msg('max', fv.c.max)}; __ok = false; }`
-            : `if (${val}.length > ${fv.c.max}) { ${err}.textContent = ${msg('maxChars', fv.c.max)}; __ok = false; }`);
-        }
-        // pass the bound draft to the submit action: a `<- item` action receives it (the Form's point);
-        // an action that reads the draft by name ignores the extra arg. Mirrors `Button -> a(x)`.
-        if (vChecks.length) {
-          lines.push(`el_${id}.addEventListener('submit', (e) => { e.preventDefault(); const __d = ${sig}.get(); let __ok = true; ${vChecks.join(' ')} if (__ok) ${logic.actionRef(p.submit)}(__d); });`);
-        } else {
-          lines.push(`el_${id}.addEventListener('submit', (e) => { e.preventDefault(); ${logic.actionRef(p.submit)}(${sig}.get()); });`);
-        }
-
-        // reflect the draft back into fields so `draft.reset()` clears the form for free.
-        // The value-changed guard avoids yanking the caret of the field being typed.
-        lines.push(`effect(() => {`);
-        lines.push(`  const __d = ${sig}.get();`);   // __d (reserved prefix) so it never collides with a state literally named `d`
-        for (const fv of fieldVars) {
-          if (fv.kind === Fk.Bool) { lines.push(`  { const v = !!__d[${JSON.stringify(fv.name)}]; if (${fv.var}.checked !== v) ${fv.var}.checked = v; }`); continue; }
-          const def = fv.kind === Fk.Enum ? JSON.stringify(fv.options[0]) : `''`;
-          lines.push(`  { const v = __d[${JSON.stringify(fv.name)}] ?? ${def}; if (${fv.var}.value !== v) ${fv.var}.value = v; }`);
-        }
-        lines.push(`});`);
+          : submitLabel && 'parts' in submitLabel ? interpConcat(submitLabel) : JSON.stringify('Submit');
+        declEl(id, 'form', classFor('form', p));
+        lines.push(...formLines({
+          id, entityName, fields: editableFields(entities[entityName]), constraints: (doc.constraints || {})[entityName] || {},
+          draft: sig, lang: doc.meta?.lang || 'en', slot, submitText, submitAction: logic.actionRef(p.submit),
+        }));
         appendEl(id, parentVar);
         break;
       }
@@ -712,36 +273,6 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
       case Nt.Text: genTextEl(id, 'p', classFor('text', p), p.value, parentVar); genDynamics(id, p); break;
       case Nt.Span: genTextEl(id, 'span', classFor('span', p), p.value, parentVar); genDynamics(id, p); break;
       case Nt.Title: genTextEl(id, p.level || 'h1', classFor('title', p), p.value, parentVar); genDynamics(id, p); break; // level from keyword; <h1> default
-
-      case Nt.Image: {
-        declEl(id, 'img', classFor('image', p));
-        if (p.id) lines.push(`el_${id}.id = ${JSON.stringify(p.id)};`); // Image is the one case that skips genDynamics
-        genInterpAttr(id, 'src', p.src);
-        genInterpAttr(id, 'alt', p.alt ?? ''); // alt required by the manifest; "" = decorative
-        // lazy unless `eager`: a page of 600 photos asks for the few near the screen; decoding never blocks a frame
-        lines.push(p.eager ? `el_${id}.loading = 'eager'; el_${id}.fetchPriority = 'high'; el_${id}.decoding = 'async';` : `el_${id}.loading = 'lazy'; el_${id}.decoding = 'async';`);
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Icon: { // `Icon "set:name"` -> inline SVG resolved at build (Iconify); static name, no JS shipped
-        const ref = typeof p.name === 'string' ? p.name : '';
-        declEl(id, 'span', classFor('icon', p));
-        lines.push(`el_${id}.setAttribute('aria-hidden', 'true');`); // a11y: icons are decorative by default; meaning lives in adjacent text
-        lines.push(`el_${id}.innerHTML = ${JSON.stringify(opts.iconResolver ? opts.iconResolver(ref) : '')};`);
-        appendEl(id, parentVar);
-        genDynamics(id, p);
-        break;
-      }
-
-      case Nt.Video: {
-        declEl(id, 'video', classFor('video', p));
-        genInterpAttr(id, 'src', p.src);
-        for (const f of p.flags || []) lines.push(`el_${id}.${f === 'playsinline' ? 'playsInline' : f} = true;`);
-        appendEl(id, parentVar);
-        genDynamics(id, p);
-        break;
-      }
 
       case Nt.When: {
         // conditional render: effect mounts children when the condition becomes true, removes them
@@ -829,61 +360,6 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
         break;
       }
 
-      case Nt.Custom: {
-        // escape hatch: mounts a host-written component (opaque to the IR), wired via inputs/on.
-        declEl(id, 'div', classFor('custom', p));
-        appendEl(id, parentVar);
-        // input values resolve through the SAME ref resolver as everything else: a bare/`@` ref (state, get, store
-        // member, or an `each` row field like `a.status`) compiles to its reactive read; a quoted string stays literal.
-        const inputVal = (v: ArgValue): string =>
-          typeof v === 'number' ? String(v)
-            : typeof v === 'string' ? logic.resolveRef(v.startsWith('@') ? v.slice(1) : v, pageScope)
-              : v && typeof v === 'object' && '$lit' in v ? (v.$interp ? `(${interpConcat(v.$interp)})` : JSON.stringify(v.$lit)) // a part passing `unit: "{mark}"` on to a Custom: the text, live, never the raw `{mark}`
-                : v && typeof v === 'object' && '$param' in v ? logic.resolveRef(v.$param, pageScope)
-                  : JSON.stringify(v);
-        const ins = Object.entries(p.inputs || {}).map(([k, v]) => `${JSON.stringify(k)}: ${inputVal(v)}`).join(', ');
-        const ons = Object.entries(p.on || {}).map(([ev, act]) => `${JSON.stringify(ev)}: (...__a) => ${logic.actionRef(typeof act === 'string' ? act : '')}(...__a)`).join(', ');
-        // reactive inputs: if mount returns an updater fn, re-call it whenever a bound @state changes (the
-        // effect only re-runs when an input actually reads a signal). A mount that returns nothing stays a
-        // mount-time snapshot — backward compatible.
-        lines.push(`if (typeof __custom_${p.component} === 'function') { const __u${id} = __custom_${p.component}(el_${id}, { ${ins} }, { ${ons} }); if (typeof __u${id} === 'function') effect(() => __u${id}({ ${ins} })); }`);
-        break;
-      }
-
-      case Nt.Button: {
-        declEl(id, 'button', classFor('button', p));
-        if (n.children && n.children.length) genChildren(id, `el_${id}`);          // children -> clickable card
-        else if (p.label !== undefined) genInterpAttr(id, 'textContent', p.label); // else static or interpolated label
-        if (p.action) {
-          const arg = p.arg !== undefined ? [p.arg, ...(p.argRest || [])].map((e) => logic.compileExpr(e, pageScope)).join(', ') : '';
-          lines.push(`el_${id}.addEventListener('click', () => ${logic.actionRef(p.action)}(${arg}));`);
-        }
-        genDynamics(id, p);
-        appendEl(id, parentVar);
-        break;
-      }
-
-      case Nt.Link: { // client-side navigation -> <a href="/route"> intercepted by the history router
-        declEl(id, 'a', classFor('link', p));
-        genInterpAttr(id, 'href', p.to ?? '/');  // static path or interpolated (/product/{p.id})
-        // Born active: the router marks links when it navigates, so a link created LATER (a menu that opens, a `when`
-        // that turns on) would miss the mark until the next navigation. Mark it the moment it is made.
-        lines.push(`if (typeof location !== 'undefined' && el_${id}.getAttribute('href') === location.pathname) { el_${id}.classList.add('is-active'); el_${id}.setAttribute('aria-current', 'page'); }`);
-        if (n.children && n.children.length) genChildren(id, `el_${id}`);          // children -> clickable card that navigates
-        else if (p.label !== undefined) genInterpAttr(id, 'textContent', p.label);
-        genDynamics(id, p);
-        // `disabled when <cond>` on a Link: an <a> has no `disabled`, so give it the real meaning — out of the Tab
-        // order, announced as disabled, and a click (or Enter) that goes nowhere. Checked at click time, so it
-        // follows the condition live without re-binding.
-        if (p.disabled !== undefined) {
-          const off = logic.compileExpr(p.disabled, pageScope);
-          lines.push(`effect(() => { const __off = !!(${off}); el_${id}.tabIndex = __off ? -1 : 0; if (__off) el_${id}.setAttribute('aria-disabled', 'true'); else el_${id}.removeAttribute('aria-disabled'); });`);
-          lines.push(`el_${id}.addEventListener('click', (e) => { if (el_${id}.getAttribute('aria-disabled') === 'true') { e.preventDefault(); e.stopImmediatePropagation(); } }, true);`);
-        }
-        appendEl(id, parentVar);
-        break;
-      }
-
       case Nt.Slot: { // outlet in a shell where the router mounts the active page
         if (!hasSlot) { // declare the outlet ONCE — a shell with two `slot`s would otherwise emit `const __outlet` twice (bundle crash)
           lines.push(`const __outlet = document.createElement('div');`);
@@ -899,60 +375,23 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
     }
   }
 
-  // ── static path: a page with no reactivity compiles to plain HTML, zero runtime (Astro-like) ──
-  const escHtml = (s: string): string => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  const escAttr = (s: string): string => escHtml(s).replace(/"/g, '&quot;');
-  const strOf = (v: StringPropValue | undefined): string => (typeof v === 'string' ? v : ''); // static pages carry only plain strings
+  // ── static path: a page with no reactivity compiles to plain HTML, zero runtime (Astro-like) (static.ts) ──
+  const { nodeIsStatic, subtreeIsStatic, renderStatic } = staticRenderer({ nodes, classFor, iconSvg: (ref) => (opts.iconResolver ? opts.iconResolver(ref) : ''), headCells });
 
-  // Is this page fully static? No reactive primitive, reactive prop, or {} interpolation.
   function isStatic(): boolean {
     if (opts.format === Fmt.Store) return false;  // store has no DOM; shell excluded by its `slot` (reactive type)
     if ((doc.params || []).length) return false;  // a param page needs mount(app, params), never the static path
-    const reactiveType = new Set<string>([Nt.When, Nt.Each, Nt.Custom, Nt.Form, Nt.SearchField, Nt.Number, Nt.Range, Nt.Date, Nt.DataTable, Nt.Slot, Nt.Chart, Nt.Svg, Nt.Group, Nt.Rect, Nt.Line, Nt.Circle, Nt.Path, Nt.Arc]);
-    const reactiveProp: Array<keyof NodeProps> = ['action', 'bind', 'submit', 'on', 'inputs', 'data'];
-    const interpKeys: Array<keyof NodeProps> = ['value', 'src', 'alt', 'label', 'to', 'summary'];
-    for (const id of Object.keys(nodes)) {
-      const n = nodes[id]; const p = n.props || {};
-      if (reactiveType.has(n.type)) return false;
-      if (reactiveProp.some((k) => p[k] !== undefined)) return false;
-      if ((p.class || []).some((c) => typeof c !== 'string')) return false; // reactive class toggle -> not static
-      if ((p.aria && Object.keys(p.aria).length) || (p.styleVars && Object.keys(p.styleVars).length) || p.disabled !== undefined || p.draggable !== undefined) return false; // aria()/style()/disabled/draggable write attrs+listeners at runtime via genDynamics -> the static HTML path would silently drop them
-      if (interpKeys.some((k) => { const v = p[k]; return !!v && typeof v === 'object' && 'kind' in v && v.kind === Ek.Interp; })) return false;
-    }
-    return true;
+    if (opts.routeGuard) return false;            // a guarded page runs its guard first
+    if ((doc.effects || []).length) return false;   // an effect runs on load (a chart, a map, analytics): static HTML would drop it
+    return Object.keys(nodes).every(nodeIsStatic);
   }
 
-  // render a static node to an HTML string (recursively), mirroring genNode's tags/classes, no JS.
-  function renderStatic(id: string): string {
-    const n = nodes[id]; const p = n.props || {};
-    const kids = (): string => (nodes[id].children || []).map(renderStatic).join('');
-    // class + the literal id(): every static tag below routes through this, so an anchor target survives the
-    // zero-JS path too — a page whose only "dynamic" bit is id() stays static.
-    const cls = (base: string): string => ` class="${escAttr(classFor(base, p))}"${p.id ? ` id="${escAttr(p.id)}"` : ''}`;
-    const cont = CONTAINERS[n.type];
-    if (cont) { const [tag, base] = cont; return `<${tag}${cls(base)}>${kids()}</${tag}>`; }
-    switch (n.type) {
-      case Nt.Text: return `<p${cls('text')}>${escHtml(strOf(p.value))}</p>`;
-      case Nt.Span: return `<span${cls('span')}>${escHtml(strOf(p.value))}</span>`;
-      case Nt.Title: { const lvl = p.level || 'h1'; return `<${lvl}${cls('title')}>${escHtml(strOf(p.value))}</${lvl}>`; }
-      case Nt.Image: return `<img${cls('image')} src="${escAttr(strOf(p.src))}" alt="${escAttr(strOf(p.alt))}"${p.eager ? ' loading="eager" fetchpriority="high"' : ' loading="lazy"'} decoding="async">`;
-      case Nt.Icon: return `<span${cls('icon')}>${opts.iconResolver ? opts.iconResolver(strOf(p.name)) : ''}</span>`;
-      case Nt.Video: return `<video${cls('video')} src="${escAttr(strOf(p.src))}"${(p.flags || []).map((f) => ` ${f}`).join('')}></video>`;
-      case Nt.Link: return `<a${cls('link')} href="${escAttr(strOf(p.to) || '/')}">${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</a>`;
-      case Nt.Button: return `<button${cls('button')}>${(n.children && n.children.length) ? kids() : escHtml(strOf(p.label))}</button>`;
-      case Nt.List: { const tag = p.ordered ? 'ol' : 'ul'; return `<${tag}${cls('list')}>${(nodes[id].children || []).map((cid) => `<li>${renderStatic(cid)}</li>`).join('')}</${tag}>`; }
-      case Nt.Table: {
-        const rows = nodes[id].children || [];
-        const isHead = (k: string): boolean => nodes[k].type === Nt.Row && !!nodes[k].props?.head;
-        const heads = rows.filter(isHead), body = rows.filter((k) => !isHead(k));
-        const grp = (tag: string, rs: string[]): string => rs.length ? `<${tag}>${rs.map(renderStatic).join('')}</${tag}>` : '';
-        return `<table${cls('table')}>${grp('thead', heads)}${grp('tbody', body)}</table>`;
-      }
-      case Nt.Row: return `<tr${cls('row')}>${kids()}</tr>`;
-      case Nt.Cell: { const tag = headCells.has(id) ? 'th' : 'td'; return `<${tag}${cls('cell')}>${(n.children && n.children.length) ? kids() : escHtml(strOf(p.value))}</${tag}>`; }
-      case Nt.Details: return `<details${cls('details')}${p.group ? ` name="${escAttr(p.group)}"` : ''}${p.open ? ' open' : ''}><summary class="mu-summary">${escHtml(strOf(p.summary))}</summary>${kids()}</details>`;
-      default: return '';
-    }
+  // A STATIC SUBTREE IS ONE CLONE. Every node used to be built call by call (createElement, className, textContent,
+  // appendChild): the store page was 3,304 of them. A subtree with nothing reactive inside is its renderStatic HTML,
+  // parsed once (__clone keeps the template) and cloned for each copy, every row of an each included. The two paths
+  // render the same markup (test/static-parity.ts). Not in dev: HMR addresses every node by id.
+  function cloneable(id: string): boolean {
+    return !opts.dev && (opts.format === Fmt.Module || opts.format === Fmt.Html) && nodes[id].type !== Nt.Page && subtreeIsStatic(id);
   }
 
   // ── orchestrate: compile every piece, then hand to the right emit target ─────────────────
@@ -963,7 +402,12 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   const actionDecls = logic.genActions();
   // a store exports its gets (cross-module reads); a page declares them as locals inside mount() (export is illegal there).
   const getKw = opts.format === Fmt.Store ? 'export const' : 'const';
-  const getDecls = Object.entries(doc.gets || {}).map(([name, expr]) => `${getKw} ${name} = computed(() => ${logic.compileExpr(expr, pageScope)});`).join('\n');
+  // in dependency order, not file order: a get is a const, so one read above its line would throw on mount
+  const gets = doc.gets || {};
+  // gets with parameters first, as hoisted functions (a get or another function may call one declared anywhere); their
+  // parameters are plain locals in the body. A store exports them like its gets.
+  const fnDecls = Object.entries(doc.fns || {}).map(([name, fn]) => `${opts.format === Fmt.Store ? 'export ' : ''}function ${name}(${fn.params.join(', ')}) { return ${logic.compileExpr(fn.body, { ...pageScope, locals: new Set([...pageScope.locals, ...fn.params]) })}; }`);
+  const getDecls = [...fnDecls, ...getOrder({ state, gets, entities: doc.entities || {}, storeEntities: ctx.storeEntities }).map((name) => `${getKw} ${name} = computed(() => ${logic.compileExpr(gets[name], pageScope)});`), logic.genCallQueries()].filter(Boolean).join('\n');   // a query of a function may read a get (`db`)
   const effectDecls = logic.genEffects();
 
   let staticHtml: string | null = null;
@@ -972,6 +416,10 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   else if (opts.format !== Fmt.Store && rootId) genNode(rootId, 'app');        // store has no DOM, only state + actions
   // __nodes: the HMR node registry (id -> { el, parent }), built by appendEl. Dev only (Patch supplies its own).
   const renderBody = (opts.dev && rootId ? 'const __nodes = {};\n  ' : '') + lines.join('\n  ');
+  // a page with images starts the watcher that marks each one loaded or failed (runtime-media.ts), so CSS draws the states
+  const imageWatch = opts.format !== Fmt.Store && opts.format !== Fmt.Patch && opts.format !== Fmt.Ssr && Object.values(nodes).some((n) => n.type === Nt.Image) ? '\n  __watchImages();' : '';
+  // the texts this page speaks: only the keys its t() calls name, in every language (translate.ts collects them)
+  const textTable = speakTable(ctx);
   // names a HMR patch builder reaches state/actions/gets/params through (the live ctx) — so a rebuilt node
   // reads the SAME signals. Stashed on the mounted element as `el.__muten.ctx`.
   const ctxNames = [...Object.keys(state), ...Object.keys(doc.actions || {}), ...Object.keys(doc.gets || {}), ...(doc.params || [])];
@@ -989,14 +437,21 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
   // host-written Custom components, inlined (each exposes `mount(el, props, on)`). Wrapped in an
   // IIFE, so `export` keywords are stripped: `export function mount` inside a function would be
   // an illegal export and break the whole module (blank page).
-  const componentDecls = Object.entries(components).map(([name, src]) =>
+  // A Custom with imports of its own (CUSTOM_MODULE) is imported instead: `import { mount as __custom_X } from "…"`.
+  const inlined = Object.entries(components).filter(([, src]) => !src.startsWith(CUSTOM_MODULE));
+  const moduleCustoms = Object.entries(components).filter(([, src]) => src.startsWith(CUSTOM_MODULE));
+  const reactHelpers = (doc.imports || []).some((def) => def.kind === UseKind.React) ? REACT_HELPERS + '\n\n  ' : '';   // react-tree.ts
+  const scripts = scriptGlobals(doc.imports);   // `use google from script "https://…"` (foreign.ts)
+  const componentDecls = reactHelpers + inlined.map(([name, src]) =>
     `const __custom_${name} = (function () {\n${src.replace(/^[ \t]*export[ \t]+(default[ \t]+)?/gm, '')}\n  return mount;\n  })();`).join('\n\n  ');
 
   // import only the store domains actually referenced (collected in ctx.usedStores).
   const storeImports = [...usedStores].map((domain) => `import * as __store_${domain} from 'virtual:muten/store/${domain}';`).join('\n');
 
   // `use a, b from "./lib.ts"` -> real ESM import of named JS functions (the seam to the JS ecosystem).
-  const externImports = (doc.imports || []).map((i) => `import { ${i.names.join(', ')} } from ${JSON.stringify(i.from)};`).join('\n');
+  const externImports = [...(doc.imports || []).map(foreignImport),
+    ...moduleCustoms.map(([name, src]) => `import { mount as __custom_${name} } from ${JSON.stringify(src.slice(CUSTOM_MODULE.length))};`),
+    ...((doc.imports || []).some((def) => def.kind === UseKind.React) ? [REACT_RUNTIME] : [])].join('\n');
 
   // page <head> meta: title/description from the `meta` block; og:* auto-derived from them (one source).
   const metaIn = doc.meta || {};
@@ -1006,8 +461,8 @@ export function compile(doc: Doc, data: { [name: string]: Value } = {}, projectC
 
   const parts: EmitParts = {
     screen, projectCss, data, sources, api: opts.api || {}, meta, queryUuids,
-    stateDecls, paramDecls, actionDecls, getDecls, effectDecls, componentDecls, storeImports, storeDecls: opts.storeCode || '', externImports,
-    renderBody, staticHtml: staticHtml ?? '', hasSlot, ctxNames, dev: !!opts.dev,
+    stateDecls: opts.format === Fmt.Patch ? stateDecls : (scripts ? scripts + '\n  ' : '') + textTable + stateDecls, paramDecls, actionDecls, getDecls, effectDecls, componentDecls, storeImports, storeDecls: (opts.storeCode || '') + (opts.routeGuard ? `\nif (!(${opts.routeGuard.check})) { location.replace(${JSON.stringify(opts.routeGuard.redirect)}); await new Promise(() => {}); }` : ''), externImports,
+    renderBody: (opts.format === Fmt.Patch ? textTable : '') + renderBody + imageWatch, staticHtml: staticHtml ?? '', hasSlot, ctxNames, dev: !!opts.dev,
     storeDomain: opts.format === Fmt.Store ? opts.persistScope : undefined,
   };
   const out = opts.format === Fmt.Patch ? emitPatch(parts, opts.patchRoot ?? '')   // HMR: one node's subtree as a (ctx, nodes, parent) builder

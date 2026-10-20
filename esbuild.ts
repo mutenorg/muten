@@ -24,4 +24,17 @@ await build({
   bundle: false,   // per-file: keep modules + #engine imports (resolved at runtime by package.json "imports")
   minify: true,
 });
+// The same runtime as ONE script, for the outputs with no bundler (the standalone HTML page, the build-time pre-render):
+// they used to carry a hand-written copy of the signals core that had drifted from runtime.ts (no `untrack` for
+// actions, no `__id`, eager gets). Now there is one core, built twice.
+await build({
+  entryPoints: ['src/runtime.ts'],
+  outfile: 'dist/runtime-inline.js',
+  bundle: true,
+  format: 'iife',
+  globalName: '__mutenRt',
+  target: 'es2022',
+  define: { __MUTEN_DEV__: 'false' },
+  minify: true,
+});
 console.log('✓ dist/ built (minified, per-file ESM)');

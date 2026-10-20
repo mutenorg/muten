@@ -2,7 +2,8 @@
 // bundler (see esbuild-muten.ts): a muten app needs no vite.config, no bundler config — the build config is
 // muten.config, and the only .js/.ts left are the escapes. This file just reads the port and delegates.
 
-import { bundleEsbuild, devEsbuild, type DevOptions } from './esbuild-muten.js';
+import { bundleEsbuild } from './esbuild-muten.js';
+import { devEsbuild, type DevOptions } from './dev-server.js';
 import { readMutenConfig } from '#engine/project/config.js';
 import { hostRuleProblem } from './dev-security.js';
 

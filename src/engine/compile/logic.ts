@@ -3,10 +3,18 @@
 // and state/action/effect declarations. Shares one CompileCtx with compile.ts, so usedStores
 // collected here becomes store imports there. Consumed by compile.ts only.
 
-import { Ek, StOp, BOp, UOp, Fmt } from '#engine/shared/vocab.js';
-import { JS_BINOP } from '#engine/compile/helpers.js';
+import { Ek, StOp, BOp, UOp, Fmt, BUILTIN_PREFIX, LIVE_CHANGE, THEME_REF, TRANSLATE } from '#engine/shared/vocab.js';
+import { builtinStoreRead, builtinStoreStatement } from '#engine/compile/builtin-stores.js';
+import { BUILTINS } from '#engine/lang/manifest.js';
+import { JS_BINOP, ZERO_COMPARE, withSeedIds } from '#engine/compile/helpers.js';
 import { listElementFields, type RefFacts } from '#engine/ir/refs.js';
-import type { CompileCtx, Expr, Stmt, Scope, Value, ValueObject } from '#engine/shared/types.js';
+import { statementCalls } from '#engine/ir/calls.js';
+import { translateCall } from '#engine/compile/translate.js';
+import { themeValue } from '#engine/style/theme-ref.js';
+import { foreignCallJs, isForeignCall, callQueryDecls } from '#engine/compile/foreign.js';
+import type { ChainStep, CompileCtx, Expr, Stmt, Scope, Value } from '#engine/shared/types.js';
+
+const BUILTIN_NAMES: ReadonlySet<string> = new Set(BUILTINS);
 
 // the HTTP verb each server write sends (read by the runtime's __crud)
 const CRUD_METHOD: ReadonlyMap<StOp, string> = new Map([[StOp.Create, 'POST'], [StOp.Update, 'PUT'], [StOp.Delete, 'DELETE']]);
@@ -17,9 +25,24 @@ export class Logic {
   // ── reference resolution ──────────────────────────────────────────────────
 
   // is `member` a `kind` member (state | gets | actions) of the store domain `d`?
-  private inStore(d: string, member: string, kind: 'state' | 'gets' | 'actions'): boolean {
+  private inStore(d: string, member: string, kind: 'state' | 'gets' | 'actions' | 'fns'): boolean {
     const slice = this.ctx.stores[d];
     return !!slice && (slice[kind] || []).includes(member);
+  }
+
+  // `t("key", …)` speaks the app's texts, unless the file `use`s a `t` of its own (Storio's i18n.ts, until it moves)
+  private speaks(fn: string): boolean { return fn === TRANSLATE && !!this.ctx.translations && !this.ctx.ownCalls.has(fn); }
+
+  private foreignCall(fn: string, args: Expr[], chain: ChainStep[] | undefined, scope: Scope, ctor?: boolean): string { return foreignCallJs(this.ctx, fn, args, chain, (arg) => this.compileExpr(arg, scope), (name) => this.resolveRef(name, scope), ctor); }   // a package's own API (foreign.ts)
+
+  // what a call expression calls: `format.money(x)` is the store's exported function (domain marked used); this file's
+  // `get name(…)` and `use`'d functions by their own name; a built-in by its emitted name (`__b_date`, never shadowed)
+  private callee(fn: string): string {
+    const dot = fn.indexOf('.');
+    if (dot === -1) return this.ctx.ownCalls.has(fn) || !BUILTIN_NAMES.has(fn) ? fn : BUILTIN_PREFIX + fn;
+    if (!this.inStore(fn.slice(0, dot), fn.slice(dot + 1), 'fns')) return fn;
+    this.ctx.usedStores.add(fn.slice(0, dot));
+    return `__store_${fn}`;
   }
 
   // ctx-refs mode (HMR patch builders only): a re-built node reads state/actions/gets/params through the LIVE
@@ -111,7 +134,7 @@ export class Logic {
 
   // the SHARED resolver's inputs — the SAME facts the linter holds (engine/ir/refs.ts), so what a list
   // resolves to can never drift between lint and runtime (the old two-layer ReferenceError bug).
-  private get refFacts(): RefFacts { return { state: this.ctx.state, gets: this.ctx.gets, entities: this.ctx.entities, storeEntities: this.ctx.storeEntities }; }
+  private get refFacts(): RefFacts { return { state: this.ctx.state, gets: this.ctx.gets, entities: this.ctx.entities, storeEntities: this.ctx.storeEntities, fns: this.ctx.fns, calls: this.ctx.calls }; }
 
   // bare-referenceable fields of `<list>`'s element, for a `where`/`by` item-implicit scope — via the
   // SHARED resolver, so the linter and the emitter agree on exactly which fields a row exposes
@@ -121,17 +144,17 @@ export class Logic {
   }
 
   // does the body contain a server write (create/update/delete)? recurses into if-branches.
-  private bodyHasWrite(body: Stmt[]): boolean {
-    // A Call counts: a store action may itself write, and a caller that has statements AFTER it needs
-    // them to run after the write, not during it. Without this a page could sign in and create the
-    // first row in the same action, and the create would leave before the session existed.
-    return body.some((st) => st.op === StOp.Create || st.op === StOp.Update || st.op === StOp.Delete || st.op === StOp.Request || st.op === StOp.Call
-      || (st.op === StOp.If && (this.bodyHasWrite(st.then || []) || this.bodyHasWrite(st.else || []))));
+  private bodyHasWrite(body: Stmt[], seen: Set<string> = new Set()): boolean {
+    // A store action counts (it may write, and what follows must run after it: sign in, then create the first row), a
+    // sibling that writes too (`seen` stops two calling each other), and a call into a package, which may return a
+    // promise (an SDK, IndexedDB) whose answer what follows needs.
+    return body.some((st) => statementCalls(st).some((fn) => this.ctx.useCalls.has(fn) || this.ctx.foreign.has(fn.split('.')[0])) || st.op === StOp.Create || st.op === StOp.Update || st.op === StOp.Delete || st.op === StOp.Request || st.op === StOp.Call
+      || (st.op === StOp.Extern && !seen.has(st.fn) && !!this.ctx.actions[st.fn] && this.bodyHasWrite(this.ctx.actions[st.fn].body || [], new Set([...seen, st.fn])))
+      || (st.op === StOp.If && (this.bodyHasWrite(st.then || [], seen) || this.bodyHasWrite(st.else || [], seen))));
   }
-  // write actions become async and expose live `.pending` / `.error` signals. Memoized.
-  private writeActionsSet: Set<string> | null = null;
+  private writeActionsSet: Set<string> | null = null;   // write actions: async, with live `.pending` / `.error` (memoized)
   private writeActions(): Set<string> {
-    if (!this.writeActionsSet) this.writeActionsSet = new Set(Object.entries(this.ctx.actions).filter(([, a]) => this.bodyHasWrite(a.body || [])).map(([n]) => n));
+    if (!this.writeActionsSet) this.writeActionsSet = new Set(Object.entries(this.ctx.actions).filter(([, a]) => !!a.failed || this.bodyHasWrite(a.body || [])).map(([n]) => n));   // one with `failed { }` can fail: async, with .pending/.error
     return this.writeActionsSet;
   }
 
@@ -142,16 +165,18 @@ export class Logic {
     const [head, ...rest] = name.split('.');
     const tail = rest.length ? '.' + rest.join('.') : '';
     if (scope.sigLocals?.has(head)) return `${head}.get()${tail}`;   // keyed-each row signal: bindings react to the row's data
-    if (scope.locals.has(head)) return head + tail;
+    if (scope.locals.has(head) || (this.ctx.useCalls.has(head) && !this.ctx.stateKeys.has(head))) return head + tail;   // a local, or a package's own value (`defaultConfig`)
     if (scope.item?.fields.has(head)) return `${scope.item.var}.${name}`;   // `<list> where <cond>`: bare field of the item, read off the row
 
     if (this.ctx.params.has(head)) return this.cx(head) + tail;        // route param: local string injected at mount
     if (this.ctx.queryStates.has(head)) {
       if (rest[0] === 'loading' || rest[0] === 'error' || rest[0] === 'data') return `${head}.get()${tail}`; // .loading/.error/.data are the signal's own fields, no double .data
-      return `${head}.get().data${tail}`;                 // @users -> data array; @users.length -> its length
+      return `${head}.get().data${rest.length ? '?.' + rest.join('?.') : ''}`;   // @users -> data; a field of what has not arrived yet reads empty
     }
     if (this.ctx.stateKeys.has(head)) return `${this.cx(head)}.get()` + (rest.length ? '?.' + rest.join('?.') : ''); // optional-chain nested entity access: `{o.inner.name}` on `o = {} : Entity` must not throw on the empty record
     if (this.ctx.gets[head] !== undefined) return `${this.cx(head)}.get()` + (rest.length ? '?.' + rest.join('?.') : ''); // `get` is a computed signal, read like state
+    const builtin = builtinStoreRead(this.ctx, head, rest); if (builtin) return builtin;   // device · lang · url (builtin-stores.ts)
+    if (head === THEME_REF && this.ctx.themeValues && !this.ctx.stores[head] && !this.ctx.stateKeys.has(head) && rest.length) return JSON.stringify(themeValue(this.ctx.themeValues, rest) ?? null);   // `theme.colors.primary`: theme.muten's value
     if (this.ctx.stores[head]) {
       const member = rest[0];
       const more = rest.length > 1 ? '.' + rest.slice(1).join('.') : '';
@@ -180,13 +205,19 @@ export class Logic {
   compileExpr(node: Expr, scope: Scope): string {
     if (node.kind === Ek.Lit) return JSON.stringify(node.value);
     if (node.kind === Ek.Ref) return this.resolveRef(node.name, scope);
-    if (node.kind === Ek.Call) return `${node.fn}(${node.args.map((a) => this.compileExpr(a, scope)).join(', ')})`; // use'd JS function
+    if (node.kind === Ek.Call && this.speaks(node.fn)) return translateCall(this.ctx, node.args, (expr, inner) => this.compileExpr(expr, inner || scope));
+    if (node.kind === Ek.Call && isForeignCall(this.ctx, node.fn, node.chain, node.ctor)) { const call = this.foreignCall(node.fn, node.args, node.chain, scope, node.ctor); return scope.awaitUse ? `(await ${call})` : call; }
+    if (node.kind === Ek.Call) {
+      const call = `${this.callee(node.fn)}(${node.args.map((a) => this.compileExpr(a, scope)).join(', ')})`;
+      return scope.awaitUse && this.ctx.useCalls.has(node.fn) ? `(await ${call})` : call;   // in an async action, a `use` call's promise is its value
+    } // use'd JS function, a get with params, a store's
     if (node.kind === Ek.Obj) return `{ ${node.fields.map((f) => `${JSON.stringify(f.key)}: ${this.compileExpr(f.value, scope)}`).join(', ')} }`; // inline object literal
+    if (node.kind === Ek.List) return `[${node.items.map((item) => this.compileExpr(item, scope)).join(', ')}]`;   // `[4.6, -74.08]`
     if (node.kind === Ek.Agg) { // `list.sum by expr` / `list.count where cond` -> reduce/filter; item fields read bare off `__it`
       const list = `(${this.resolveRef(node.list, scope)} ?? [])`;
       if (node.op === 'take') return `[...${list}].slice(0, ${this.compileExpr(node.body, scope)})`; // `list.take(n)` -> first n items (the count reads no item fields)
       if (node.op === 'at') return `(${list}).at(${this.compileExpr(node.body, scope)})${node.member ? '?.' + node.member : ''}`; // `list.at(n)[.field]` -> the element at n (out of range -> undefined; `?.` keeps a field read safe)
-      const body = this.compileExpr(node.body, { ...scope, item: { var: '__it', fields: this.itemFields(node.list) } });
+      const body = this.compileExpr(node.body, { ...scope, awaitUse: false, item: { var: '__it', fields: this.itemFields(node.list) } }); // sync per-item callback: a `use` call is never awaited here
       if (node.op === 'sort' || node.op === 'sortDesc') { // sort a copy by projected key (no mutation of the source signal)
         const dir = node.op === 'sortDesc' ? -1 : 1;
         const itemF = this.itemFields(node.list);
@@ -221,6 +252,13 @@ export class Logic {
       const left = this.compileExpr(node.left, scope);
       const right = this.compileExpr(node.right, scope);
       if (node.op === BOp.Contains) return `__has(${left}, ${right})`; // list membership or substring
+      if (ZERO_COMPARE.has(node.op)) { // compared with a literal, an absent value is that literal's zero (0, "", false)
+        const zeroOf = (side: Expr): string | null => side.kind === Ek.Lit && side.value !== null ? JSON.stringify(typeof side.value === 'number' ? 0 : typeof side.value === 'boolean' ? false : '') : null;
+        const leftZero = node.left.kind === Ek.Lit ? null : zeroOf(node.right);
+        const rightZero = node.right.kind === Ek.Lit ? null : zeroOf(node.left);
+        if (leftZero !== null) return `((${left} ?? ${leftZero}) ${JS_BINOP[node.op]} ${right})`;
+        if (rightZero !== null) return `(${left} ${JS_BINOP[node.op]} (${right} ?? ${rightZero}))`;
+      }
       const js = JS_BINOP[node.op];
       if (js) return `(${left} ${js} ${right})`;
       throw new Error('unsupported operator: ' + node.op);
@@ -233,6 +271,7 @@ export class Logic {
   // one mutation statement (action body or .store effect) -> JS line(s). `if` recurses.
   stmtLines(st: Stmt, scope: Scope, isAsync = false): string[] {
     const ctx = this.ctx;
+    const builtin = builtinStoreStatement(ctx, st, (expr) => this.compileExpr(expr, scope)); if (builtin) return [builtin];   // lang.use · url.set
     const out: string[] = [];
     // Belt-and-suspenders: the LOCAL mutation ops dereference ctx.state[target]. Validate rejects a store/undeclared target,
     // but if compile ever runs on lint-unclean input, fail with a CLEAR message instead of a cryptic `undefined.type` crash.
@@ -286,7 +325,7 @@ export class Logic {
       case StOp.Patch: {
         // in-place edit: map the list, merging patch into matched items. `.map` keeps order
         // and `{ ...item, ...patch }` overwrites only the listed fields (no drop).
-        const inner: Scope = { ...scope, item: { var: '__it', fields: this.itemFields(st.target) } }; // `patch where ... with ...`: bare fields off __it
+        const inner: Scope = { ...scope, awaitUse: false, item: { var: '__it', fields: this.itemFields(st.target) } }; // `patch where ... with ...`: bare fields off __it, in a sync `.map` (a `use` call is never awaited there)
         const pred = this.compileExpr(st.pred, inner);
         const patch = this.compileExpr(st.patch, inner);
         const mapped = (src: string): string => `${src}.map((__it) => (${pred}) ? { ...__it, ...${patch} } : __it)`;
@@ -314,11 +353,13 @@ export class Logic {
         }
         break;
       }
+      case StOp.Send: out.push(`${st.target}.__send(${this.compileExpr(st.arg, scope)});`); break;   // up the live socket (queued until it is open)
       case StOp.Refetch: {
         // re-run a query with new query-string params (pagination/search/filters) and update its signal.
         // The lookup key is the SOURCE name (`query listProjects`), not the state name — they differ when a
         // state is named apart from its source (`projects = query listProjects`), and __SOURCES is keyed by the
         // source. Same resolution the query() init uses; the state signal stays the update target.
+        if (this.ctx.state[st.target]?.call) { out.push(`${st.target}.__rerun();`); break; }   // a function query asks again
         const pairs = Object.entries(st.params).map(([k, e]) => `${JSON.stringify(k)}: ${this.compileExpr(e, scope)}`).join(', ');
         const src = this.ctx.state[st.target];
         const source = typeof src?.source === 'string' && src.source.startsWith('query:') ? src.source.slice('query:'.length) : st.target;
@@ -345,6 +386,7 @@ export class Logic {
         break;
       }
       case StOp.Call: {
+        if (this.ctx.foreign.has(st.target)) { const call = this.foreignCall(`${st.target}.${st.method}`, st.args, undefined, scope); out.push(isAsync ? `await ${call};` : `${call};`); break; }   // `posthog.capture("buy")`
         // page action calling a store action: `shop.addProduct(draft)` -> call the imported store fn.
         // AWAITED inside an async action: a store action that writes returns a promise, and the
         // statements after the call are written expecting it to have happened. Awaiting a plain value
@@ -354,10 +396,14 @@ export class Logic {
         out.push(isAsync ? `await ${call};` : `${call};`);
         break;
       }
-      case StOp.Extern:
-        // calling a use'd function as a side-effect: `persist(messages)` -> the imported fn, args compiled like any expr.
-        out.push(`${st.fn}(${st.args.map((a) => this.compileExpr(a, scope)).join(', ')});`);
+      case StOp.Extern: {
+        if (isForeignCall(this.ctx, st.fn, st.chain, st.ctor)) { const call = this.foreignCall(st.fn, st.args, st.chain, scope, st.ctor); out.push(isAsync ? `await ${call};` : `${call};`); break; }   // `db.from("orders").insert(row)`
+        // a use'd function as a side-effect (`persist(messages)`), or a sibling action (`bump()`). A sibling that writes
+        // is async: awaited, like a store action, so the statements after it see what it did.
+        const call = `${this.ctx.actions[st.fn] ? st.fn : this.callee(st.fn)}(${st.args.map((a) => this.compileExpr(a, scope)).join(', ')})`;
+        out.push(isAsync && (this.writeActions().has(st.fn) || this.ctx.useCalls.has(st.fn)) ? `await ${call};` : `${call};`);
         break;
+      }
     }
     return out;
   }
@@ -369,23 +415,15 @@ export class Logic {
     const exp = this.ctx.format === Fmt.Store ? 'export ' : '';
     const out: string[] = [];
     for (const [name, def] of Object.entries(this.ctx.state)) {
+      if (def.call) continue;   // a query of a function: after the gets it may read (genCallQueries)
       if (typeof def.source === 'string' && def.source.startsWith('query:')) {
         out.push(`${exp}const ${name} = query(${JSON.stringify(def.source.slice('query:'.length))}${def.live ? ', true' : ''});`);
+        if (def.refresh) out.push(`__every(${JSON.stringify(def.source.slice('query:'.length))}, ${name}, ${def.refresh});`);   // `every 30s`
       } else {
         let initial: Value = def.initial ?? null;
         const elem = def.type.startsWith('list<') ? def.type.slice(5, -1) : '';
         const uuids = elem ? this.uuidFields(elem) : [];
-        if (uuids.length && Array.isArray(initial)) {
-          // seed rows need a stable id too: `push` auto-mints one but seeds didn't, so remove/update
-          // by id matched `undefined == undefined` (one move hit every row). Fill deterministically
-          // at compile-time so SSR and CSR agree (a runtime __id() would mismatch on hydration).
-          initial = initial.map((row, i): Value => {
-            if (typeof row !== 'object' || row === null || Array.isArray(row)) return row;
-            const o: ValueObject = { ...row };
-            for (const f of uuids) if (o[f] === null || o[f] === undefined) o[f] = `${name}-${i}`;
-            return o;
-          });
-        }
+        if (uuids.length) initial = withSeedIds(initial, uuids, name);
         if (def.persist) { // localStorage-backed: hydrate from storage (fallback to the declared initial), save on every change
           // namespace by scope (store domain / page screen) so two stores with the same state name (`items`)
           // don't share ONE localStorage key — the silent cross-store data bleed.
@@ -398,6 +436,12 @@ export class Logic {
       }
     }
     return out.join('\n  ');
+  }
+
+  // `query lookup(q)` / `query db.from("t").select("*")`: emitted after the gets, which they may read (`db`) (foreign.ts)
+  genCallQueries(): string {
+    const top: Scope = { locals: new Set() }, feeding: Scope = { locals: new Set([LIVE_CHANGE]) };   // in a feed, `change` is muten's callback
+    return callQueryDecls(this.ctx, (arg) => this.compileExpr(arg, top), (fn) => this.callee(fn), (head) => this.resolveRef(head, top), (fn, args, chain) => this.foreignCall(fn, args, chain, top), (feed) => this.compileExpr(feed, feeding));
   }
 
   // declared actions -> functions. An action whose input names a state reads it directly (no param).
@@ -420,9 +464,9 @@ export class Logic {
       const hasParams = !!action.params?.length;
       const inputIsState = !hasParams && this.ctx.stateKeys.has(action.input);
       const scope: Scope = hasParams
-        ? { locals: new Set(action.params!.map((p) => p.name)) }
+        ? { locals: new Set((action.params ?? []).map((p) => p.name)) }
         : { locals: new Set(), input: action.input, inputIsState };
-      const param = hasParams ? action.params!.map((p) => p.name).join(', ') : inputIsState ? '' : action.input;
+      const param = hasParams ? (action.params ?? []).map((p) => p.name).join(', ') : inputIsState ? '' : action.input;
       // dev: announce the action to the DevTools so the History labels it by NAME (app-fired actions can't be
       // intercepted post-mount — handlers call this local fn, not ctx[name] — so the compiler emits the hook).
       const announce = this.ctx.dev ? `if (typeof window !== 'undefined' && window.__muten_rt && window.__muten_rt.__dispatch) window.__muten_rt.__dispatch(${JSON.stringify(name)});` : '';
@@ -431,12 +475,11 @@ export class Logic {
       if (this.writeActions().has(name)) { // backend write -> async, with live .pending / .error
         out.push(`${exp}function ${name}(${param}) { return untrack(async () => {`);
         if (announce) out.push('  ' + announce);
-        out.push(`  __pending_${name}.set(true); __error_${name}.set(null);`);
-        out.push('  try {');
-        for (const st of action.body || []) for (const l of this.stmtLines(st, scope, true)) out.push('    ' + l);
-        out.push(`  } catch (__e) { __error_${name}.set(String(__e)); }`);
-        out.push(`  __pending_${name}.set(false);`);
-        out.push('}); }');
+        out.push(`  __pending_${name}.set(true); __error_${name}.set(null);`, '  try {');
+        for (const st of action.body || []) for (const l of this.stmtLines(st, { ...scope, awaitUse: true }, true)) out.push('    ' + l);   // async: a `use` call's promise is awaited
+        out.push(`  } catch (__e) {`, `    __error_${name}.set(String(__e));`);
+        for (const st of action.failed || []) for (const l of this.stmtLines(st, scope, true)) out.push('    ' + l);
+        out.push('  }', `  __pending_${name}.set(false);`, '}); }');
       } else {
         out.push(`${exp}function ${name}(${param}) { return untrack(() => {`);
         if (announce) out.push('  ' + announce);

@@ -37,7 +37,8 @@ ok('declared fn passes', good.diagnostics.every((d) => d.code !== 'unknown-funct
 
 // printer round-trips the use declaration + the call
 const rt = parse(print(ir));
-ok('printer round-trips', JSON.stringify(rt.imports) === JSON.stringify(ir.imports));
+const withoutLoc = (imports) => JSON.stringify((imports || []).map(({ loc, ...def }) => def));   // where it is written moves; what it says must not
+ok('printer round-trips', withoutLoc(rt.imports) === withoutLoc(ir.imports));
 
 // use a function as a STATEMENT in an action (a side effect), not just an expression
 const fxIr = parse(`screen s
@@ -50,6 +51,24 @@ ok('use fn in action: emits the call', compileModule(toDoc(fxIr)).includes('pers
 const fxBad = validate(toDoc(parse(`screen s\nstate { n = 0 : number }\naction go mutates n { ghost()  n.set(1) }\nPage { Text "x" }`)));
 ok('use fn in action: undeclared caught', fxBad.diagnostics.some((d) => d.code === 'unknown-function'));
 ok('use fn in action: prints the call', /persist\(n\)/.test(print(fxIr)) && /scrollBottom\(\)/.test(print(fxIr)));
+
+// in an ASYNC action a `use` call is awaited, but never inside a per-item callback: `patch where … with` and
+// `count where` compile to a synchronous `.map`/`.filter`, where an `await` does not even parse (Storio, 20-10-2026:
+// `.map((__it) => … (await nowIso()) …)` broke four pages)
+const asyncIr = parse(`screen s
+use nowIso, keyOf from "./fx.ts"
+entity Row { name text  at text }
+state { rows = [] : list<Row>  n = 0 : number  picked = "" : text }
+action save mutates rows, n {
+  post "/x" body { a: 1 }
+  rows.patch where name == keyOf(picked) with { at: nowIso() }
+  n.set(rows.count where at == nowIso())
+}
+Page { Button "go" -> save }`);
+const asyncJs = compileModule(toDoc(asyncIr));
+const callbacks = [...asyncJs.matchAll(/\((__it)\) => [^;]*/g)].map((m) => m[0]);
+ok('async action: per-item callbacks were emitted', callbacks.length > 0, asyncJs.slice(0, 400));
+ok('async action: no await inside a per-item callback', callbacks.every((body) => !body.includes('await')), callbacks.join('\n'));
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);
