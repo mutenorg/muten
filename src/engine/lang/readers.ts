@@ -227,4 +227,11 @@ export class Readers extends Grammar {
     this.eat(Tk.Punct, Pn.ParenR);
     return items;
   }
+
+  // `(a "A", b, c "C")`: names, each with the words it shows when they differ (Select options, DataTable columns)
+  protected labelledIdents(): { values: string[]; labels?: { [name: string]: string } } {
+    const labels: { [name: string]: string } = {};
+    const values = this.parseParenList(() => { const name = this.eat(Tk.Ident).v; if (this.at(Tk.String)) labels[name] = this.next().v; return name; });
+    return Object.keys(labels).length ? { values, labels } : { values };
+  }
 }

@@ -93,10 +93,20 @@ export function reactIsland(em: Emitter, id: string, def: ImportDef, parentVar: 
   em.push(`el_${id}.style.display = 'contents';`);   // the island's own box is not in the layout: the component sits in its parent's flex or grid
   em.appendEl(id, parentVar);
   let tree = element(em, id, def, em.scope, '');   // builds the slots first: they exist before the first render
-  const providers = (em.opts.themeKit?.providers || []).filter((provider) => provider.from === def.from);
+  // every library the island holds gets its providers: a MUI card inside a Chakra layout still reads MUI's theme
+  const held = new Map<string, ImportDef>();
+  const walk = (at: string): void => {
+    const n = em.nodes[at];
+    const inner = n.type === Nt.Custom ? reactImport(em.doc.imports, n.props?.component) : undefined;
+    if (inner && !held.has(inner.from)) held.set(inner.from, inner);
+    for (const kid of n.children) walk(kid);
+  };
+  walk(id);
+  const providers = (em.opts.themeKit?.providers || []).filter((provider) => held.has(provider.from));
   for (const [index, provider] of [...providers.entries()].reverse()) {
+    const from = held.get(provider.from) || def;
     em.push(`const __provided_${id}_${index} = ${propsJs(em, { inputs: provider.args }, em.scope, '')};`);
-    tree = `__react_h(__react_pick(__react_ns_${def.names[0]}, ${JSON.stringify(provider.component)}, []), __provided_${id}_${index}, ${tree})`;
+    tree = `__react_h(__react_pick(__react_ns_${from.names[0]}, ${JSON.stringify(provider.component)}, []), __provided_${id}_${index}, ${tree})`;
   }
   em.push(`{ const __root = __react_root(el_${id}); effect(() => __root.render(${tree})); onCleanup(() => __root.unmount()); }`);
 }

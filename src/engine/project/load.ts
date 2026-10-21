@@ -15,7 +15,8 @@ import { resolveStyles } from '#engine/project/styles.js';
 import { composeDoc } from '#engine/ir/compose.js';
 import { anchorImports } from '#engine/project/imports.js';
 import { envStore, ENV_DOMAIN } from '#engine/project/env.js';
-import type { PartDef, Value, LoadResult, IR, Entity, PluginFileError } from '#engine/shared/types.js';
+import { Ek, SORT_OPS, TAKE_OP, QUERY_DATA } from '#engine/shared/vocab.js';
+import type { PartDef, Value, LoadResult, IR, Entity, Expr, PluginFileError } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
 
@@ -100,8 +101,24 @@ export function storeListEntities(stores: { [domain: string]: IR }): { [k: strin
       const ent = m ? ir.entities?.[m[1]] : undefined;
       if (ent) out[`${domain}.${member}`] = ent;
     }
+    // a get that is one of those lists, narrowed or reordered (`get list = items.data`, `get open = items where …`): a page's
+    // `products.list where id == slug` reads the same fields
+    const gets = ir.gets || {};
+    const entityOf = (name: string, seen: Set<string>): Entity | undefined => {
+      const own = out[`${domain}.${name}`];
+      if (own || seen.has(name) || !gets[name]) return own;
+      const from = listSource(gets[name]);
+      return from ? entityOf(from, new Set([...seen, name])) : undefined;
+    };
+    for (const name of Object.keys(gets)) { const ent = entityOf(name, new Set()); if (ent) out[`${domain}.${name}`] = ent; }
   }
   return out;
+}
+
+// the list an expression keeps the rows of (same element type), by name: a ref (a query's `.data`), a filter, a sort, a take
+function listSource(e: Expr): string | undefined {
+  const name = e.kind === Ek.Ref ? e.name : e.kind === Ek.Filter ? e.list : e.kind === Ek.Agg && (SORT_OPS.has(e.op) || e.op === TAKE_OP) ? e.list : undefined;
+  return name?.endsWith('.' + QUERY_DATA) ? name.slice(0, -QUERY_DATA.length - 1) : name;
 }
 
 // Every *.store file under a directory -> parsed IR keyed by domain name.

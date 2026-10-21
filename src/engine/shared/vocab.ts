@@ -123,6 +123,12 @@ export const AGG_OPS = new Set<string>(['sum', 'count', 'avg', 'min', 'max']);
 // List sort: `contacts.sort by name` (asc) / `scores.sortDesc by points` (desc).
 // Same item-implicit `by` projection (reuses AggExpr), but returns a list, not a scalar.
 export const SORT_OPS = new Set<string>(['sort', 'sortDesc']);
+/** An entity enum field's type in the IR: `enum:today|tomorrow` (written `today | tomorrow`). */
+export const ENUM_PREFIX = 'enum:';
+/** `list.take(n)`: the first n items, same element type. */
+export const TAKE_OP = 'take';
+/** A query's rows: `items.data` (the query itself also holds `.loading` / `.error`). */
+export const QUERY_DATA = 'data';
 
 /** Action-body statement ops (discriminants): mutations + the `if` branch. */
 export enum StOp { Push = 'push', Set = 'set', Reset = 'reset', Toggle = 'toggle', Remove = 'remove', Patch = 'patch', Create = 'create', Update = 'update', Delete = 'delete', Refetch = 'refetch', Send = 'send', Request = 'request', Call = 'call', Extern = 'extern', If = 'if' }

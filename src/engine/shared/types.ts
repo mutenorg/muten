@@ -158,12 +158,14 @@ export type Level = 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6';
 /** An entity: field name → its type tag (always carries an implicit `id: 'uuid'`). */
 export interface Entity { [field: string]: FieldType; }
 
-/** Per-field validation pulled from the entity schema (`email email required`, `min:8`). */
+/** Per-field rules and words pulled from the entity schema (`email email required`, `min:8`, `"Correo"`). */
 export interface FieldConstraint {
   required?: boolean;
   min?: number;
   max?: number;
   pattern?: string;   // `pattern:"<regex>"` — a non-empty value must match this regular expression (phone/zip/SKU/…)
+  label?: string;     // `customer text required "Nombre"` — what a Form shows for the field (else its name)
+  choices?: { [value: string]: string };   // `delivery today "Hoy" | tomorrow "Mañana"` — what each enum value shows
 }
 /** field name → its constraints. */
 export interface EntityConstraints { [field: string]: FieldConstraint; }
@@ -318,7 +320,9 @@ export interface NodeProps {
   // modifiers
   where?: string[];
   columns?: string[];
+  columnLabels?: { [field: string]: string };   // DataTable columns(name "Nombre") — what each header says
   options?: string[];   // Select options(a, b, c) — the fixed value list of a standalone dropdown
+  optionLabels?: { [value: string]: string };   // Select options(name "Nombre", price "Precio") — what each value shows
   kind?: string;        // Chart mark: bar | line | area | point
   color?: string;       // Chart color/series encoding — a field to split series by (optional)
   // geometry: x/y are SHARED — a Chart reads them as field refs (bare ref → field name); an SVG mark as

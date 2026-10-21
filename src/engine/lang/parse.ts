@@ -50,8 +50,9 @@ export class Parser extends DeclParser {
       [Mod.Checked, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.checked = this.parseExpr(); if (paren) this.eat(Tk.Punct, Pn.ParenR); }], // Checkbox checked(expr) — display a bool one-way (pair with `-> action` to toggle)
       [Mod.Submit, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.submit = this.parseDotted(); if (paren) this.eat(Tk.Punct, Pn.ParenR); }],
       [Mod.Where, (props: NodeProps) => { props.where = this.parseParenList(() => this.rebuildClause()); }],
-      [Mod.Columns, (props: NodeProps) => { props.columns = this.parseParenList(() => this.eat(Tk.Ident).v); }],
-      [Mod.Options, (props: NodeProps) => { props.options = this.parseParenList(() => this.eat(Tk.Ident).v); }], // Select options(a, b, c)
+      // columns(name "Nombre", stock) · options(name "Nombre", price "Precio"): a field / value, and the words it shows
+      [Mod.Columns, (props: NodeProps) => { const list = this.labelledIdents(); props.columns = list.values; if (list.labels) props.columnLabels = list.labels; }],
+      [Mod.Options, (props: NodeProps) => { const list = this.labelledIdents(); props.options = list.values; if (list.labels) props.optionLabels = list.labels; }],
       [Mod.Kind, (props: NodeProps) => { props.kind = this.parenIdent(); }],   // Chart kind(bar) — the mark type
       [Mod.Color, (props: NodeProps) => { props.color = this.parenIdent(); }], // Chart color(field) — the series encoding
       // geometry (Chart encodings read x/y as field refs; SVG marks compile them as numbers). `(...)` = one expression.

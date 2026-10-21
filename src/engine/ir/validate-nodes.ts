@@ -137,7 +137,9 @@ export function nodeWalker(facts: NodeCheck): (id: string, scope: Map<string, st
       // a component from npm takes its props like a part, bare: `Rating(value: stars)` reads `stars`, checked in scope
       const fromNpm = (doc.imports || []).some((def) => def.kind && def.names.includes((props.component || '').split('.')[0]));   // `Dialog.Root`: its library's
       for (const v of Object.values(props.inputs || {})) {
-        if (typeof v === 'string') { if (fromNpm && !v.startsWith('@')) checkExpr({ kind: Ek.Ref, name: v }, n.loc ?? null, scope); else checkRef(v, n); }
+        // `@k.series`: a part handed a row's field on to a Custom (StatCard → Spark inside an `each`); `k` is the row, in scope
+        const rowRef = typeof v === 'string' && v.startsWith('@') && scope.has(v.slice(1).split('.')[0]);
+        if (typeof v === 'string') { if (fromNpm && !v.startsWith('@')) checkExpr({ kind: Ek.Ref, name: v }, n.loc ?? null, scope); else if (rowRef) checkExpr({ kind: Ek.Ref, name: v.slice(1) }, n.loc ?? null, scope); else checkRef(v, n); }
         else if (typeof v === 'object' && '$expr' in v) checkExpr(v.$expr, n.loc ?? null, scope);   // `animate: { opacity: shown ? 1 : 0 }`
       }
       for (const v of Object.values(props.on || {})) if (typeof v === 'string') checkAction(v, n);

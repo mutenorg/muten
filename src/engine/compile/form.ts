@@ -25,7 +25,7 @@ function fieldLines(input: FormInput, field: EditableField, fieldVar: string, gr
   const rule = input.constraints[field.name];
   if (field.kind === Fk.Enum) {
     out.push(`const ${fieldVar} = document.createElement('select');`, `${fieldVar}.className = ${JSON.stringify(slot('field-select', 'mu-field'))};`);
-    for (const option of field.options) out.push(`{ const o = document.createElement('option'); o.value = ${JSON.stringify(option)}; o.textContent = ${JSON.stringify(option)}; ${fieldVar}.appendChild(o); }`);
+    for (const option of field.options) out.push(`{ const o = document.createElement('option'); o.value = ${JSON.stringify(option)}; o.textContent = ${JSON.stringify(rule?.choices?.[option] ?? option)}; ${fieldVar}.appendChild(o); }`);
   } else if (field.kind === Fk.Bool) {
     out.push(`const ${fieldVar} = document.createElement('input');`, `${fieldVar}.type = 'checkbox';`, `${fieldVar}.className = ${JSON.stringify(slot('field-check', 'mu-field-check'))};`);
   } else if (field.kind === Fk.Textarea) {
@@ -49,10 +49,16 @@ function fieldLines(input: FormInput, field: EditableField, fieldVar: string, gr
   return out;
 }
 
-// the checks the submit runs, in the page's language; empty when no field carries a rule
+// the checks the submit runs, in the page's language; empty when no field carries a rule. A page that declares
+// `meta { lang }` gets that language's words; one that does not says them in the language it is shown in at run time
+// (<html lang>, which `lang.use` and the build set), so a Spanish app never answers «Required».
 function submitChecks(fieldVars: FieldVar[], lang: string): string[] {
-  const table = FORM_COPY[lang.slice(0, 2).toLowerCase()] ?? FORM_COPY.en;
-  const msg = (key: string, n?: number): string => JSON.stringify((table[key] ?? FORM_COPY.en[key] ?? key).replace('{0}', String(n ?? '')));
+  const word = (table: { readonly [key: string]: string }, key: string, n?: number): string => (table[key] ?? FORM_COPY.en[key] ?? key).replace('{0}', String(n ?? ''));
+  const msg = (key: string, n?: number): string => {
+    if (lang) return JSON.stringify(word(FORM_COPY[lang.slice(0, 2).toLowerCase()] ?? FORM_COPY.en, key, n));
+    const each = Object.fromEntries(Object.entries(FORM_COPY).map(([code, table]) => [code, word(table, key, n)]));
+    return `(${JSON.stringify(each)}[(document.documentElement.lang || '').slice(0, 2).toLowerCase()] || ${JSON.stringify(word(FORM_COPY.en, key, n))})`;
+  };
   const checks: string[] = [];
   for (const field of fieldVars) {
     if (!field.rule && field.kind !== Fk.Email) continue;
@@ -83,7 +89,7 @@ export function formLines(input: FormInput): string[] {
     const fieldVar = `f_${id}_${field.name}`, group = `g_${fieldVar}`;
     fieldVars.push({ ...field, var: fieldVar, rule: input.constraints[field.name] });
     out.push(`const ${group} = document.createElement('div'); ${group}.className = ${JSON.stringify(slot('field-group', 'mu-field-group'))};`);
-    out.push(`{ const lb = document.createElement('label'); lb.className = ${JSON.stringify(slot('label', 'mu-label'))}; lb.htmlFor = ${JSON.stringify(fieldVar)}; lb.textContent = ${JSON.stringify(field.name.charAt(0).toUpperCase() + field.name.slice(1))}; ${group}.appendChild(lb); }`);
+    out.push(`{ const lb = document.createElement('label'); lb.className = ${JSON.stringify(slot('label', 'mu-label'))}; lb.htmlFor = ${JSON.stringify(fieldVar)}; lb.textContent = ${JSON.stringify(input.constraints[field.name]?.label ?? field.name.charAt(0).toUpperCase() + field.name.slice(1))}; ${group}.appendChild(lb); }`);
     out.push(...fieldLines(input, field, fieldVar, group), `el_${id}.appendChild(${group});`);
   }
   out.push(`{ const sb = document.createElement('button'); sb.type = 'submit'; sb.className = ${JSON.stringify(slot('submit', 'mu-submit'))}; el_${id}.appendChild(sb); effect(() => { sb.textContent = ${input.submitText}; }); }`);

@@ -148,8 +148,8 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     snippet: 'Number bind(${1:qty}) min(${2:1}) max(${3:99})',
   },
   Range: {
-    props: { bind: 'state', min: 'expr?', max: 'expr?', step: 'expr?' }, children: false,
-    doc: 'Slider (`<input type=range>`) two-way bound to a NUMBER state: `Range bind(volume) min(0) max(100) step(5)`. Defaults 0..100 step 1. Style the track/thumb with your CSS (accent-color, ::-webkit-slider-thumb).',
+    string: 'placeholder', props: { bind: 'state', min: 'expr?', max: 'expr?', step: 'expr?', placeholder: 'text?' }, children: false, interp: true,
+    doc: 'Slider (`<input type=range>`) two-way bound to a NUMBER state: `Range bind(volume) "Volumen" min(0) max(100) step(5)`. Its text is the name a screen reader says (a slider shows no text of its own). Defaults 0..100 step 1. Style the track/thumb with your CSS (accent-color, ::-webkit-slider-thumb).',
     snippet: 'Range bind(${1:volume}) min(${2:0}) max(${3:100})',
   },
   Date: {
@@ -247,7 +247,7 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
 };
 
-export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'data', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group', 'eager'];
+export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'data', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group', 'eager', 'checked', 'accept', 'currency'];
 export const MODIFIER_DOCS = {
   bind: 'Two-way bind to a @state, e.g. `bind @search`.',
   submit: 'Action to run on form submit, e.g. `submit createUser`.',
@@ -269,6 +269,10 @@ export const MODIFIER_DOCS = {
   max: 'Maximum value of a Number/Range input: `Range bind(v) max(100)`. A number or a state (reactive).',
   step: 'Step increment of a Number/Range input: `Range bind(v) step(5)`. A number or a state.',
   eager: 'Load an Image at once, at high priority: `Image "{shop.cover}" alt "" eager`. Every other Image loads as it nears the screen (loading=lazy, decoding=async), so a list of 600 photos asks for the few on screen. Use it only for what is seen first (a hero, a cover, the logo).',
+  group: 'Groups Details so only one is open at a time: `Details "Envíos" group("faq") { … }`.',
+  checked: 'Shows a bool you do not own on a Checkbox (a store or query row), with `->` to change it: `Checkbox checked(t.done) -> todos.toggle(t.id)`.',
+  accept: 'What a File picker offers and what a drop takes: `File bind(photo) accept("image/*")`, `accept("image/*,.pdf")`.',
+  currency: 'Makes a Number a money field, grouped the way the page\'s language writes it, with decimals only if the currency has them: `Number bind(price) currency("COP")`. The state keeps the plain number.',
 };
 
 // Built-in formatting functions: callable like a `use`'d function but ALWAYS available (no import). The bounded
@@ -341,7 +345,7 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   dayKey: 'dayKey(isoText) → the calendar day as "YYYY-MM-DD" (drops the time). Match an event to a day cell or group by day: `when dayKey(event.date) == dayKey(cell.date) { … }`.',
   addDays: 'addDays(isoText, n) → the date shifted by n days (n may be negative), as an ISO string. Compute a due date or a range bound.',
 };
-export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'failed', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'layout', 'in', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'into', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from'];
+export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'failed', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'layout', 'in', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'into', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from', 'match', 'provider', 'new', 'script', 'react'];
 export const KEYWORD_DOCS = {
   screen: 'Declares the screen name: `screen users_dashboard`.',
   entity: 'Declares a data shape + validation: `entity User { name text required  email email required  zip text pattern:"^\\d{5}$" }` (implicit uuid id). Constraints: `required`, `min:N`, `max:N`, `pattern:"<regex>"`. An `email` field validates its format on submit; `pattern` matches a value against your regex.',
@@ -381,6 +385,14 @@ export const KEYWORD_DOCS = {
   or: 'Logical OR.',
   not: 'Logical NOT, e.g. `when not (cart.isEmpty)`.',
   contains: 'Case-insensitive substring match: `name contains @q`.',
+  match: 'Renders the arm that matches an enum value: `match status { active -> Text "Activo"  lead -> Span "Nuevo" }`.',
+  use: 'Brings in what a page calls: an npm package or your own file (`use dayjs from "dayjs"`, `use z from "zod"`), React components (`use react Dialog from "@radix-ui/react-dialog"`) or a script SDK (`use google from script "https://…"`). Calls are checked against the package\'s own types.',
+  from: 'Where a `use` comes from: a package name, a path (`~/lib/x.ts`), or `script "url"`.',
+  live: 'Data the server pushes: `query x live`, or a feed from a package that calls back, `live onSnapshot(q)` with `change`.',
+  react: 'In `use react A, B from "pkg"`: the names are React components, written like any primitive (`Dialog.Root { … }`), with muten nodes inside them still reactive.',
+  script: 'In `use X from script "url"`: a browser SDK loaded by its <script> (Google, Stripe.js, Maps). The URL is added to the page\'s CSP.',
+  provider: 'In theme.muten: a library\'s provider, around every component of that library: `provider ThemeProvider(theme: createTheme({ … theme.colors.primary … })) from "@mui/material"`.',
+  new: 'Builds an instance of a package class: `new Chart("sales", { … })`, `get client = new Client(theme.colors.primary)`.',
 };
 
 export const ACTION_OPS = ['push', 'remove', 'patch', 'reset', 'toggle', 'set', 'create', 'update', 'delete', 'refetch', 'send'];

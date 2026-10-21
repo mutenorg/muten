@@ -65,6 +65,11 @@ const other = compileModule(page('use react Badge from "@mantine/core"\nPage { B
 ok('a page of another library is left as it is', !other.includes('ThemeProvider') && !other.includes('createTheme'));
 
 ok('an island\'s own box is out of the layout: the component sits in its parent\'s flex or grid', /el_\w+\.style\.display = 'contents';/.test(chartJs));
+// a library inside another one's component: the island gets both providers (a MUI card in a Chakra layout keeps MUI's theme)
+const twoIr = parse('use createTheme from "@mui/material"\nuse createSystem, defaultConfig from "@chakra-ui/react"\ntheme { colors { primary "#6B46F2" } }\nprovider ThemeProvider(theme: createTheme({ palette: { primary: { main: theme.colors.primary } } })) from "@mui/material"\nprovider ChakraProvider(value: createSystem(defaultConfig, {})) from "@chakra-ui/react"');
+const twoKit = { values: twoIr.theme, providers: twoIr.providers, imports: twoIr.imports };
+const mixed = compileModule(page('use react Box from "@chakra-ui/react"\nuse react Button from "@mui/material"\nPage { Box(p: "4") { Button(variant: "contained") { Text "Ir" } } }'), {}, '', {}, {}, { themeKit: twoKit });
+ok('a MUI component inside a Chakra one gets MUI\'s provider too', mixed.includes('__react_pick(__react_ns_Button, "ThemeProvider", [])') && mixed.includes('__react_pick(__react_ns_Box, "ChakraProvider", [])'), mixed.match(/__root\.render[^\n]{0,240}/)?.[0]);
 const shadcnPage = 'use react Card from "@/components/ui/card"\nPage { Card class("w-[380px]") { Text "x" } }';
 ok('a component followed straight by class(…) is the component, not a primitive of the same name', codes(shadcnPage).length === 0 && js(shadcnPage).includes('"className": "w-[380px]"'), codes(shadcnPage).join());
 

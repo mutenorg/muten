@@ -264,7 +264,7 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
         declEl(id, 'form', classFor('form', p));
         lines.push(...formLines({
           id, entityName, fields: editableFields(entities[entityName]), constraints: (doc.constraints || {})[entityName] || {},
-          draft: sig, lang: doc.meta?.lang || 'en', slot, submitText, submitAction: logic.actionRef(p.submit),
+          draft: sig, lang: doc.meta?.lang || '', slot, submitText, submitAction: logic.actionRef(p.submit),
         }));
         appendEl(id, parentVar);
         break;

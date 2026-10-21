@@ -32,7 +32,7 @@ function makeEl(tag) {
   reg.push(el); return el;
 }
 const app = makeEl('div');
-const document = { getElementById: () => app, createElement: (t) => makeEl(t) };
+const document = { getElementById: () => app, createElement: (t) => makeEl(t), documentElement: { lang: 'es' } };   // <html lang>: the page speaks Spanish
 new Function('document', code)(document);
 
 let f = 0;
@@ -47,6 +47,7 @@ const done = () => reg.some((e) => e.tag === 'p' && e.textContent === 'true');
 form.handlers.submit({ preventDefault() {} });
 ok('empty submit is blocked', !done());
 ok('shows a field error', errored());
+ok('a page with no meta { lang } says it in its <html lang>: «Obligatorio»', reg.some((e) => e.className === 'mu-field-error' && e.textContent === 'Obligatorio'));
 
 email.handlers.input({ target: { value: 'a@b.io' } });
 pass.handlers.input({ target: { value: '123' } });          // too short (min:6)

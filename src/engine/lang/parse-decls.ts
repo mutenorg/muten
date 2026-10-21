@@ -51,9 +51,16 @@ export class DeclParser extends ActionParser {
       // already support list<scalar>; letting an entity FIELD be one spares the model the cryptic `expected ident, got "<"`.
       if (head === 'list' && this.at(Tk.Punct, Pn.Lt)) { this.next(); const elem = this.eat(Tk.Ident).v; this.eat(Tk.Punct, Pn.Gt); head = `list<${mapFieldType(elem)}>`; }
       const options = [head];                                                  // type, then any `| enum` alternatives
-      while (this.at(Tk.Punct, Pn.Pipe)) { this.next(); options.push(this.eat(Tk.Ident).v); }
+      // `today "Hoy" | tomorrow "Mañana"`: an enum value with the words it shows. Labelled when the first one is (a string
+      // then `|`), so `delivery today | tomorrow "Entrega"` still reads "Entrega" as the FIELD's label, not tomorrow's.
+      const choices: { [value: string]: string } = {};
+      const labelled = this.at(Tk.String) && this.toks[this.pos + 1]?.t === Tk.Punct && this.toks[this.pos + 1]?.v === Pn.Pipe;
+      if (labelled) choices[head] = this.next().v;
+      while (this.at(Tk.Punct, Pn.Pipe)) { this.next(); const value = this.eat(Tk.Ident).v; options.push(value); if (labelled && this.at(Tk.String)) choices[value] = this.next().v; }
       fields[fieldName] = options.length > 1 ? 'enum:' + options.join('|') : (head.startsWith('list<') ? head : mapFieldType(options[0]));
       const constraint = this.parseConstraints();                              // optional constraints: required, min:N, max:N
+      if (this.at(Tk.String)) constraint.label = this.next().v;                // `customer text required "Nombre"`: what a Form calls it
+      if (Object.keys(choices).length) constraint.choices = choices;
       if (Object.keys(constraint).length) constraints[fieldName] = constraint;
     }
     this.eat(Tk.Punct, Pn.BraceR);

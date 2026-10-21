@@ -2,7 +2,7 @@
 // so an AI can mutate the IR by node id (engine/ir/mutate.ts) and re-emit faithful source instead
 // of regenerating the file or text-patching it. Output is canonical (declaration order and spacing
 // are normalized); parsed equality is guaranteed, not byte identity.
-import { Ek, StOp, Nt, Mod } from '#engine/shared/vocab.js';
+import { Ek, StOp, Nt, Mod, ENUM_PREFIX } from '#engine/shared/vocab.js';
 import type {
   IR, IRNode, Expr, ChainStep, Interp, ParamRef, Stmt, Value, Scalar, StateDef, ActionDef,
   Route, Entity, EntityConstraints, PartDef, ArgMap, ArgValue, ClassCond, ClassInterp, StringPropValue,
@@ -113,7 +113,8 @@ function printNode(n: IRNode, ind: string): string {
     if (p.data) head += ` @${p.data}`;
     if (p.bind) head += ` bind ${p.bind.includes('.') ? p.bind : '@' + p.bind}`;
     if (p.where) head += ` ${Mod.Where}(${p.where.join(', ')})`;
-    if (p.columns) head += ` ${Mod.Columns}(${p.columns.join(', ')})`;
+    if (p.columns) head += ` ${Mod.Columns}(${p.columns.map((col) => p.columnLabels?.[col] !== undefined ? `${col} ${JSON.stringify(p.columnLabels[col])}` : col).join(', ')})`;
+    if (p.options) head += ` ${Mod.Options}(${p.options.map((value) => p.optionLabels?.[value] !== undefined ? `${value} ${JSON.stringify(p.optionLabels[value])}` : value).join(', ')})`;
     if (p.class) head += ` ${Mod.Class}(${p.class.map(printClass).join(', ')})`;
     if (p.alt !== undefined) head += ` ${Mod.Alt} ${printStringProp(p.alt)}`;
     if (p.inputs) head += ` ${Mod.Inputs}(${printArgMap(p.inputs)})`;
@@ -132,6 +133,9 @@ const printEntity = (name: string, e: Entity, cs?: EntityConstraints): string =>
     if (c?.required) s += ' required';
     if (c?.min !== undefined) s += ` min:${c.min}`;
     if (c?.max !== undefined) s += ` max:${c.max}`;
+    // an enum is written as muten reads it (`a | b`, each value with its words), never as the IR's `enum:a|b`
+    if (t.startsWith(ENUM_PREFIX)) s = `${f} ${t.slice(ENUM_PREFIX.length).split('|').map((value) => c?.choices?.[value] !== undefined ? `${value} ${JSON.stringify(c.choices[value])}` : value).join(' | ')}${s.slice(f.length + 1 + t.length)}`;
+    if (c?.label !== undefined) s += ` ${JSON.stringify(c.label)}`;
     return s;
   });
   return `entity ${name} { ${fields.join('  ')} }`;

@@ -74,7 +74,7 @@ function dataTable(em: Emitter, id: string, n: FlatNode, parentVar: string): voi
   em.declEl(id, 'table', em.classFor('datatable', p));
   em.push(`const head_${id} = el_${id}.createTHead().insertRow();`);
   for (const col of columns) {
-    em.push(`{ const th = document.createElement('th'); th.scope = 'col'; th.textContent = ${JSON.stringify(col)}; head_${id}.appendChild(th); }`); // a11y: scope ties data cells to their column header
+    em.push(`{ const th = document.createElement('th'); th.scope = 'col'; th.textContent = ${JSON.stringify(p.columnLabels?.[col] ?? col)}; head_${id}.appendChild(th); }`); // a11y: scope ties data cells to their column header
   }
   if (rowActions.length) em.push(`{ const th = document.createElement('th'); th.scope = 'col'; head_${id}.appendChild(th); }`);
   em.push(`const body_${id} = el_${id}.createTBody();`);

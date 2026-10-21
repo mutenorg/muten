@@ -88,13 +88,17 @@ function diffDoc(a: Doc, b: Doc): { reload: boolean; patches: string[] } {
 }
 
 
-// Injected into the dev page: SSE full-reload + a RUNTIME-error overlay. Today an uncaught error (a throwing
-// Custom, a bad ref) only hits the console and leaves a blank page; this surfaces it like Vite, with the stack
+// Injected into the dev page: SSE full-reload + a RUNTIME-error overlay. The stream closes on pagehide: a page Chrome
+// keeps in its back/forward cache would hold it open, and six of them use up the browser's six connections to this host
+// (the seventh page then hangs blank, no error anywhere). Coming back from that cache reloads, so no edit is missed.
+// Without the overlay an uncaught error (a throwing Custom, a bad ref) only hits the console and leaves a blank page;
+// «ResizeObserver loop completed with undelivered notifications» is not one (the browser's note that a layout settled a
+// frame later, with no error object behind it): covering the page with it hid working screens (a TableView on a phone). this surfaces it like Vite, with the stack
 // (source maps attribute frames to the .muten file). Compile errors use the server-side overlay() instead.
 const devClient = (token: string): string => `<script>window.__MUTEN_DEV_TOKEN=${JSON.stringify(token)};(function(){function show(m){var d=document.getElementById('__mu_err');if(!d){d=document.createElement('div');d.id='__mu_err';document.body.appendChild(d);}d.style.cssText='position:fixed;inset:0;z-index:99999;background:#1a1a1f;color:#ffb4b4;font:13px/1.6 ui-monospace,monospace;overflow:auto';d.innerHTML='<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten \\u2014 runtime error</div><pre style="padding:24px;white-space:pre-wrap">'+String(m).replace(/[<&]/g,function(c){return c==='<'?'&lt;':'&amp;';})+'</pre>';}
-addEventListener('error',function(e){show((e.error&&e.error.stack)||e.message);});
+addEventListener('error',function(e){if(!e.error&&/^ResizeObserver loop/.test(e.message||''))return;show((e.error&&e.error.stack)||e.message);});
 addEventListener('unhandledrejection',function(e){show('Unhandled promise rejection:\\n'+((e.reason&&e.reason.stack)||e.reason));});
-if(self===top)new EventSource('/_reload').onmessage=function(e){var m;try{m=JSON.parse(e.data)}catch(_){return location.reload()}if(m.type==='css'){var l=document.querySelector('link[href^="/assets/boot.css"]');if(l){var n=l.cloneNode(false);n.setAttribute('href','/assets/boot.css?v='+Date.now());n.onload=function(){l.remove()};l.parentNode.insertBefore(n,l.nextSibling);}return;}if(m.type!=='patch')return location.reload();var rt=window.__muten_rt,pg=window.__muten_page;if(!rt||!pg||window.__muten_screen!==m.screen)return location.reload();try{for(var i=0;i<m.patches.length;i++){var p=m.patches[i],b=eval('('+p.src+')');if(!rt.patchNode(pg,p.id,function(c,par,n){return b(c,n,par,rt)}))return location.reload();}}catch(err){console.error('[muten hmr]',err);location.reload();}};})();</script>`;
+if(self===top){var __es=new EventSource('/_reload');__es.onmessage=function(e){var m;try{m=JSON.parse(e.data)}catch(_){return location.reload()}if(m.type==='css'){var l=document.querySelector('link[href^="/assets/boot.css"]');if(l){var n=l.cloneNode(false);n.setAttribute('href','/assets/boot.css?v='+Date.now());n.onload=function(){l.remove()};l.parentNode.insertBefore(n,l.nextSibling);}return;}if(m.type!=='patch')return location.reload();var rt=window.__muten_rt,pg=window.__muten_page;if(!rt||!pg||window.__muten_screen!==m.screen)return location.reload();try{for(var i=0;i<m.patches.length;i++){var p=m.patches[i],b=eval('('+p.src+')');if(!rt.patchNode(pg,p.id,function(c,par,n){return b(c,n,par,rt)}))return location.reload();}}catch(err){console.error('[muten hmr]',err);location.reload();}};addEventListener('pagehide',function(){__es.close()});addEventListener('pageshow',function(e){if(e.persisted)location.reload()});};})();</script>`;
 
 
 // `muten dev` on esbuild: an incremental JS build kept fully IN MEMORY (write:false → nothing is written to
@@ -196,7 +200,7 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
   const overlay = (): string => `<!doctype html><body style="margin:0;background:#1a1a1f;color:#f5f5f5;font:14px/1.6 ui-monospace,monospace">`
     + `<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten — compile error</div>`
     + `<pre style="padding:24px;white-space:pre-wrap;color:#ffb4b4">${lastError.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</pre>`
-    + `<script>new EventSource('/_reload').onmessage=()=>location.reload()</script></body>`;
+    + `<script>const es=new EventSource('/_reload');es.onmessage=()=>location.reload();addEventListener('pagehide',()=>es.close())</script></body>`;
 
   // A side effect (open in editor) needs a POST carrying this run's token in a header: a link, an <img> or a form on another
   // site can send neither, and the browser will not let a script on another origin add the header without asking us first.

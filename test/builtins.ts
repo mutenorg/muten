@@ -38,6 +38,11 @@ same('ago of a future time', fns.ago(new Date(Date.now() + 3 * 86400000 + 60000)
 ok('calendar today in Spanish starts with «Hoy, »', fns.calendar(new Date().toISOString(), 'es').startsWith('Hoy, '), fns.calendar(new Date().toISOString(), 'es'));
 ok('calendar yesterday in English starts with «Yesterday, »', fns.calendar(new Date(Date.now() - 86400000).toISOString(), 'en').startsWith('Yesterday, '), fns.calendar(new Date(Date.now() - 86400000).toISOString(), 'en'));
 same('ago of a non-date passes it through', fns.ago('soon'), 'soon');
+// no language passed: the page's <html lang>, not the browser's (a Spanish page in an English browser stays Spanish)
+globalThis.document = { documentElement: { lang: 'es' } };
+same('ago with no language speaks the page\'s (<html lang="es">)', fns.ago(minutesAgo), 'hace 5 minutos');
+same('money with no language groups the page\'s way', fns.money(1234567, 'COP'), fns.money(1234567, 'COP', 'es'));
+delete globalThis.document;
 
 const undocumented = BUILTINS.filter((name) => !BUILTIN_DOCS[name]);
 ok('every built-in is documented (autocomplete, the AI reference)', undocumented.length === 0, undocumented.join(', '));

@@ -63,7 +63,7 @@ function select(em: Emitter, id: string, n: FlatNode, parentVar: string): void {
   em.nameField(id, p.placeholder);   // a11y: the field's accessible name is its text (a placeholder alone is not one)
   em.push(`el_${id}.className = ${JSON.stringify(em.classFor('select', p))};`);
   if (typeof p.placeholder === 'string' && p.placeholder) em.push(`{ const o = document.createElement('option'); o.value = ''; o.textContent = ${JSON.stringify(p.placeholder)}; o.disabled = true; el_${id}.appendChild(o); }`); // non-selectable prompt while empty
-  for (const opt of p.options || []) em.push(`{ const o = document.createElement('option'); o.value = ${JSON.stringify(opt)}; o.textContent = ${JSON.stringify(opt)}; el_${id}.appendChild(o); }`);
+  for (const opt of p.options || []) em.push(`{ const o = document.createElement('option'); o.value = ${JSON.stringify(opt)}; o.textContent = ${JSON.stringify(p.optionLabels?.[opt] ?? opt)}; el_${id}.appendChild(o); }`);
   em.push(`effect(() => { const __v = ${readJS}; if (el_${id}.value !== __v) el_${id}.value = __v; });`);
   if (writeJS) em.push(`el_${id}.addEventListener('change', (e) => ${writeJS});`); else em.push(`el_${id}.disabled = true;`);
   em.genDynamics(id, p);
