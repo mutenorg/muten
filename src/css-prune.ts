@@ -10,7 +10,10 @@
 //   · a class a selector needs is one outside any parentheses: in `.a:not(.b)` or `:is(.b, .c)` the rule can match
 //     without `.b`, so only `.a` is needed;
 //   · the shipped code is every word of the built JS and HTML; a word ending in `-` (`"status-" + x`, `` `cx-${k}` ``)
-//     keeps every class that starts with it, so a class name built at run time is never dropped.
+//     keeps every class that starts with it, so a class name built at run time is never dropped;
+//   · a class is also built from a name and an ending kept apart (`const NS = 'cx-stb'` … `` `${NS}-bar` ``): it stays
+//     when the code holds both the name (`cx-stb`) and the ending (`-bar`). Without this, @muten/shadcn's StackedBars
+//     lost every `cx-stb-*` rule in a production build and drew its months as one line of text (23-10-2026).
 // At-rules that hold rules (@media, @supports, @layer, @container…) are walked; one left empty goes too. Everything
 // else (@font-face, @keyframes, @property, declarations, :root) is kept as written.
 
@@ -19,9 +22,10 @@ import { join } from 'node:path';
 
 const GROUPING_AT_RULES = new Set(['media', 'supports', 'layer', 'container', 'scope', 'document', 'starting-style']);
 const MIN_PREFIX = 3;   // `a-` keeps too much to mean anything; `cx-` / `status-` is a real prefix
+const ENDING = /^-[A-Za-z][\w-]*$/;   // `-bar`, `-legend-dot`: what a template or a `+` adds to a name
 
 /** The words the shipped code contains, and the prefixes a class may be built from. */
-export interface ShippedWords { words: Set<string>; prefixes: string[] }
+export interface ShippedWords { words: Set<string>; prefixes: string[]; endings: Set<string> }
 
 export function shippedWords(code: string): ShippedWords {
   const words = new Set<string>();
@@ -34,11 +38,20 @@ export function shippedWords(code: string): ShippedWords {
   // `has-[>svg]:px-3`, `translate-x-[calc(100%-2px)]`. Read once more cut only at spaces and quotes, so those stay whole.
   for (const whole of code.match(/[^\s"'`]+/g) ?? []) words.add(whole);
   const prefixes = [...words].filter((word) => word.endsWith('-') && word.length >= MIN_PREFIX);
-  return { words, prefixes };
+  const endings = new Set([...words].filter((word) => ENDING.test(word)));
+  return { words, prefixes, endings };
 }
 
 function known(className: string, shipped: ShippedWords): boolean {
-  return shipped.words.has(className) || shipped.prefixes.some((prefix) => className.startsWith(prefix));
+  return shipped.words.has(className) || shipped.prefixes.some((prefix) => className.startsWith(prefix)) || joined(className, shipped);
+}
+
+/** A class the code writes as a name and an ending apart: `cx-stb-bar` from `cx-stb` and `-bar`, at any of its dashes. */
+function joined(className: string, shipped: ShippedWords): boolean {
+  for (let dash = className.indexOf('-', MIN_PREFIX); dash > 0; dash = className.indexOf('-', dash + 1)) {
+    if (shipped.words.has(className.slice(0, dash)) && shipped.endings.has(className.slice(dash))) return true;
+  }
+  return false;
 }
 
 // `\:` -> `:`, `\31 ` -> `1`: the class as the markup spells it

@@ -27,6 +27,11 @@ const tsx = 'className={cn("peer group/switch inline-flex has-[>svg]:px-3", "gro
 const kept = pruneCss('.group-data-\\[size\\=default\\]\\/switch\\:size-4:is(:where(.group\\/switch)[data-size=default] *){width:1rem}.has-\\[\\>svg\\]\\:px-3:has(>svg){padding:0}.data-\\[state\\=checked\\]\\:translate-x-\\[calc\\(100\\%-2px\\)\\][data-state=checked]{translate:1px}.never-used{color:red}', tsx).css;
 ok('a class with an arbitrary variant or value is read whole (shadcn\'s switch kept its thumb size)', kept.includes('size-4') && kept.includes('px-3') && kept.includes('translate-x') && !kept.includes('never-used'), kept);
 ok('a one-letter prefix keeps nothing extra', !shippedWords('"a-" + x').prefixes.includes('a-'));
+// a library that names its classes from a constant: `const NS = 'cx-stb'` … `${NS}-bar` (minified: `${e}-bar`)
+const built = 'const e="cx-stb";el.innerHTML=`<div class="${e}"><i class="${e}-bar"></i><b class="${e}-legend-dot">`';
+const stacked = pruneCss('.cx-stb{x:1}.cx-stb-bar{y:2}.cx-stb-legend-dot{z:3}.cx-stb-ghost{w:4}', built).css;
+ok('a class built from a constant name and an ending stays (StackedBars kept its bars)', stacked === '.cx-stb{x:1}.cx-stb-bar{y:2}.cx-stb-legend-dot{z:3}', stacked);
+ok('an ending alone does not keep a class whose name the code never holds', pruneCss('.ghost-bar{x:1}', built).css === '');
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);

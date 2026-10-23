@@ -335,7 +335,26 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
   // landed on, +1 per navigation. A back button reads it to know whether «back» stays inside the app; at 0 it goes to
   // the app's default screen instead of doing nothing (a page opened from a link) or leaving the app.
   const depth = (): number => { const state: { muDepth?: number } | null = history.state; return state && typeof state.muDepth === 'number' ? state.muDepth : 0; };
-  const go = (to: string): void => { if (to !== location.pathname) { history.pushState({ muDepth: depth() + 1 }, '', to); mounted = null; render(); } };
+  // The section a link names (`/terms#withdrawal`), once its page is on screen. False when the page has no such id.
+  const toSection = (hash: string, smooth: boolean): boolean => {
+    let el: HTMLElement | null = null;
+    try { el = hash ? document.getElementById(decodeURIComponent(hash)) : null; } catch { el = null; }
+    if (!el) return false;
+    el.scrollIntoView({ block: 'start', behavior: smooth && !matchMedia('(prefers-reduced-motion: reduce)').matches ? 'smooth' : 'auto' });
+    return true;
+  };
+  const go = (to: string): void => {
+    const cut = to.indexOf('#');
+    const here = location.pathname + (location.search || '');
+    // Only the section moves on the page already open (same path, same query): the address keeps it and the page
+    // scrolls to it, with no re-mount. Re-mounting re-ran every query of the page and then opened it at its top.
+    if (cut >= 0 && (to.slice(0, cut) || here) === here) {
+      if (to !== here + (location.hash || '')) history.pushState({ muDepth: depth() + 1 }, '', to);
+      toSection(to.slice(cut + 1), true);
+      return;
+    }
+    if (to !== location.pathname) { history.pushState({ muDepth: depth() + 1 }, '', to); mounted = null; render(); }
+  };
   const render = (): void => {
     const path = location.pathname || keys[0];
     const { def, params } = matchRoute(path);
@@ -367,7 +386,8 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
         const pageEl = module.mount(target, params); // atomic swap: no blank frame
         if (typeof window !== 'undefined') { window.__muten_page = pageEl.__muten; window.__muten_screen = module.screen; } // dev HMR target
       });
-      scrollTo({ top: 0, left: 0, behavior: 'instant' }); // a new page opens at its top at once, even under scroll-behavior: smooth
+      // a new page opens at its top at once (even under scroll-behavior: smooth), or at the section its address names
+      if (!toSection((location.hash || '').slice(1), false)) scrollTo({ top: 0, left: 0, behavior: 'instant' });
       markActive(); // shell nav + page links reflect the new path (aria-current + .is-active)
       const main = target.querySelector('main'); if (main instanceof HTMLElement) main.focus({ preventScroll: true }); // a11y: move focus to content on nav (the <main> is tabIndex -1)
     });

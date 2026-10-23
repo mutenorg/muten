@@ -39,7 +39,7 @@ import { LAYOUT_PREFIX, layoutDoc, layoutLoaders } from './layout-modules.js';
 import { Nt } from '#engine/shared/vocab.js';
 import type { IR, PartDef, ThemeAdapter, Doc, Translations, ThemeRaw, ThemeKit } from '#engine/shared/types.js';
 import { readThemeKit } from '#engine/project/theme-values.js';
-import { readTranslations } from '#engine/project/lang-files.js';
+import { readTranslations, langFiles } from '#engine/project/lang-files.js';
 import { nativeWebOptions } from '#engine/project/native-web.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,6 +48,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const runtimeSource = (): string => readFileSync(join(here, 'runtime.js'), 'utf8');
 
 const RID = 'virtual:muten/runtime';
+// The app's texts for code outside a page (a `use` function, a Custom): `import { t, texts } from 'muten:texts'` gives the
+// same t() a page has, over the same src/lang files, with the language passed in: t(lang, key, ...values).
+const TEXTS_IMPORT = 'muten:texts';
+const TEXTS = 'virtual:muten/texts';
 const SHELL = 'virtual:muten/shell';
 const STORE_PREFIX = 'virtual:muten/store/';
 const VNS = 'muten-virtual';
@@ -274,6 +278,12 @@ export function customComponents(root: string, doc: Doc): { components: { [name:
 }
 
 // The esbuild plugin: virtual modules (runtime/shell/store), the `~/` and `/src/` path roots, and the
+/** The module behind `muten:texts`: every language's texts and a t() over them, the runtime's own (__t). */
+function textsModule(model: Model): string {
+  return `import { __t } from '${RID}';\nexport const texts = ${JSON.stringify(model.translations || {})};\n`
+    + `export function t(language, key, ...values) { return __t(language, texts, key, ...values); }\n`;
+}
+
 // .muten -> JS loader (with the oracle). CSS is handled separately (buildCss), not here.
 export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.Plugin {
   return {
@@ -281,12 +291,14 @@ export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.P
     setup(build) {
       // virtual:muten/* -> our namespace
       build.onResolve({ filter: /^virtual:muten\// }, (args) => ({ path: args.path, namespace: VNS }));
+      build.onResolve({ filter: new RegExp(`^${TEXTS_IMPORT}$`) }, () => ({ path: TEXTS, namespace: VNS }));
       // `~/` = src root; `/src/...` = app-absolute paths the boot emits (route imports, stylesheet)
       build.onResolve({ filter: /^~\// }, (args) => ({ path: join(root, 'src', args.path.slice(2)) }));
       build.onResolve({ filter: /^\/src\// }, (args) => ({ path: join(root, args.path) }));
 
       build.onLoad({ filter: /.*/, namespace: VNS }, (args) => {
         if (args.path === RID) return { contents: runtimeSource(), loader: 'js', resolveDir: here };
+        if (args.path === TEXTS) return { contents: textsModule(model), loader: 'js', resolveDir: here, watchFiles: Object.values(langFiles(root)) };
         if (args.path === SHELL) {
           const tree = model.appIr?.shell || { type: Nt.Shell, props: {}, children: [{ type: Nt.Slot, props: {} }] };
           const doc = toDoc({ ...(model.appIr || {}), screen: 'shell', entities: {}, state: {}, actions: {}, tree });

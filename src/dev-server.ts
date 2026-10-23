@@ -16,6 +16,7 @@ import { devToken, fileInside, hostAllowed, openInEditor } from './dev-security.
 import { envDefines } from '#engine/project/env.js';
 import { mapApp } from '#engine/project/map.js';
 import type { Doc } from '#engine/shared/types.js';
+import { ParseError, diag, formatDiagnostic } from '#engine/shared/diagnostics.js';
 import { nativeWebOptions } from '#engine/project/native-web.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -48,6 +49,21 @@ const MIME: { [ext: string]: string } = { '.js': 'text/javascript', '.css': 'tex
 // a same-origin relative path, so it works from whatever host the page was served from.
 // Only a top-level page opens it: the stream never closes, Chrome allows six connections per host, and a page
 // showing several dev pages in iframes (a row of store previews) would leave the seventh waiting forever.
+// The pages the server writes itself (the error, the QR, the SPA shell) say their encoding: without it a browser reads
+// the UTF-8 bytes as Latin-1 and «muten — compile error» comes out as «muten â€” compile error».
+const HTML_UTF8 = 'text/html; charset=utf-8';
+
+// A failure that is not esbuild's (a syntax error in a part, read while loading the app): where it is and the line
+// pointed at, as `muten check` prints it, instead of the bare message with no file.
+function describeFailure(error: unknown, root: string): string {
+  if (!(error instanceof ParseError)) return error instanceof Error ? error.message : String(error);
+  const file = error.file ? relative(root, error.file) : '';
+  if (!file || !error.loc) return file ? `${file}  ${error.message}` : error.message;
+  let source = '';
+  try { source = readFileSync(error.file || '', 'utf8'); } catch { /* the file went away: no frame */ }
+  return formatDiagnostic(diag(error.code, error.message, { loc: error.loc }), file, source);
+}
+
 const lanAddresses = (): string[] => Object.values(networkInterfaces())
   .flatMap((ifaces) => ifaces ?? [])
   .filter((iface) => iface.family === 'IPv4' && !iface.internal)
@@ -144,7 +160,7 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
         console.error('\n' + (await esbuild.formatMessages(errs, { kind: 'error', color: true, terminalWidth: 100 })).join('\n'));
         lastError = (await esbuild.formatMessages(errs, { kind: 'error', color: false })).join('\n');
       } else {
-        lastError = e instanceof Error ? e.message : String(e);
+        lastError = describeFailure(e, root);
         console.error('\n  \x1b[31m✗\x1b[0m ' + lastError);
       }
     }
@@ -197,7 +213,7 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
     if (cssBytes) html = html.replace('</head>', '  <link rel="stylesheet" href="/assets/boot.css">\n</head>');
     return html.replace('</body>', () => `  ${devClient(token)}\n</body>`);
   };
-  const overlay = (): string => `<!doctype html><body style="margin:0;background:#1a1a1f;color:#f5f5f5;font:14px/1.6 ui-monospace,monospace">`
+  const overlay = (): string => `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#1a1a1f;color:#f5f5f5;font:14px/1.6 ui-monospace,monospace">`
     + `<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten — compile error</div>`
     + `<pre style="padding:24px;white-space:pre-wrap;color:#ffb4b4">${lastError.replace(/[<&]/g, (c) => (c === '<' ? '&lt;' : '&amp;'))}</pre>`
     + `<script>const es=new EventSource('/_reload');es.onmessage=()=>location.reload();addEventListener('pagehide',()=>es.close())</script></body>`;
@@ -224,7 +240,7 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
     if (url === '/_reload') { res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' }); clients.add(res); req.on('close', () => clients.delete(res)); return; }
     if (url === '/_qr') { // dev-only: the LAN URL as a scannable code — open on the desktop, scan with a phone
       const addr = httpServer.address(), bound = addr && typeof addr === 'object' ? addr.port : port;
-      res.setHeader('Content-Type', 'text/html');
+      res.setHeader('Content-Type', HTML_UTF8);
       res.end(qrPage(lanAddresses()[0], bound));
       return;
     }
@@ -244,14 +260,14 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
       res.statusCode = 404; res.end('{"ok":false,"error":"not found"}');
       return;
     }
-    if (lastError) { res.setHeader('Content-Type', 'text/html'); res.end(overlay()); return; }
+    if (lastError) { res.setHeader('Content-Type', HTML_UTF8); res.end(overlay()); return; }
     if (url === '/assets/boot.css' && cssBytes) { res.setHeader('Content-Type', 'text/css'); res.end(cssBytes); return; }
     const mem = files.get(url);
     if (mem) { res.setHeader('Content-Type', MIME[extname(url)] || 'application/octet-stream'); res.end(Buffer.from(mem)); return; }
     // public assets (favicons, /docs, /code) come from disk, and ONLY from inside public/, never a secret (dev-security.ts)
     const pub = url === '/' ? null : fileInside(join(root, 'public'), url);
     if (pub) { res.setHeader('Content-Type', MIME[extname(pub)] || 'application/octet-stream'); res.end(readFileSync(pub)); return; }
-    res.setHeader('Content-Type', 'text/html'); res.end(indexHtml()); // SPA fallback
+    res.setHeader('Content-Type', HTML_UTF8); res.end(indexHtml()); // SPA fallback
   });
   // the configured port may be taken (another app, a stale server) — fall back to a free OS-assigned port instead of
   // crashing, and ALWAYS print the port actually bound so a parent process can read it back.

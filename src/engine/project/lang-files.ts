@@ -9,10 +9,16 @@ import { basename, join } from 'node:path';
 import { tokenize } from '#engine/lang/lexer.js';
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { Tk, Pn } from '#engine/shared/vocab.js';
-import type { Loc, Translations } from '#engine/shared/types.js';
+import type { Loc, Translations, Token } from '#engine/shared/types.js';
 
 export const LANG_DIR = 'lang';
 export const LANG_EXT = '.lang';
+
+const KEY_JOINS = new Set<string>([Pn.Dot, Pn.Dash]);
+/** The next piece of a key: a word, a number or a `.` / `-`, touching the piece before (`hm.steps.1d`, `who.small-business`). */
+function continuesKey(before: Token, next: Token): boolean {
+  return before.end === next.pos && (next.t === Tk.Ident || next.t === Tk.Number || (next.t === Tk.Punct && KEY_JOINS.has(next.v)));
+}
 
 /** One .lang file's texts, by key, with where each is written. A mistake is a located ParseError. */
 export function parseLang(source: string): { texts: { [key: string]: string }; locs: { [key: string]: Loc } } {
@@ -25,7 +31,10 @@ export function parseLang(source: string): { texts: { [key: string]: string }; l
     const start = tokens[i];
     if (start.t !== Tk.Ident) throw new ParseError(`a line of a .lang file is \`key "text"\`, like \`login.email "Correo"\``, locOf(start.pos));
     let key = tokens[i++].v;
-    while (tokens[i].t === Tk.Punct && tokens[i].v === Pn.Dot && tokens[i + 1]?.t === Tk.Ident) { key += '.' + tokens[i + 1].v; i += 2; }
+    // a key is dotted, and a segment may be kebab or carry a number (`who.small-business.h1`, `hm.steps.1d`): only pieces
+    // that touch join, so `a - b` is never one key
+    while (continuesKey(tokens[i - 1], tokens[i])) key += tokens[i++].v;
+    if (KEY_JOINS.has(key.slice(-1))) throw new ParseError(`"${key}" ends in «${key.slice(-1)}»: a key's last piece is a word or a number`, locOf(start.pos));
     if (tokens[i].t !== Tk.String) throw new ParseError(`"${key}" needs its text in quotes: \`${key} "…"\``, locOf(tokens[i].pos));
     if (key in texts) throw new ParseError(`"${key}" is written twice in this file (line ${locs[key].line} and here)`, locOf(start.pos));
     texts[key] = tokens[i++].v;

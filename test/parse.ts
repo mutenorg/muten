@@ -55,5 +55,14 @@ const img = byType('Image')[0];
 ok('Image src is an interpolation', img?.props?.src?.kind === 'interp');
 ok('Image interp carries the c.image ref', JSON.stringify(img?.props?.src).includes('c.image'));
 
+// A part's argument that is a list (or any expression) where a name is due: the error says what an argument may be and
+// the way out, at the `[`, instead of the parser's bare «expected ident, got punct "["».
+let listArg: { message: string; loc: { line: number; col: number } | null } | null = null;
+try { parse('part Card() {\n  Stack {\n    Lista(items: [ 1, 2 ])\n  }\n}\n'); } catch (e) { listArg = e; }
+ok('a list as a part argument is a syntax error', listArg !== null);
+ok('it says what an argument may be', !!listArg?.message.includes('a literal ("text", 3, true) or a name'));
+ok('it names the way out for an npm component', !!listArg?.message.includes('use react Name from'));
+ok('it points at the `[`', listArg?.loc?.line === 3 && listArg?.loc?.col === 18);
+
 console.log(`\n${fail ? '✗ ' + fail + ' FAILED' : 'ALL OK'} (${pass}/${pass + fail})`);
 process.exit(fail ? 1 : 0);

@@ -1,7 +1,7 @@
 // readers: the small token readers every part of the screen grammar shares: a type (`list<User>`), a dotted name,
 // a parenthesized ident, a `where` clause rebuilt as text, a path, call args and their values, aria/style args, a
 // class name, a duration, an entity's constraints. Parser builds on these (readers → actions → declarations → tree).
-import { ParseError } from '#engine/shared/diagnostics.js';
+import { ParseError, argNotANameMessage } from '#engine/shared/diagnostics.js';
 import { Grammar } from '#engine/lang/grammar.js';
 import { Tk, Pn, Kw } from '#engine/shared/vocab.js';
 import type { Expr, Interp, Value, FieldConstraint, ArgValue, ArgMap } from '#engine/shared/types.js';
@@ -177,6 +177,9 @@ export class Readers extends Grammar {
       while (this.at(Tk.Punct, Pn.Dot)) { this.next(); path += '.' + this.eat(Tk.Ident).v; }
       return path;
     }
+    // `items: [ … ]`, a call or a sum where a name is due: say what an argument may be and the two ways out, instead of
+    // the parser's «expected ident, got punct "["» with no word about why.
+    if (!this.at(Tk.Ident)) throw new ParseError(argNotANameMessage(this.peek().v), this.locOf(this.peek().pos));
     return this.parseDotted();                                // bare ref / store action (cart.add) / enum
   }
 

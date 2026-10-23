@@ -23,6 +23,13 @@ export function noMethodsMessage(list: string, method: string): string {
   return `\`.${method}(…)\`: muten values have no JS methods. Filter with \`${list} where <cond>\`, order with \`${list}.sort by <field>\` (or \`sortDesc by\`), take the first n with \`${list}.take(n)\`, total/average/count with \`${list}.sum|avg|count by <field>\`, membership with \`contains\`. A \`use\`'d function is called \`fn(x)\`, never \`x.fn()\`; a store's \`get name(…)\` is called \`store.name(x)\`.`;
 }
 
+/** A part's argument (or a Custom's input) that is not a literal or a name: `items: [ … ]`, a call, a sum. */
+export function argNotANameMessage(found: string): string {
+  return `an argument here is a literal ("text", 3, true) or a name (a state, a \`get\`, a \`$param\`), not \`${found}\`. `
+    + `If the component comes from npm (React, a web component), declare it in THIS file — \`use react Name from "…"\` — and its props take any expression, a list included. `
+    + `For a part or a Custom, give the value a name first (\`state { items = [ … ] : list }\` or a \`get\`) and pass the name.`;
+}
+
 export function diag(code: string, message: string, opts: DiagOpts = {}): Diagnostic {
   const { loc = null, suggestion = null, severity = 'error', from = null, related = null } = opts;
   return { code, severity, message, loc, suggestion, fix: (from && suggestion) ? { from, to: suggestion } : null, related };
