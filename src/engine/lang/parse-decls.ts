@@ -4,14 +4,56 @@
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { ActionParser } from '#engine/lang/parse-actions.js';
 import { Tk, Pn, Kw, Ek, UseKind, THEME_PRESET, THEME_WITH, THEME_MODE, THEME_TOKENS, THEME_LIBRARY } from '#engine/shared/vocab.js';
-import type { IR, Value, Entity, FieldType, EntityConstraints, StateDef, Route, ThemeScale, CallExpr, Expr } from '#engine/shared/types.js';
+import type { IR, Value, Entity, FieldType, EntityConstraints, StateDef, Route, ThemeScale, CallExpr, Expr, ImportDef } from '#engine/shared/types.js';
 
 const mapFieldType = (raw: string): FieldType => (raw === 'text' ? 'string' : raw); // `text` is the user-facing alias for `string`
+/** Where the parameter list that opens `raw` closes. */
+function closingParen(raw: string): number {
+  let depth = 0;
+  for (let index = 0; index < raw.length; index++) {
+    if (raw[index] === Pn.ParenL) depth++;
+    else if (raw[index] === Pn.ParenR && !--depth) return index;
+  }
+  return raw.length;
+}
+
+/** `p: Product, rate?: number, n = 1`: each parameter's name, and whether it may be left out. */
+function splitParams(list: string): Array<{ name: string; optional: boolean }> {
+  const out: Array<{ name: string; optional: boolean }> = [];
+  let depth = 0, piece = '';
+  for (const char of list + ',') {
+    if ('(<[{'.includes(char)) depth++;
+    else if (')>]}'.includes(char)) depth--;
+    if (char === ',' && !depth) {
+      const match = /^\s*(?:\.\.\.)?([A-Za-z_$][\w$]*)\s*(\?)?/.exec(piece);
+      if (match) out.push({ name: match[1], optional: Boolean(match[2]) || piece.includes('=') || piece.trim().startsWith('...') });
+      piece = '';
+    } else piece += char;
+  }
+  return out;
+}
+
 // the word after `use` -> the kind of component it brings in (a table, so no string is ever cast to the enum)
 const USE_KIND = new Map<string, UseKind>(Object.values(UseKind).map((kind) => [kind, kind]));
 
 export class DeclParser extends ActionParser {
   protected readonly foreign = new Set<string>();                         // components a `use element|widget|react` brought in
+  // what a plain `use` brought in, by name: one written where an element goes (`HeldAccordion(…)`) is a component
+  protected readonly plainUses = new Map<string, { def: ImportDef; list: ImportDef[] }>();
+
+  /** `use HeldAccordion from "…"` with no kind, then `HeldAccordion(…)` where an element goes: a React component, told
+   *  by how it is used. (By its name alone it cannot be: `use Chart from "chart.js/auto"` is a class, `new Chart(…)`.)
+   *  Its name moves to an import of its own with that kind; the rest of the line stays functions. */
+  protected adoptComponent(name: string): boolean {
+    const plain = this.plainUses.get(name);
+    if (!plain) return false;
+    this.plainUses.delete(name);
+    plain.def.names = plain.def.names.filter((one) => one !== name);
+    if (!plain.def.names.length) plain.list.splice(plain.list.indexOf(plain.def), 1);
+    plain.list.push({ names: [name], from: plain.def.from, kind: UseKind.React, ...(plain.def.loc ? { loc: plain.def.loc } : {}) });
+    this.foreign.add(name);
+    return true;
+  }
 
 
 
@@ -37,6 +79,16 @@ export class DeclParser extends ActionParser {
     return true;
   }
 
+
+  // `fn finalPrice(p: Product, rate?: number): number { … }`: the lexer hands the signature and body over as one raw
+  // token (lexer.ts); what muten needs of it is the name and how it is called, the rest is TypeScript's.
+  protected parseFn(ir: IR): void {
+    const loc = this.locOf(this.next().pos);
+    const name = this.eat(Tk.Ident).v;
+    const raw = this.eat(Tk.Raw).v;
+    const params = splitParams(raw.slice(1, closingParen(raw)));
+    (ir.tsFns = ir.tsFns || {})[name] = { params: params.map((param) => param.name), required: params.filter((param) => !param.optional).length, source: `function ${name}${raw}`, loc };
+  }
 
   protected parseEntity(ir: IR): void {
     this.eat(Tk.Ident, Kw.Entity);
@@ -155,7 +207,7 @@ export class DeclParser extends ActionParser {
   }
 
 
-  // `routes { "/url" -> page [in layout] [guard [not] store.flag else "/redirect"] }`: the app root (app.muten).
+  // `routes { "/url" -> page [in layout | without layout] [guard [not] store.flag else "/redirect"] }`: the app root.
   protected parseRoutes(ir: IR): void {
     this.eat(Tk.Ident, Kw.Routes);
     this.eat(Tk.Punct, Pn.BraceL);
@@ -166,6 +218,7 @@ export class DeclParser extends ActionParser {
       this.eat(Tk.Arrow);
       const route: Route = { url, page: this.eat(Tk.Ident).v, loc: this.locOf(start.pos) };
       if (this.at(Tk.Ident, Kw.In)) { this.next(); route.layout = this.eat(Tk.Ident).v; } // `in pro`: mount inside that layout
+      if (this.at(Tk.Ident, Kw.Without)) { this.next(); route.without = this.eat(Tk.Ident).v; } // `without site`: not in the default layout
       if (this.at(Tk.Ident, Kw.Guard)) {             // `guard <expr> else "/redirect"`
         this.next();
         route.guard = this.parseExpr();              // `auth.signedIn and not auth.blocked` (it was ONE ref: a second flag needed a get)

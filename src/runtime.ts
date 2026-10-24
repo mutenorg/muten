@@ -5,14 +5,21 @@
 import type { PageModule, RouteDef, LayoutDefs, PageInstance, NodeRegistry } from '#engine/shared/types.js';
 // the way out of a block (`__leave`): its own module, re-exported for the compiled pages
 import { __leave } from './runtime-leave.js';
+import { routeStyles, warmStyles, wholeLater } from './runtime-styles.js';
+import { appHref, loadOrReload, landed, warmRoutes } from './runtime-nav.js';
+import { preloadPage } from './runtime-preload.js';
+import { startHandOver, releaseSnapshot, snapshotShowing } from './runtime-snap.js';
+import { __island } from './runtime-island.js';
+import { __when, __each, __eq, __order, __mk, __ap } from './runtime-blocks.js';
 import { __rowKey } from './runtime-key.js';
 import { __drag, __drop } from './dnd.js';
-export { __leave, __rowKey, __drag, __drop };
+import { __gesture } from './runtime-gesture.js';
+export { __leave, __rowKey, __drag, __drop, __gesture, __when, __each, __eq, __order, __mk, __ap };
 import { __device } from './runtime-device.js';
 import { __urlRead, __urlSet } from './runtime-url.js';
 import { __watchImages } from './runtime-media.js';
-import { __t, __lang, __langUse, __langInit, __langList } from './runtime-lang.js';
-export { __device, __urlRead, __urlSet, __watchImages, __t, __lang, __langUse, __langInit, __langList };
+import { __t, __lang, __langUse, __langInit, __langList, __langLikely, __missingWith } from './runtime-lang.js';
+export { __device, __urlRead, __urlSet, __watchImages, __t, __lang, __langUse, __langInit, __langList, __langLikely, __island };
 
 // The HMR handle lives on the mounted page element (`el.__muten`); the dev client reaches it + the runtime via window.
 declare global {
@@ -21,8 +28,8 @@ declare global {
 }
 
 // The reactive core (signals, derived values, effects, scopes) lives in runtime-signals.ts.
-import { signal, computed, effect, untrack, root, scope, onCleanup } from './runtime-signals.js';
-export { signal, computed, effect, untrack, root, scope, onCleanup };
+import { signal, computed, effect, untrack, root, scope, onCleanup, __at, __traceWith } from './runtime-signals.js';
+export { signal, computed, effect, untrack, root, scope, onCleanup, __at };
 
 // SURGICAL HMR: rebuild ONE node by id against the SAME live signals (ctx), keeping its CHILDREN (their DOM,
 // effects and state) and every sibling intact — muten's "address + mutate by id" made real at runtime, no VDOM,
@@ -47,54 +54,6 @@ export function patchNode(inst: PageInstance, id: string, build: (ctx: { [k: str
 export function __has<T>(a: readonly T[] | string | null | undefined, b: T): boolean {
   if (Array.isArray(a)) return a.includes(b);
   return String(a ?? '').toLowerCase().includes(String(b ?? '').toLowerCase());
-}
-
-// Shallow value equality: keyed reconciliation uses this to skip rows whose data didn't change.
-export function __eq(a: unknown, b: unknown): boolean {
-  if (a === b) return true;
-  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
-  const ka = Object.keys(a), kb = Object.keys(b);
-  if (ka.length !== kb.length) return false;
-  for (const k of ka) if (Reflect.get(a, k) !== Reflect.get(b, k)) return false;
-  return true;
-}
-
-// Keyed-list reconciliation: positions the new order with the minimum DOM moves via the
-// longest increasing subsequence (like Vue/Svelte/Solid). A 2-row swap moves 2 nodes, not O(n).
-function __lisSet(arr: number[]): Set<number> {
-  const p = arr.slice();
-  const result: number[] = [0];
-  const len = arr.length;
-  for (let i = 0; i < len; i++) {
-    const a = arr[i];
-    if (a === 0) continue; // 0 means a new row, not part of the existing increasing run
-    const j = result[result.length - 1];
-    if (arr[j] < a) { p[i] = j; result.push(i); continue; }
-    let u = 0, v = result.length - 1;
-    while (u < v) { const c = (u + v) >> 1; if (arr[result[c]] < a) u = c + 1; else v = c; }
-    if (a < arr[result[u]]) { if (u > 0) p[i] = result[u - 1]; result[u] = i; }
-  }
-  let u = result.length, v = result[u - 1];
-  while (u-- > 0) { result[u] = v; v = p[v]; }
-  return new Set(result);
-}
-
-// Reorder `next` (new row entries) under `parent` with the fewest DOM moves; `prev` is the old order.
-export function __order(parent: Node, ref0: Node, next: { nodes: ChildNode[] }[], prev: { nodes: ChildNode[] }[]): void {
-  const n = next.length;
-  if (!n) return;
-  const pi = new Map<{ nodes: ChildNode[] }, number>();
-  for (let i = 0; i < prev.length; i++) pi.set(prev[i], i + 1); // 1-based so 0 stays "new"
-  const oldIdx = new Array<number>(n);
-  let moved = false, max = 0;
-  for (let i = 0; i < n; i++) { const o = pi.get(next[i]) || 0; oldIdx[i] = o; if (o !== 0) { if (o < max) moved = true; else max = o; } }
-  const ls = moved ? __lisSet(oldIdx) : null; // compute LIS only when rows actually reordered
-  let ref: Node = ref0;
-  for (let i = n - 1; i >= 0; i--) {
-    const e = next[i];
-    if (oldIdx[i] === 0 || (ls && !ls.has(i))) { for (const node of e.nodes) parent.insertBefore(node, ref); } // new, or not in the stable subsequence: move
-    ref = e.nodes[0] || ref;
-  }
 }
 
 // Native chart: draw bar/line/area/point marks + a y-axis into an <svg> from `rows`, reading the `x`/`y`
@@ -250,11 +209,12 @@ export function injectCss(css: string): void {
   document.head.appendChild(style);
 }
 
-// Applies a page's `meta` to <head>: sets the title and upserts each meta tag (og:* -> property, else name).
+// Applies a page's `meta` to <head>: sets the title, <html lang>, and upserts each meta tag (og:* -> property, else name).
 export function applyMeta(meta: { [key: string]: string }): void {
   if (meta.title) document.title = meta.title;
   for (const name in meta) {
     if (name === 'title' || !meta[name]) continue;
+    if (name === 'lang') { if (document.documentElement) document.documentElement.lang = meta[name]; continue; }   // <html lang>, what a screen reader and a crawler read
     const attr = name.indexOf('og:') === 0 ? 'property' : 'name';
     let el = document.head.querySelector(`meta[${attr}="${name}"]`);
     if (!el) { el = document.createElement('meta'); el.setAttribute(attr, name); document.head.appendChild(el); }
@@ -270,6 +230,8 @@ export function applyMeta(meta: { [key: string]: string }): void {
 // between its routes: only the page is swapped, so the chrome (a sidebar, a tab bar) is never rebuilt on navigation.
 export function route(outlet: Element, routes: { [path: string]: RouteDef }, layouts: LayoutDefs = {}): void {
   const keys = Object.keys(routes);
+  // a page written out at build time hands over to the app (runtime-snap.ts): its deferred stylesheets go on now
+  const handOver = startHandOver();
   // pre-split each route key into segments; a ":x" segment matches any value and captures it as x.
   const patterns = keys.map((key) => ({ key, segs: key.replace(/^\//, '').split('/').filter(Boolean) }));
   // match a path to a route, capture its :params; fall back to the first route (soft 404).
@@ -373,7 +335,12 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
     // section's icon into a spinner. Only past a beat, so a page already in memory never flickers.
     const busy = setTimeout(() => { if (mounted !== path) return; document.documentElement?.setAttribute('aria-busy', 'true'); document.querySelectorAll('a[href]').forEach((a) => { if (a.getAttribute('href') === path) a.setAttribute('data-loading', ''); }); }, 120);
     const unbusy = (): void => { clearTimeout(busy); document.documentElement?.removeAttribute('aria-busy'); document.querySelectorAll?.('a[data-loading]').forEach((a) => a.removeAttribute('data-loading')); };
-    Promise.all([def.load(), layoutLoad]).then(([module, layoutModule]) => {
+    // the page's own stylesheet (css-routes.ts) is linked and loaded with its code, so it never shows unstyled
+    // every file the page needs is asked for at once (route-preload.ts); a chunk that fails to load is tried again,
+    // then the browser opens the address itself (runtime-nav.ts)
+    if (typeof __MUTEN_DEV__ !== 'undefined' && __MUTEN_DEV__) performance.mark('muten:go', { detail: path });   // dev: the profiler's start of this page
+    preloadPage(def.page);
+    Promise.all([loadOrReload(def.load, path), layoutLoad, routeStyles(def.page), handOver]).then(([module, layoutModule]) => {
       if (mounted !== path) return;            // a newer navigation superseded this load — drop the stale result
       unbusy();
       if (disposePage) disposePage();          // stop the previous page's effects to avoid stale-DOM crashes
@@ -390,19 +357,31 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
       if (!toSection((location.hash || '').slice(1), false)) scrollTo({ top: 0, left: 0, behavior: 'instant' });
       markActive(); // shell nav + page links reflect the new path (aria-current + .is-active)
       const main = target.querySelector('main'); if (main instanceof HTMLElement) main.focus({ preventScroll: true }); // a11y: move focus to content on nav (the <main> is tabIndex -1)
-    });
+      landed();
+      if (typeof __MUTEN_DEV__ !== 'undefined' && __MUTEN_DEV__) performance.mark('muten:ready', { detail: path });   // dev: mounted, its data in (the profiler)
+      wholeLater();   // after the first page: the sheet every later page finds its rules in (runtime-styles.ts)
+      document.documentElement?.setAttribute('data-muten-at', path);   // which route is mounted (prerender waits for it)
+      releaseSnapshot();
+      // only a page that did not ARRIVE is the browser's (it is loading the address already): a page that arrived and
+      // threw while mounting (a Custom, a function) used to be swallowed here too, half drawn and silent everywhere
+    }, () => { unbusy(); if (mounted === path) mounted = null; });
   };
-  // intercept internal link clicks for client-side navigation (external/new-tab/downloads pass through)
+  // a plain click on an internal link navigates in the app; a modified or middle click is the browser's (runtime-nav.ts)
   addEventListener('click', (e: Event) => {
-    const t = e.target;
-    if (!(t instanceof Element)) return;
-    const a = t.closest('a');
-    if (!a) return;
-    const href = a.getAttribute('href');
-    if (!href || href[0] === '#' || a.getAttribute('target') || a.hasAttribute('download') || /^[a-z]+:|^\/\//i.test(href)) return;
+    const href = e instanceof MouseEvent ? appHref(e) : null;
+    if (!href || snapshotShowing()) return;   // while a written-out copy is up, the browser opens the written-out page
     e.preventDefault();
     go(href);
   });
+  // the route a reader is about to open starts loading before the click: its code, layout and stylesheet (when, is
+  // muten.config's `routes { preload }`: runtime-nav.ts warmRoutes)
+  warmRoutes((path) => {
+    const { def } = matchRoute(path);
+    preloadPage(def.page);
+    def.load().catch(() => {});
+    if (def.layout && layouts[def.layout]) layouts[def.layout]().catch(() => {});
+    warmStyles(def.page);
+  }, keys);
   // Back/forward re-renders only when the PATH changed. A step that only moves the query or the hash (a page keeping
   // its open tab or section in `?s=…`) stays on the same mounted page: re-mounting it would re-run every query of
   // the page for a change the page itself already reflects (it listens to popstate for its own state).
@@ -419,4 +398,4 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
 declare const __MUTEN_DEV__: boolean;
 // `typeof window` FIRST so an unbundled consumer (a Node import of runtime.js, where __MUTEN_DEV__ is undefined)
 // short-circuits before touching it — no ReferenceError. In a browser bundle the `define` folds `… && false` → DCE.
-if (typeof window !== 'undefined' && __MUTEN_DEV__) window.__muten_rt = { patchNode, signal, computed, effect, root, onCleanup, __device, __urlRead, __urlSet, __watchImages, __t, __lang, __langUse, __langInit, __langList, __eq, __rowKey, __order, __leave, __has, __id, __chart, __arc, __drag, __drop, __clone, __bind };
+if (typeof window !== 'undefined' && __MUTEN_DEV__) window.__muten_rt = { __traceWith, __missingWith, patchNode, signal, computed, effect, root, onCleanup, __device, __urlRead, __urlSet, __watchImages, __t, __lang, __langUse, __langInit, __langList, __eq, __rowKey, __order, __leave, __has, __id, __chart, __arc, __drag, __drop, __clone, __bind };

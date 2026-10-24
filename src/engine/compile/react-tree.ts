@@ -5,8 +5,9 @@
 // The outermost one is an island (its own React root, rendered again when anything it reads changes, unmounted with
 // the page). Inside it: a React component is an element, a plain `Text` is its text, `each` / `when` are a map and a
 // condition, and any other muten node is built by muten as always and mounted where it sits (a slot), still reactive.
-import { Nt, UseKind } from '#engine/shared/vocab.js';
+import { Fmt, Nt, UseKind } from '#engine/shared/vocab.js';
 import type { ArgValue, Doc, Emitter, ImportDef, NodeProps, Scope, StringPropValue, ThemeKit } from '#engine/shared/types.js';
+import { wakeArgs } from '#engine/compile/wake.js';
 
 /** What every page with React gets once: the component a dotted name points at, and the slot a muten node sits in. */
 export const REACT_HELPERS = `function __react_pick(ns, head, rest) {
@@ -16,6 +17,18 @@ export const REACT_HELPERS = `function __react_pick(ns, head, rest) {
     return found;
   }
   function __MutenSlot(props) { return __react_h('span', { style: { display: 'contents' }, ref: (host) => { if (host && props.node.parentNode !== host) host.appendChild(props.node); } }); }`;
+
+/** A page module's React, loaded when its first island wakes (runtime-island.ts): React, ReactDOM and every `use react`
+ *  library, in one promise kept by the module. Until then the names the island code reads are unset, and nothing reads
+ *  them: an island renders only once this has resolved. React and ReactDOM are CommonJS: imported on demand, their
+ *  functions sit on the module's `default` (a static import bridged that by itself). */
+export function reactLoader(imports: ImportDef[]): string {
+  const libraries = imports.filter((def) => def.kind === UseKind.React && !def.script);
+  const names = libraries.map((def) => `__react_ns_${def.names[0]}`);
+  const loads = ["import('react')", "import('react-dom/client')", ...libraries.map((def) => `import(${JSON.stringify(def.from)})`)];
+  return `let __react_h, __react_root${names.map((name) => `, ${name}`).join('')}, __react_ready = null;
+const __react_load = () => __react_ready || (__react_ready = Promise.all([${loads.join(', ')}]).then(([__r, __rd${names.map((_, index) => `, __l${index}`).join('')}]) => { __react_h = (__r.createElement ? __r : __r.default).createElement; __react_root = (__rd.createRoot ? __rd : __rd.default).createRoot;${names.map((name, index) => ` ${name} = __l${index};`).join('')} }));`;
+}
 
 /** The `use react` line a component name (or its namespace, `Dialog` of `Dialog.Root`) comes from. */
 export function reactImport(imports: ImportDef[] | undefined, name: string | undefined): ImportDef | undefined {
@@ -108,5 +121,14 @@ export function reactIsland(em: Emitter, id: string, def: ImportDef, parentVar: 
     em.push(`const __provided_${id}_${index} = ${propsJs(em, { inputs: provider.args }, em.scope, '')};`);
     tree = `__react_h(__react_pick(__react_ns_${from.names[0]}, ${JSON.stringify(provider.component)}, []), __provided_${id}_${index}, ${tree})`;
   }
-  em.push(`{ const __root = __react_root(el_${id}); effect(() => __root.render(${tree})); onCleanup(() => __root.unmount()); }`);
+  const render = `const __root = __react_root(el_${id}); effect(() => __root.render(${tree})); onCleanup(() => __root.unmount());`;
+  if (!lazyReact(em)) { em.push(`{ ${render} }`); return; }
+  // it wakes when its place nears the screen (runtime-island.ts): React and the library load then, and the island renders
+  // in a scope of its own, let go with the page; a page left before it woke never loads them
+  em.push(`{ let __off = null, __gone = false; const __give = __island(el_${id}, () => __react_load().then(() => { if (!__gone) __off = root(() => { ${render} }).dispose; })${wakeArgs(em.nodes[id].props || {})}); onCleanup(() => { __gone = true; __give(); if (__off) __off(); }); }`);
+}
+
+/** Whether this compile's islands wake later (a page module: what `muten dev` and `muten bundle` load). */
+export function lazyReact(em: { opts: { format?: string } }): boolean {
+  return em.opts.format === Fmt.Module;
 }

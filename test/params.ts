@@ -15,7 +15,7 @@ ok('route :param segments parsed', app.routes[1].url === '/shop/:cat/item/:id', 
 ok('static root route intact', app.routes[0].url === '/', app.routes[0].url);
 
 // 2. the page declares its params
-const page = parse('screen item\nparam cat\nparam id\nstate { qty = 1 : number }\nPage {\n  Title "{cat} / {id}"\n  Text "qty {qty}"\n}');
+const page = parse('screen item\nparam cat\nparam id\nstate { qty = 1 : number }\naction more mutates qty { qty.set(qty + 1) }\nPage {\n  Title "{cat} / {id}"\n  Text "qty {qty}"\n  Button "+" -> more\n}');
 ok('page declares both params', JSON.stringify(page.params) === '["cat","id"]', JSON.stringify(page.params));
 
 // 3. params survive flatten and validate as known refs (no false "unknown ref")

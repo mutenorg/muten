@@ -12,9 +12,10 @@ const PLACEHOLDER = /\{(\d+)\}/g;
 const PLURAL = ' | ';
 
 /** A key as its literal pieces and the parts known only at run time (null): "a.b" → ["a.b"]; "post.{id}.fee" → ["post.", null, ".fee"]. */
-export function keyParts(key: Expr): Array<string | null> {
+export function keyParts(key: Expr, known: (name: string) => string | number | undefined = () => undefined): Array<string | null> {
   if (key.kind === Ek.Lit) return [typeof key.value === 'string' ? key.value : null];
-  if (key.kind === Ek.Bin && key.op === BOp.Add) return [...keyParts(key.left), ...keyParts(key.right)];
+  if (key.kind === Ek.Bin && key.op === BOp.Add) return [...keyParts(key.left, known), ...keyParts(key.right, known)];
+  if (key.kind === Ek.Ref) { const value = known(key.name); return [value === undefined ? null : String(value)]; }   // a name whose value the compiler knows
   return [null];
 }
 

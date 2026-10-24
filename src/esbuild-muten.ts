@@ -10,10 +10,9 @@ import { pluginNames } from '#engine/project/plugins.js';
 import * as esbuild from 'esbuild';
 import { readFileSync, existsSync, mkdirSync, writeFileSync, cpSync, rmSync, readdirSync, renameSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join, relative, basename } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { load, loadAllParts, findStores, loadPluginComponents } from '#engine/project/load.js';
@@ -22,7 +21,10 @@ import { guardJs } from '#engine/compile/guard.js';
 import { apiWithEnv, envDefines } from '#engine/project/env.js';
 import { themeLibrary, withLibraryCss, themeRoot, withThemeRoot } from '#engine/project/theme-library.js';
 import { inlineCssImports } from '#engine/project/css-imports.js';
-import { pruneCss, filesText, PUBLIC_CODE } from './css-prune.js';
+import { filesText, PUBLIC_CODE } from './css-prune.js';
+import { writeStyles, routeStylesTag } from './css-routes.js';
+import { routePreloadTags, routeFiles } from './route-preload.js';
+import { prerender } from './prerender.js';
 import { customSource } from './use-bundle.js';
 import { readMutenConfig, configThemeAdapter, configClasses } from '#engine/project/config.js';
 import { apiClientNames } from '#engine/project/routes.js';
@@ -30,17 +32,27 @@ import { mapApp } from '#engine/project/map.js';
 import { validate } from '#engine/ir/validate.js';
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { compileModule, compileStore } from '#engine/compile/compile.js';
+import { dataModule } from '#engine/compile/emit.js';
 import { emitTheme } from '#engine/style/tokens.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { makeIconResolver } from './icons.js';
 import { cspFrom, withCsp, writeSecurityHeaders, scriptOrigins, withScriptOrigins } from './dev-security.js';
-import { writeAppMap } from './app-map-file.js';
+import { writeAppMap, writeBundleRecord } from './app-map-file.js';
 import { LAYOUT_PREFIX, layoutDoc, layoutLoaders } from './layout-modules.js';
-import { Nt } from '#engine/shared/vocab.js';
+import { TEXTS_LANG, textsModule, textsLanguageModule } from './texts-modules.js';
+import { routeLayout } from '#engine/project/layouts.js';
+import { Nt, HOST_EXTS } from '#engine/shared/vocab.js';
 import type { IR, PartDef, ThemeAdapter, Doc, Translations, ThemeRaw, ThemeKit } from '#engine/shared/types.js';
 import { readThemeKit } from '#engine/project/theme-values.js';
 import { readTranslations, langFiles } from '#engine/project/lang-files.js';
-import { nativeWebOptions } from '#engine/project/native-web.js';
+import { configMetaTags } from '#engine/project/page-metas.js';
+import { recordIcons, shareIcons } from './icon-share.js';
+import { libraryOptions } from '#engine/project/bundle-options.js';
+import { missingComponents } from '#engine/project/custom-check.js';
+import { onPage, onPageDiagnostic } from '#engine/ir/places.js';
+import { overBudget, readBudget } from './budget.js';
+import { shipReport } from './ship-report.js';
+import { pwaHead, writePwa } from './pwa.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 // the browser runtime (the virtual:muten/runtime module), read on every build: read once, a rebuilt engine stayed invisible
@@ -48,6 +60,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const runtimeSource = (): string => readFileSync(join(here, 'runtime.js'), 'utf8');
 
 const RID = 'virtual:muten/runtime';
+const DATA = 'virtual:muten/data';
 // The app's texts for code outside a page (a `use` function, a Custom): `import { t, texts } from 'muten:texts'` gives the
 // same t() a page has, over the same src/lang files, with the language passed in: t(lang, key, ...values).
 const TEXTS_IMPORT = 'muten:texts';
@@ -55,6 +68,8 @@ const TEXTS = 'virtual:muten/texts';
 const SHELL = 'virtual:muten/shell';
 const STORE_PREFIX = 'virtual:muten/store/';
 const VNS = 'muten-virtual';
+const DEVTOOLS_PLUGIN = 'devtools';
+const USE_SHEET = /^[ \t]*use[ \t]+"([^"]+)"/gm;
 
 // The whole-app model the compile needs, scanned once (the same facts the Vite plugin's loadProject gathers).
 export interface Model {
@@ -81,7 +96,9 @@ export async function loadModel(root: string): Promise<Model> {
   // Speak like the oracle: without src/app.muten there is no entry, and esbuild would otherwise fail with a cryptic
   // "Could not resolve …/src/app.muten". Give the SAME clear message `muten check` does (bundle + dev share this loader).
   if (!existsSync(appFile)) throw new Error(`No app.muten at src/app.muten — every muten app needs a root. Create src/app.muten with:\n  routes {\n    "/" -> home\n  }`);
-  const appIr = parse(readFileSync(appFile, 'utf8'));
+  let appIr: ReturnType<typeof parse>;
+  try { appIr = parse(readFileSync(appFile, 'utf8')); }
+  catch (e) { if (e instanceof ParseError && !e.file) e.file = appFile; throw e; }   // a mistake in it points at app.muten
   if (appIr.api) appIr.api = apiWithEnv(appIr.api, root);   // `base: "{env.api}"` -> the active environment (env.ts)
   const themeFile = join(root, 'theme.muten');
   let themeRaw: ReturnType<typeof parse>['theme'] = {};
@@ -109,18 +126,23 @@ function buildBoot(model: Model, root: string, dev: boolean): string {
     if (seen.has(path)) throw new Error(`[muten] duplicate route ${path} in app.muten`);
     seen.add(path);
     const imp = `() => import(${JSON.stringify('/src/pages/' + r.page + '/' + r.page + '.muten')})`;
-    const inLayout = r.layout ? `, layout: ${JSON.stringify(r.layout)}` : '';
-    if (r.guard) return `  ${path}: { load: ${imp}, guard: () => ${guardJs(r.guard, guardDomains)}, redirect: ${JSON.stringify(r.redirect)}${inLayout} },`;
-    return `  ${path}: { load: ${imp}${inLayout} },`;
+    const layout = routeLayout(appIr, r);   // `in x`, else the default layout unless `without` it (layouts.ts)
+    const inLayout = layout ? `, layout: ${JSON.stringify(layout)}` : '';
+    if (r.guard) return `  ${path}: { page: ${JSON.stringify(r.page)}, load: ${imp}, guard: () => ${guardJs(r.guard, guardDomains)}, redirect: ${JSON.stringify(r.redirect)}${inLayout} },`;
+    return `  ${path}: { page: ${JSON.stringify(r.page)}, load: ${imp}${inLayout} },`;
   }).join('\n');
   const guardImports = [...guardDomains].map((d) => `import * as __store_${d} from '${STORE_PREFIX}${d}';`).join('\n');
   // dev-only: auto-mount any enabled plugin that declares a `muten.devBoot` export (e.g. @muten/devtools). The
   // import hoists; the call runs after the app mounts. Never emitted by `muten bundle` -> zero production cost.
-  const devPlugins = dev ? devBootPlugins(root) : [];
+  // the devtools ship with muten: on in dev unless `dev { devtools false }`; the old @muten/devtools plugin steps aside
+  const devConfig = readMutenConfig(root).dev;
+  const devtools = dev && !(devConfig && typeof devConfig === 'object' && !Array.isArray(devConfig) && devConfig.devtools === false);
+  const devPlugins = dev ? devBootPlugins(root).filter((p) => !(devtools && p.name === DEVTOOLS_PLUGIN)) : [];
   const bootCode = `import * as __shell from '${SHELL}';
 import { route, injectCss } from '${RID}';
 ${guardImports}
 ${devPlugins.map((p) => `import { ${p.fn} as __devboot_${p.name} } from '@muten/${p.name}';`).join('\n')}
+${devtools ? `import { mountDevtools as __devtools } from ${JSON.stringify(join(here, 'devtools', 'index.js'))};` : ''}
 const routes = {
 ${routes}
 };
@@ -131,7 +153,8 @@ if (root) {
   const outlet = __shell.mount(root);
   route(outlet, routes, layouts);
 }
-${devPlugins.map((p) => `try { __devboot_${p.name}(); } catch (__e) { console.warn('[muten] dev plugin @muten/${p.name} failed to mount', __e); }`).join('\n')}`;
+${devPlugins.map((p) => `try { __devboot_${p.name}(); } catch (__e) { console.warn('[muten] dev plugin @muten/${p.name} failed to mount', __e); }`).join('\n')}
+${devtools ? `try { __devtools(); } catch (__e) { console.warn('[muten] the devtools failed to mount', __e); }` : ''}`;
   return bootCode;
 }
 
@@ -163,7 +186,7 @@ async function compilePage(root: string, path: string, model: Model, dev = false
   try { loaded = await load(path, model.parts); }
   catch (e) { if (e instanceof ParseError) return { errors: [muError(path, e.message, e.loc)] }; throw e; } // syntax error -> located message
   const storeMembers = model.store.storeMembers;
-  const { diagnostics } = validate(loaded.doc, {   // `ok` is derived below: only ERROR severity blocks the build
+  const validated = validate(loaded.doc, {   // `ok` is derived below: only ERROR severity blocks the build
     parts: loaded.partNames, stores: model.store.stores, storeMembers, storeFns: model.store.storeFns, storeActions: model.store.storeActions,
     storeEntities: model.store.storeEntities, storeSelfMut: model.store.storeSelfMut,
     iconExists: model.iconExists, apiClients: apiClientNames(model.appIr?.api || {}), translations: model.translations, themeValues: model.themeValues,
@@ -171,6 +194,7 @@ async function compilePage(root: string, path: string, model: Model, dev = false
     // `src/pages/<name>/<name>.muten` -> this page's own url, so a link back to itself is caught in dev too
     selfRoute: (model.appIr?.routes || []).find((r) => r.page === path.replace(/\\/g, '/').split('/').slice(-2)[0])?.url,
   });
+  const diagnostics = [...validated.diagnostics, ...missingComponents(root, loaded.doc).map(onPageDiagnostic)];   // a Custom with nothing to mount stops here, at its line
   // Only ERROR severity stops the build. Split explicitly here so a warning can never masquerade as a compile error
   // again — `validate` used to report `ok: D.length === 0`, so the first warning it ever emitted broke every page.
   // Warnings are carried on `result.warnings` for a caller that wants them; the CLI runs esbuild at `logLevel: 'silent'`
@@ -180,14 +204,15 @@ async function compilePage(root: string, path: string, model: Model, dev = false
   if (errs.length) return { errors: errs.map((d) => muError(path, d.message + (d.suggestion ? ` (did you mean \`${d.suggestion}\`?)` : ''), d.loc)), warnings: warns };
   const { components, watchFiles } = customComponents(root, loaded.doc);
   const sources = model.mocksOnly ? {} : { ...(model.appIr?.sources || {}), ...loaded.sources };
+  const icons = recordIcons(model.iconResolver);   // icon-share.ts: each icon this page shows, written once in it
   return {
     warnings: warns,   // non-blocking findings (a dead `self-link`) travel with the result; they never fail the build
     watchFiles,        // so an edit to a Custom .js re-runs THIS page's onLoad (else esbuild caches the old inlined copy)
-    contents: compileModule(loaded.doc, loaded.data, loaded.styles.css, components, sources, {
+    contents: shareIcons(compileModule(loaded.doc, loaded.data, loaded.styles.css, components, sources, {
       stores: model.store.storesMeta, storeEntities: model.store.storeEntities, api: model.appIr?.api || {},
-      iconResolver: model.iconResolver, classes: model.classes, translations: model.translations, themeValues: model.themeValues, themeKit: model.themeKit, dev, // dev: emit the HMR node registry + el.__muten handle
+      iconResolver: icons.resolve, classes: model.classes, translations: model.translations, themeValues: model.themeValues, themeKit: model.themeKit, dev, // dev: emit the HMR node registry + el.__muten handle
       sourceMap: { file: path, source: readFileSync(path, 'utf8') }, // runtime errors -> the .muten line, not the compiled JS
-    }),
+    }), icons.used),
   };
 }
 
@@ -231,14 +256,24 @@ let lastGoodCss = '';
 export function readIndexHtml(root: string, model: Model): string {
   const file = join(root, 'index.html');
   if (!existsSync(file)) throw new Error('index.html is missing at the app root. It is the page the app mounts in: <!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="app"></div><script type="module" src="/src/app.muten"></script></body></html>');
-  const html = readFileSync(file, 'utf8');
+  const metas = configMetaTags(root);   // `i18n { detect false }`, `routes { preload }`: the runtime reads them (page-metas.ts)
+  const html = metas ? readFileSync(file, 'utf8').replace(/<head([^>]*)>/i, `<head$1>${metas}`) : readFileSync(file, 'utf8');
   const lib = themeLibrary(root, model.themeRaw);
   return lib && model.themeRaw ? withThemeRoot(html, themeRoot(lib, model.themeRaw)) : html;
 }
 
+/** The stylesheets the app's .muten files bring with `use "…"`, each once. */
+function usedStylesheets(root: string): string[] {
+  const out = new Set<string>();
+  const walk = (dir: string): void => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const full = join(dir, entry.name); if (entry.isDirectory()) { if (entry.name !== 'node_modules') walk(full); } else if (entry.name.endsWith('.muten')) for (const m of readFileSync(full, 'utf8').matchAll(USE_SHEET)) out.add(m[1]); } };
+  if (existsSync(join(root, 'src'))) walk(join(root, 'src'));
+  return [...out];
+}
+
 export async function buildCss(root: string, model: Model): Promise<string> {
   const lib = themeLibrary(root, model.themeRaw);   // `theme shadcn { … }`: the library's stylesheets come in with it
-  if (!model.stylesHref && !lib) return '';
+  const sheets = usedStylesheets(root);   // `use "swiper/css"` in any page or part: imported first, then the app's own
+  if (!model.stylesHref && !lib && !sheets.length) return '';
   const file = model.stylesHref ? join(root, model.stylesHref.replace(/^\//, '')) : '';
   let css = file ? readFileSync(file, 'utf8') : '';
   if (lib && model.themeRaw) css = withLibraryCss(css, lib, model.themeRaw);
@@ -248,6 +283,7 @@ export async function buildCss(root: string, model: Model): Promise<string> {
     const sass: { compileString(src: string, opts: { loadPaths: string[] }): { css: string } } = mod.default ?? mod;
     css = sass.compileString(css, { loadPaths: [dirname(file)] }).css;
   }
+  if (sheets.length) css = sheets.map((sheet) => `@import ${JSON.stringify(sheet)};`).join('\n') + '\n' + css;
   const block = emitTheme(model.themeRaw, model.themeAdapter, lib?.dark);
   if (block) css += '\n\n/* muten: generated from theme.muten */\n' + block;
   // Tailwind whole (`@import "tailwindcss"`) or in pieces (`@import "tailwindcss/theme.css"` + `…/utilities.css`, the
@@ -269,8 +305,8 @@ export function customComponents(root: string, doc: Doc): { components: { [name:
   const pluginComponents = loadPluginComponents(root); // Custom host .js shipped by imported plugins (Chart, …)
   for (const name of customNames) {
     if (typeof name !== 'string' || !name) continue;
-    const cpath = join(root, 'src', 'components', name + '.js');
-    const file = existsSync(cpath) ? cpath : pluginComponents[name];   // local/ejected wins, else the plugin's
+    const own = HOST_EXTS.map((ext) => join(root, 'src', 'components', name + ext)).find((path) => existsSync(path));
+    const file = own ?? pluginComponents[name];   // local/ejected wins (Name.ts, then Name.js), else the plugin's
     if (!file) continue;
     components[name] = customSource(file); watchFiles.push(file);
   }
@@ -278,14 +314,10 @@ export function customComponents(root: string, doc: Doc): { components: { [name:
 }
 
 // The esbuild plugin: virtual modules (runtime/shell/store), the `~/` and `/src/` path roots, and the
-/** The module behind `muten:texts`: every language's texts and a t() over them, the runtime's own (__t). */
-function textsModule(model: Model): string {
-  return `import { __t } from '${RID}';\nexport const texts = ${JSON.stringify(model.translations || {})};\n`
-    + `export function t(language, key, ...values) { return __t(language, texts, key, ...values); }\n`;
-}
-
 // .muten -> JS loader (with the oracle). CSS is handled separately (buildCss), not here.
 export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.Plugin {
+  const appFile = join(root, 'src', 'app.muten');
+  const missingIn = (doc: Doc): esbuild.PartialMessage[] => missingComponents(root, doc).map((d) => muError(appFile, d.message, onPage(d.loc)));
   return {
     name: 'muten',
     setup(build) {
@@ -298,16 +330,22 @@ export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.P
 
       build.onLoad({ filter: /.*/, namespace: VNS }, (args) => {
         if (args.path === RID) return { contents: runtimeSource(), loader: 'js', resolveDir: here };
-        if (args.path === TEXTS) return { contents: textsModule(model), loader: 'js', resolveDir: here, watchFiles: Object.values(langFiles(root)) };
-        if (args.path === SHELL) {
+        if (args.path === DATA) return { contents: dataModule(), loader: 'js', resolveDir: here };   // the data layer, once per app
+        if (args.path === TEXTS) return { contents: textsModule(model.translations), loader: 'js', resolveDir: here, watchFiles: Object.values(langFiles(root)) };
+        if (args.path.startsWith(TEXTS_LANG)) return { contents: textsLanguageModule(model.translations, args.path.slice(TEXTS_LANG.length)), loader: 'js', resolveDir: here, watchFiles: Object.values(langFiles(root)) };
+        if (args.path === SHELL) {   // the shell and each layout: a Custom with nothing to mount stops the build at its line in app.muten
           const tree = model.appIr?.shell || { type: Nt.Shell, props: {}, children: [{ type: Nt.Slot, props: {} }] };
           const doc = toDoc({ ...(model.appIr || {}), screen: 'shell', entities: {}, state: {}, actions: {}, tree });
+          const unmounted = missingIn(doc);
+          if (unmounted.length) return { errors: unmounted };
           const { components, watchFiles } = customComponents(root, doc);
           return { contents: compileModule(doc, {}, '', components, {}, { stores: model.store.storesMeta, storeEntities: model.store.storeEntities, iconResolver: model.iconResolver, classes: model.classes, translations: model.translations, themeValues: model.themeValues, themeKit: model.themeKit }), loader: 'js', resolveDir: join(root, 'src'), watchFiles };
         }
         if (args.path.startsWith(LAYOUT_PREFIX)) {
           const built = layoutDoc(model.appIr, model.parts, args.path.slice(LAYOUT_PREFIX.length));
           if (!built) return { errors: [{ text: `unknown layout: ${args.path.slice(LAYOUT_PREFIX.length)}` }] };
+          const unmounted = missingIn(built.doc);
+          if (unmounted.length) return { errors: unmounted };
           const { components, watchFiles } = customComponents(root, built.doc);
           return { contents: compileModule(built.doc, {}, built.css, components, {}, { stores: model.store.storesMeta, storeEntities: model.store.storeEntities, api: model.appIr?.api || {}, iconResolver: model.iconResolver, classes: model.classes, translations: model.translations, themeValues: model.themeValues, themeKit: model.themeKit, dev }), loader: 'js', resolveDir: join(root, 'src'), watchFiles: [...watchFiles, join(root, 'src', 'app.muten')] };
         }
@@ -334,7 +372,7 @@ export function mutenEsbuild(root: string, model: Model, dev = false): esbuild.P
 // pointing at the hashed outputs and copy public/. NOTHING ABOUT THE SOURCE SHIPS unless asked: source maps hand anyone
 // the app's whole source, so they come only with `--sourcemap`; and the app graph (app.map.json) is for the AI on this
 // machine, so it is written to .muten/, never into the folder that gets deployed.
-export interface BundleOptions { sourcemap?: boolean; mocksOnly?: boolean; quiet?: boolean }
+export interface BundleOptions { sourcemap?: boolean; mocksOnly?: boolean; quiet?: boolean; prerender?: boolean }   // prerender: on whatever muten.config says
 export async function bundleEsbuild(root: string, target = join(root, 'dist'), options: BundleOptions = {}): Promise<{ outDir: string }> {
   const model = { ...await loadModel(root), mocksOnly: options.mocksOnly };
   // BUILT ASIDE, SWAPPED IN AT THE END. Emptying dist/ first left a window where a page loading from it got the new
@@ -360,7 +398,7 @@ async function bundleInto(root: string, model: Model, outDir: string, options: B
   const say = options.quiet ? (): void => {} : (line: string): void => console.log(line);   // `muten test` builds without the report
 
   let result;
-  const nativeWeb = nativeWebOptions(root);   // React Native libraries on the web, when react-native-web is installed
+  const nativeWeb = libraryOptions(root);   // React Native libraries on the web, and Preact for React when the config says so (bundle-options.ts)
   try {
     result = await esbuild.build({
       entryPoints: { boot: join(root, 'src', 'app.muten') },
@@ -383,28 +421,34 @@ async function bundleInto(root: string, model: Model, outDir: string, options: B
     if (meta.entryPoint && /(?:^|\/)src\/app\.muten$/.test(meta.entryPoint.replace(/\\/g, '/')) && file.endsWith('.js')) jsHref = '/' + relative(outDir, file).replace(/\\/g, '/');
   }
 
-  // CSS is built outside esbuild (sass + theme + Tailwind), then minified + content-hashed for cache-busting.
+  // CSS is built outside esbuild (sass + theme + Tailwind), then minified, pruned to the rules the code can match
+  // (css-prune.ts) and split into a common sheet plus one per route (css-routes.ts), each content-hashed
   let cssHref = '';
+  let routeTag = '';
+  let routeSheets: { [page: string]: string } = {};
   const rawCss = await buildCss(root, model);
   if (rawCss) {
-    const minified = (await esbuild.transform(rawCss, { loader: 'css', minify: true })).code;
-    // the rules no shipped page, part, script or HTML can ever match go before the hash (css-prune.ts); `css { prune
-    // false }` in muten.config keeps the sheet whole
-    const keepAll = readMutenConfig(root).css?.prune === false;
-    const { css, removed } = keepAll ? { css: minified, removed: 0 } : pruneCss(minified, [readIndexHtml(root, model), filesText(join(outDir, 'assets'), /\.js$/), filesText(join(root, 'public'), PUBLIC_CODE)].join('\n'));
-    if (removed > 0) say(`  styles: ${(removed / 1024).toFixed(0)} KB of rules no page can match left out (css { prune false } keeps them)`);
-    const hash = createHash('sha256').update(css).digest('hex').slice(0, 8).toUpperCase();
-    cssHref = `/assets/boot-${hash}.css`;
-    writeFileSync(join(outDir, 'assets', `boot-${hash}.css`), css);
+    const cssConfig = readMutenConfig(root).css;
+    const sheets = writeStyles({ outDir, css: (await esbuild.transform(rawCss, { loader: 'css', minify: true })).code, metafile: result.metafile, html: readIndexHtml(root, model), publicCode: filesText(join(root, 'public'), PUBLIC_CODE), perRoute: cssConfig?.routes !== false, prune: cssConfig?.prune !== false, say });
+    cssHref = sheets.href;
+    routeSheets = sheets.routes;
+    routeTag = routeStylesTag(sheets.routes);
   }
 
   // index.html: swap the /src/app.muten script for the bundled boot, inject the stylesheet link
   let html = readIndexHtml(root, model);
   html = html.replace(/<script\s+type="module"\s+src="\/src\/app\.muten"\s*><\/script>/, `<script type="module" src="${jsHref}"></script>`);
-  if (cssHref) html = html.replace('</head>', () => `  <link rel="stylesheet" href="${cssHref}">\n</head>`);
+  if (cssHref) html = html.replace('</head>', () => `  <link rel="stylesheet" href="${cssHref}">${routeTag ? `\n  ${routeTag}` : ''}\n</head>`);
+  // what the boot imports, preloaded, and each page's files for the router to ask for at once (route-preload.ts)
+  const files = routeFiles(result.metafile, outDir);
+  const preloads = routePreloadTags(files);
+  if (preloads) html = html.replace('</head>', () => `  ${preloads}\n</head>`);
+  const pwa = pwaHead(root);   // muten.config `pwa { }` (pwa.ts)
+  if (pwa) html = html.replace('</head>', () => `  ${pwa}\n</head>`);
   // the page's Content-Security-Policy (dev-security.ts): an injected script does not run. muten.config `security { csp }`
   const policy = cspFrom(readMutenConfig(root).security);
-  if (policy) html = withCsp(html, withScriptOrigins(policy, scriptOrigins(root)));   // with the libraries it loads by <script>
+  const fullPolicy = policy ? withScriptOrigins(policy, scriptOrigins(root)) : null;
+  if (fullPolicy) html = withCsp(html, fullPolicy);   // with the libraries it loads by <script>
   else if (policy === null && !/http-equiv=["']content-security-policy["']/i.test(html)) say('  \x1b[33m!\x1b[0m no Content-Security-Policy: add `security { csp "default" }` to muten.config (or your own policy)');
   // copy public/ (favicons, images, an app's own plain modules and their CSS) to the dist root BEFORE index.html:
   // index.html is written last, so its presence means the build is whole (a server answering a window mid-build
@@ -412,34 +456,28 @@ async function bundleInto(root: string, model: Model, outDir: string, options: B
   const pub = join(root, 'public');
   if (existsSync(pub)) for (const e of readdirSync(pub)) cpSync(join(pub, e), join(outDir, e), { recursive: true });
   writeSecurityHeaders(root, outDir);
+  writePwa(root, outDir, result.metafile, [cssHref, ...Object.entries(routeSheets).filter(([page]) => page !== '*').map(([, href]) => href)].filter(Boolean), say);
   writeFileSync(join(outDir, 'index.html'), html);
+
+  // every page drawn once and written out as its own HTML, painted before the app runs (prerender.ts)
+  const prerenderConfig = readMutenConfig(root).prerender;
+  if (options.prerender ?? prerenderConfig !== undefined) {
+    await prerender({ root, outDir, routes: model.appIr?.routes || [], config: prerenderConfig || {}, files, sheets: { href: cssHref, routes: routeSheets }, policy: fullPolicy, languages: Object.keys(model.translations || {}), say });
+  }
 
   // app.map.json: the app graph (routes/stores/parts), the root an AI reads to know the whole app. It names every route,
   // guard, store and state field, so it stays on this machine (.muten/), out of the deployed folder.
   writeAppMap(root, await mapApp(root));
+  writeBundleRecord(root, result.metafile);
 
-  // Per-route ship report: what each route actually ships (gzipped), so "minimal by construction" is visible
-  // and accidental bloat is caught. Routes first (their own chunk), then shared chunks (boot/runtime/commons).
-  const fmt = (n: number): string => `${(n / 1024).toFixed(1)} KB`.padStart(9);
-  const sizeOf = (file: string): { raw: number; gz: number } => { const buf = readFileSync(file); return { raw: buf.length, gz: gzipSync(buf).length }; };
-  const row = (label: string, raw: number, gz: number): void => say('  ' + label.padEnd(26) + fmt(raw) + '  ' + fmt(gz).trim() + ' gz');
-  const claimed = new Set<string>();
-  let totalRaw = 0, totalGz = 0;
+  // what each route ships and who loads every other file (ship-report.ts), so accidental bloat is seen
   say(`\n  bundled → ${relative(root, outDir).replace(/\.building-\d+$/, '')}/\n`);
-  for (const r of model.appIr?.routes ?? []) { // a route's own chunk: dist/assets/<page>-<hash>.js
-    const file = Object.keys(result.metafile.outputs).find((o) => basename(o).startsWith(r.page + '-') && o.endsWith('.js') && !claimed.has(o));
-    if (!file) continue;
-    claimed.add(file); const s = sizeOf(file); totalRaw += s.raw; totalGz += s.gz;
-    row('/' + r.url.replace(/^\//, ''), s.raw, s.gz);
-  }
-  for (const o of Object.keys(result.metafile.outputs)) { // boot + shared/common chunks
-    if (claimed.has(o) || !o.endsWith('.js')) continue;
-    claimed.add(o); const s = sizeOf(o); totalRaw += s.raw; totalGz += s.gz;
-    row('· ' + basename(o).replace(/-[A-Z0-9]+\.js$/, '') + ' (shared)', s.raw, s.gz);
-  }
-  if (cssHref) { const s = sizeOf(join(outDir, cssHref.replace(/^\//, ''))); totalRaw += s.raw; totalGz += s.gz; row('· styles.css', s.raw, s.gz); }
-  say('  ' + '─'.repeat(46));
-  row('total', totalRaw, totalGz);
+  const routeList = (model.appIr?.routes ?? []).map((r) => ({ url: r.url, page: r.page }));
+  const cssFile = cssHref ? join(outDir, cssHref.replace(/^\//, '')) : null;
+  shipReport(result.metafile, routeList, cssFile, say);
+  // `budget { js "150kb" css "50kb" }`: a route that ships more stops the build, here, with what weighs most (budget.ts)
+  const over = overBudget(result.metafile, routeList, cssFile, readBudget(readMutenConfig(root)), (file) => gzipSync(readFileSync(file)).length);
+  if (over.length) throw new Error(`over budget (muten.config budget { }):\n  ${over.join('\n  ')}`);
 }
 
 // esbuild rejects build()/rebuild() with a BuildFailure carrying `.errors` (each with a code-frame location);

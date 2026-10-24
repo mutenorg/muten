@@ -39,6 +39,16 @@ export function parseConfig(source: string, locs: ConfigLocs = {}): MutenConfig 
     return tokens[i++].v;
   };
 
+  // a key written with dashes (`heading-many-h1` in `lint { }`, a finding's code): its TOUCHING pieces are one key, as a
+  // class name is in a page; nothing written with spaces changes meaning
+  const kebab = (): string => {
+    const first = tokens[i];
+    let key = eat(Tk.Ident);
+    let end = first.end;
+    while (tokens[i].pos === end && (at(Tk.Ident) || at(Tk.Number) || at(Tk.Punct, Pn.Dash))) { key += tokens[i].v; end = tokens[i].end; i++; }
+    return key;
+  };
+
   const value = (path: string): ConfigValue => {
     const tok = tokens[i];
     if (tok.t === Tk.String) { i++; return tok.v; }
@@ -66,7 +76,7 @@ export function parseConfig(source: string, locs: ConfigLocs = {}): MutenConfig 
       const pos = tokens[i].pos;
       // `api http://x`: the bare `http` was read as the value, and the `:` that follows is where it shows
       if (at(Tk.Punct, Pn.Colon) && tokens[i - 1]?.t === Tk.Ident) fail(`a value with \`:\` or \`/\` (a url) goes in quotes: "${tokens[i - 1].v}:…"`);
-      const key = at(Tk.String) ? tokens[i++].v : eat(Tk.Ident);
+      const key = at(Tk.String) ? tokens[i++].v : kebab();
       locs[`${path}.${key}`] = locOf(pos);
       out[key] = value(`${path}.${key}`);
     }

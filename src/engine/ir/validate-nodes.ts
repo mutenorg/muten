@@ -3,7 +3,10 @@
 // real fields, and every expression a node carries.
 import { diag, closest } from '#engine/shared/diagnostics.js';
 import { PRIMITIVE_NAMES, PRIMITIVES } from '#engine/lang/manifest.js';
-import { Nt, Ek, CHART_KINDS, SVG_PRIMS, nonPrimitiveHint } from '#engine/shared/vocab.js';
+import { Nt, Ek, CHART_KINDS, SVG_PRIMS, UseKind, WakeMode, nonPrimitiveHint } from '#engine/shared/vocab.js';
+
+// components from npm that take no muten children: a Vue, Svelte or Solid island (framework-island.ts)
+const ISLAND_ONLY: ReadonlySet<string> = new Set([UseKind.Vue, UseKind.Svelte, UseKind.Solid]);
 import { iconNames } from '#engine/ir/icon-names.js';
 import type { Expr, GeoProp, NodeCheck, StringPropValue } from '#engine/shared/types.js';
 
@@ -231,6 +234,11 @@ export function nodeWalker(facts: NodeCheck): (id: string, scope: Map<string, st
     if (props.styleVars) for (const sv of Object.values(props.styleVars)) if (typeof sv !== 'string') for (const pt of sv.parts) if (typeof pt !== 'string') checkExpr(pt, n.loc ?? null, scope);  // `style(w: "{ref}")` interpolations: an unknown state ref is caught here, not at runtime
     // Page already carries the compiler-emitted id `mu-main` (the skip-link target); overriding it silently breaks a11y.
     if (props.id && n.type === Nt.Page) D.push(diag('id-target', `Page already owns the id "mu-main" (the skip-link target) — put id() on a Section/Stack inside it`, { loc: n.loc }));
+    if (props.lazy && n.type !== Nt.Custom) D.push(diag('lazy-target', `lazy holds back a Custom's mount (and what it imports) until it nears the screen — ${n.type} is drawn with the page, there is nothing heavy to hold back`, { loc: n.loc }));
+    const island = n.type === Nt.Custom ? (doc.imports || []).find((def) => ISLAND_ONLY.has(def.kind || '') && def.names.includes(props.component || '')) : undefined;
+    if (island && n.children.length) D.push(diag('island-children', `${props.component} is a ${island.kind} component: it is mounted alone and draws what it holds itself, so what is written inside it would never show. Pass what it needs as props (\`${props.component}(…)\`), or put the rest beside it`, { loc: n.loc }));
+    if (props.wake && n.type !== Nt.Custom) D.push(diag('wake-target', `wake says when an island (a component from npm, or a Custom) loads and draws — ${n.type} is drawn with the page`, { loc: n.loc }));
+    if (props.wake?.mode === WakeMode.Media && !props.wake.query?.trim()) D.push(diag('wake-target', '`wake media` needs its query: `wake media "(min-width: 800px)"`', { loc: n.loc }));
     if (props.eager && n.type !== Nt.Image) D.push(diag('eager-target', `eager only loads an Image at once — ${n.type} has no image to load`, { loc: n.loc }));
     if (props.group && n.type !== Nt.Details) D.push(diag('group-target', `group() only groups a Details (one open at a time) — ${n.type} has nothing to open`, { loc: n.loc }));
     const interps: StringPropValue[] = [];
@@ -243,7 +251,8 @@ export function nodeWalker(facts: NodeCheck): (id: string, scope: Map<string, st
       const href = props.to;
       if (href[0] === '#') {                                    // in-page anchor: something must declare id("…")
         const anchor = href.slice(1);
-        if (anchor && !anchorIds.has(anchor)) D.push(diag('unknown-anchor', `nothing on this page declares id("${anchor}") — the link "${href}" scrolls nowhere`, { loc: n.loc, from: anchor, suggestion: closest(anchor, anchorIds) }));
+        const nowhere = ctx.around ? `not every page in ${ctx.around.where} declares id("${anchor}") — on the ones without it, the link "${href}" scrolls nowhere` : `nothing on this page declares id("${anchor}") — the link "${href}" scrolls nowhere`;
+        if (anchor && !anchorIds.has(anchor)) D.push(diag('unknown-anchor', nowhere, { loc: n.loc, from: anchor, suggestion: closest(anchor, anchorIds) }));
       } else if (href[0] === '/' && ctx.routes) {                // a real path: it must be a route declared in app.muten
         const path = href.split('#')[0].split('?')[0];
         if (!routeExists(path)) D.push(diag('unknown-route', `no route "${path}" is declared in app.muten — this link goes nowhere`, { loc: n.loc, from: path, suggestion: closest(path, ctx.routes) }));

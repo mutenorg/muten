@@ -12,7 +12,8 @@ import { compileModule, compile } from '#engine/compile/compile.js';
 import { withUseTypes } from '#engine/project/npm-types.js';
 import { serverOnly } from '#engine/project/server-packages.js';
 import { nativeWebOptions } from '#engine/project/native-web.js';
-import { packageTypeDiagnostics, loadTypeScript } from '#engine/project/ts-check.js';
+import { packageTypeDiagnostics } from '#engine/project/ts-check.js';
+import { loadTypeScript, typeOracle } from '#engine/project/type-oracle.js';
 
 let f = 0;
 const ok = (label, cond, extra = '') => { console.log((cond ? '✓' : '✗') + ' ' + label + (cond ? '' : '   ← ' + extra)); if (!cond) f++; };
@@ -100,6 +101,13 @@ writeFileSync(join(app, 'node_modules', 'typed-sdk', 'index.d.ts'), 'export inte
 const typedPage = (body) => toDoc(withUseTypes(parse(`screen p\nuse createClient, Chart from "typed-sdk"\nget db = createClient("https://x", "k")\n${body}\nPage { Text "x" }`), pageFile, app));
 const typeCodes = (body) => (packageTypeDiagnostics([{ file: pageFile, doc: typedPage(body) }], app).get(pageFile) || []).map((d) => d.message.split(': ')[1]?.split(' (')[0]);
 ok('TypeScript is there to ask (muten brings it)', !!loadTypeScript(app));
+// type-oracle: the one place muten asks TypeScript; one per app, reused, and its findings are plain data
+const oracle = typeOracle(app);
+ok('the app has one oracle, kept for the process', !!oracle && typeOracle(app) === oracle);
+const oracleFile = join(app, 'src', '__oracle_probe.ts');
+const said = oracle ? oracle.check(new Map([[oracleFile, 'const n: number = "text";']])) : [];
+ok('the oracle reports a type error with its place and code', said.some((f) => f.file === oracleFile && f.code === 2322 && f.line === 0 && f.col === 6));
+ok('a second check reuses the oracle and still answers', !!oracle && oracle.check(new Map([[oracleFile, 'const n: number = 1;']])).length === 0);
 ok('a chain the package has is clean', typeCodes('get rows = db.from("orders").select("*").eq("shop", 1)').length === 0, typeCodes('get rows = db.from("orders").select("*").eq("shop", 1)').join());
 ok('a method it lacks, with its closest', typeCodes('get rows = db.from("orders").selct("*")').join().includes("Property 'selct' does not exist on type 'Query'. Did you mean 'select'?"), typeCodes('get rows = db.from("orders").selct("*")').join());
 ok('a call with too many values', typeCodes('action go() { db.from("a", "b") }').join().includes('Expected 1 arguments, but got 2'), typeCodes('action go() { db.from("a", "b") }').join());

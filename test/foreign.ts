@@ -33,10 +33,12 @@ ok('slotted children ride along', rating.children?.[0]?.type === 'Span');
 
 const js = compileModule(toDoc(ir));
 ok('the element registers by importing its module', js.includes('import "@shoelace-style/shoelace/dist/components/rating/rating.js";'));
-ok('the element is its own tag, props bound as properties', js.includes("document.createElement('sl-rating')") && /__bind\(el_\w+, "value", \(\) => stars\.get\(\)\);/.test(js), js.match(/[^\n]*sl-rating[^\n]*/)?.[0]);
+ok('the element is its own tag, props bound as properties', js.includes("__mk('sl-rating'") && /__bind\(el_\w+, "value", \(\) => stars\.get\(\)\);/.test(js), js.match(/[^\n]*sl-rating[^\n]*/)?.[0]);
 ok('its event reaches the action with the detail', /addEventListener\("sl-change", \(e\) => rate\(e\.detail !== undefined/.test(js));
 ok('a widget imports its mount', js.includes('import { mount as __custom_Map } from "leaflet-widget";'));
-ok('a React island: named or default export, rendered in an effect, on(select) is onSelect', js.includes('import * as __react_ns_Picker from') && js.includes('function __react_pick(ns, head, rest)') && /__root\.render\(__react_h\(__react_pick\(__react_ns_Picker, "Picker", \[\]\), \{ "selected": day\.get\(\), "onSelect": /.test(js) && js.includes("import { createRoot as __react_root } from 'react-dom/client';"), js.match(/__root\.render\([^\n]*/)?.[0]);
+ok('a React island: named or default export, rendered in an effect, on(select) is onSelect', !js.includes('import * as __react_ns_Picker from') && js.includes('function __react_pick(ns, head, rest)') && /__root\.render\(__react_h\(__react_pick\(__react_ns_Picker, "Picker", \[\]\), \{ "selected": day\.get\(\), "onSelect": /.test(js), js.match(/__root\.render\([^\n]*/)?.[0]);
+// …and it wakes when its place nears the screen (runtime-island.ts): React, ReactDOM and the library load then, not up front
+ok('a React island loads React when it wakes, not before the page runs', !/^import [^\n]*from 'react'/m.test(js) && js.includes("import('react-dom/client')") && /__island\(el_\w+, \(\) => __react_load\(\)/.test(js) && /import\("[^"]*"\)/.test(js.match(/const __react_load[^\n]*/)?.[0] || ''), js.match(/const __react_load[^\n]*/)?.[0]);
 ok('the island unmounts with the page', js.includes('onCleanup(() => __root.unmount())'));
 ok('foreignImport: the app\'s own file by name', foreignImport({ names: ['a', 'b'], from: '~/lib/x.ts' }) === 'import { a, b } from "~/lib/x.ts";');
 ok('foreignImport: a package by name, or on its default export', foreignImport({ names: ['a', 'b'], from: 'x' }) === 'import * as __pkg_0 from "x";\nconst a = __pkg_0.a ?? __pkg_0.default?.a;\nconst b = __pkg_0.b ?? __pkg_0.default?.b;', foreignImport({ names: ['a', 'b'], from: 'x' }));

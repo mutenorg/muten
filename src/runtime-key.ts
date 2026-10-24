@@ -11,12 +11,14 @@ const CONTENT_KEY = '\u0000row:';
 type Primitive = string | number | boolean | bigint | symbol | null | undefined;
 type RowKey = Primitive | object;
 interface RowWithId { readonly id?: RowKey }
+/** A list row as `each` sees it: a plain value, or an object (with an `id` or not). */
+export type Row = Primitive | RowWithId;
 
 // A plain value (a number, a text) is its own key the first time; a repeat is a twin too. Keyed by the bare value,
 // `[1, 1, 1, 0, 1]` drew two rows and `["x", "x", "y"]` drew `y, x`: the list behaved like a set.
 const VALUE_KEY = '\u0000value:';
 
-export function __rowKey(row: Primitive | RowWithId, twins: Map<string, number>): RowKey {
+export function __rowKey(row: Row, twins: Map<string, number>): RowKey {
   if (row === null || typeof row !== 'object') {
     const content = `${typeof row}:${String(row)}`;
     const seen = twins.get(VALUE_KEY + content) ?? 0;

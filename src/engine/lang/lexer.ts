@@ -2,7 +2,7 @@
 // Separate from the parser to keep each file focused. All matched characters and
 // operators come from vocab (Tk/Pn): no magic strings. Consumed by grammar.ts.
 
-import { Tk, Pn } from '#engine/shared/vocab.js';
+import { Tk, Pn, Kw } from '#engine/shared/vocab.js';
 import { ParseError } from '#engine/shared/diagnostics.js';
 import type { Token, Loc } from '#engine/shared/types.js';
 
@@ -27,6 +27,10 @@ const JS_OP_HINT: Record<string, string> = {
   '\\': 'muten has no backslash escapes — a `"` inside `{…}` is ALREADY a nested string, so write `{on ? "a" : "b"}` (remove the `\\`)',
 };
 const isWord = (char: string): boolean => isWordStart(char) || isDigit(char);
+const QUOTES = '"\'`';
+const TEMPLATE = '`';
+/** Whether `index` begins its line (only spaces before it): `fn` declares a function only there. */
+const atLineStart = (source: string, index: number): boolean => { let at = index - 1; while (at >= 0 && (source[at] === ' ' || source[at] === '\t')) at--; return at < 0 || source[at] === '\n'; };
 
 // 1-based line/col for a source index, used when the lexer hits a bad character.
 function locFromIndex(source: string, index: number): Loc {
@@ -113,7 +117,50 @@ class Lexer {
   private scanWord(start: number): void {
     const { source } = this; let end = this.index;
     while (end < source.length && isWord(source[end])) end++;
-    this.push(Tk.Ident, source.slice(this.index, end), start, end); this.index = end;
+    const word = source.slice(this.index, end);
+    this.push(Tk.Ident, word, start, end); this.index = end;
+    if (word === Kw.Fn && atLineStart(source, start)) this.scanFn();
+  }
+
+  // `fn name(…): T { … }`: the name, then the signature and body as ONE raw token. The body is TypeScript (`===`, `?.`,
+  // 'quotes', `templates`), which muten's own tokens would refuse; it is read as text, braces counted outside strings,
+  // templates and comments, and handed to TypeScript whole.
+  private scanFn(): void {
+    const { source } = this;
+    while (isSpace(source[this.index] || '')) this.index++;
+    if (!isWordStart(source[this.index] || '')) return;   // the parser says what is missing
+    this.scanWord(this.index);
+    while (isSpace(source[this.index] || '')) this.index++;
+    if (source[this.index] !== Pn.ParenL) return;
+    const begin = this.index;
+    let parens = 0, braces = 0, opened = false;
+    while (this.index < source.length) {
+      const char = source[this.index];
+      if (char === '/' && source[this.index + 1] === '/') { this.skipLineComment(); continue; }
+      if (char === '/' && source[this.index + 1] === '*') { this.skipBlockComment(); continue; }
+      if (QUOTES.includes(char)) { this.skipQuoted(char); continue; }
+      if (char === Pn.ParenL) parens++;
+      else if (char === Pn.ParenR) parens--;
+      else if (char === Pn.BraceL) { braces++; if (!parens) opened = true; }
+      else if (char === Pn.BraceR) { braces--; if (opened && !braces && !parens) { this.index++; break; } }
+      this.index++;
+    }
+    this.push(Tk.Raw, source.slice(begin, this.index), begin, this.index);
+  }
+
+  // past a '…', "…" or `…` of TypeScript (a template's ${…} may hold braces and quotes of its own)
+  private skipQuoted(quote: string): void {
+    const { source } = this;
+    this.index++;
+    let inner = 0;
+    while (this.index < source.length) {
+      const char = source[this.index];
+      if (char === '\\') { this.index += 2; continue; }
+      if (quote === TEMPLATE && char === '$' && source[this.index + 1] === Pn.BraceL) { inner++; this.index += 2; continue; }
+      if (inner && char === Pn.BraceR) { inner--; this.index++; continue; }
+      if (!inner && char === quote) { this.index++; return; }
+      this.index++;
+    }
   }
 }
 

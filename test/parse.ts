@@ -64,5 +64,13 @@ ok('it says what an argument may be', !!listArg?.message.includes('a literal ("t
 ok('it names the way out for an npm component', !!listArg?.message.includes('use react Name from'));
 ok('it points at the `[`', listArg?.loc?.line === 3 && listArg?.loc?.col === 18);
 
+// A file that ends mid-block: the error names the bracket left open and points at it, instead of «expected string, got eof ""».
+let unclosed: { message: string; loc: { line: number; col: number } | null } | null = null;
+try { parse('routes {\n  "/" -> home\n'); } catch (e) { unclosed = e; }
+ok('a block left open is a syntax error', unclosed !== null);
+ok('it says the file ends with the block open', !!unclosed?.message.includes('the file ends while the "{" opened on line 1 is still open'));
+ok('it says how to close it', !!unclosed?.message.includes('close it with "}"'));
+ok('it points at the opening brace', unclosed?.loc?.line === 1 && unclosed?.loc?.col === 8);
+
 console.log(`\n${fail ? '✗ ' + fail + ' FAILED' : 'ALL OK'} (${pass}/${pass + fail})`);
 process.exit(fail ? 1 : 0);

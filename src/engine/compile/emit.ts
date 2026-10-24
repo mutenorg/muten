@@ -88,12 +88,11 @@ export const BUILTINS_JS = `function __safeUrl(u, media) { u = String(u == null 
   function dayKey(iso) { const d = __date(iso); return isNaN(d.getTime()) ? String(iso == null ? '' : iso) : __ymd(d); }
   function addDays(iso, n) { const d = __date(iso); if (isNaN(d.getTime())) return String(iso == null ? '' : iso); d.setDate(d.getDate() + (Number(n) || 0)); return __dateOnly(iso) ? __ymd(d) : d.toISOString(); }`;
 
-function sourceLayer(parts: EmitParts): string {
-  return `const __DATA = ${JSON.stringify(parts.data)};
-  const __SOURCES = ${JSON.stringify(parts.sources)};
-  const __API = ${JSON.stringify(parts.api)};
-  const __UUIDS = ${JSON.stringify(parts.queryUuids)};
-  const __DELAY = 450;
+// THE DATA LAYER, ONCE PER APP. Its code (requests, the cache, writes, sockets) does not depend on the page; only the four
+// tables it is handed do. It was written inside every page and store that loads data (31 copies in Storio's app); a
+// bundled app now has it once, in `virtual:muten/data`, and each page calls `__dataLayer(data, sources, api, uuids)`
+// for its own copy of the functions. The standalone HTML of `muten build` still inlines it (no bundler to share it).
+const LAYER = `  const __DELAY = 450;
   const __req = ${sourceRequest.toString()};
   // THE AUTH SEAM. \`api { headers }\` is a literal block serialized at build time, so it can carry an
   // environment key but never a PER-USER token — the one thing every authenticated app needs. Making
@@ -174,6 +173,25 @@ function sourceLayer(parts: EmitParts): string {
     const __src = __SOURCES[name] && __req(__SOURCES[name], __API);
     if (__src && __src.method === 'GET') { sig.__key = __cacheKey(__src.url); const __hit = __cache.get(sig.__key); if (__hit) sig.set({ data: __hit, loading: false, error: null }); __remember(sig); }
     if (!(__src && __src.wait)) { const read = sig.get; sig.get = () => { if (!sig.__started) { sig.__started = true; if (sig.__key) sig.__key = __cacheKey(__src.url); const tok = sig.__tok || 0; __fetch(name).then((d) => { if ((sig.__tok || 0) === tok) sig.set({ data: d, loading: false, error: null }); }).catch((e) => { if ((sig.__tok || 0) === tok) sig.set({ data: [], loading: false, error: String(e) }); }); } return read(); }; } } return sig; }`;
+const LAYER_NAMES = [...LAYER.matchAll(/^ {2}(?:const|function) ([\w$]+)/gm)].map((match) => match[1]);
+
+function sourceLayer(parts: EmitParts, shared: boolean): string {
+  if (shared) return `const { ${LAYER_NAMES.join(', ')} } = __dataLayer(${JSON.stringify(parts.data)}, ${JSON.stringify(parts.sources)}, ${JSON.stringify(parts.api)}, ${JSON.stringify(parts.queryUuids)});`;
+  return `const __DATA = ${JSON.stringify(parts.data)};
+  const __SOURCES = ${JSON.stringify(parts.sources)};
+  const __API = ${JSON.stringify(parts.api)};
+  const __UUIDS = ${JSON.stringify(parts.queryUuids)};
+` + LAYER;
+}
+
+/** `__dataLayer` as a plain function, for a script where the runtime is already in scope (the standalone build). */
+export function dataLayerScript(): string {
+  return `function __dataLayer(__DATA, __SOURCES, __API, __UUIDS) {\n  ${usedBuiltins(LAYER)}\n${LAYER}\n  return { ${LAYER_NAMES.join(', ')} };\n}`;
+}
+
+/** The `virtual:muten/data` module a bundled app shares between its pages and stores. */
+export function dataModule(): string {
+  return `${runtimeImport(LAYER)}export ${dataLayerScript()}\n`;
 }
 
 // ── usage-based emission ─────────────────────────────────────────────────────────────────────────────────
@@ -219,7 +237,7 @@ const PERSIST_JS = `const __loadLocal = (k, fb) => { try { const v = localStorag
 
 // the runtime prelude a body needs: builtins called + persist (if it persists) + the source layer (if it
 // reads/writes/sends). Detection scans the COMPILED body for the helper-call patterns the emitter produces.
-function prelude(parts: EmitParts, body: string): string {
+function prelude(parts: EmitParts, body: string, shared = false): string {
   const out: string[] = [];
   const b = usedBuiltins(body);
   if (b) out.push(b);
@@ -230,14 +248,15 @@ function prelude(parts: EmitParts, body: string): string {
   if (feeds) out.push(CHANGE_JS, FEED_JS);
   if (/\b__callQuery\(/.test(body)) out.push(CALL_QUERY_JS);
   if (/\b__every\(/.test(body)) out.push(EVERY_JS);
-  if (/\bquery\(|\b__fetch\(|\b__write\(|\b__crud\(|\b__refetch\(|\b__send\(/.test(body)) out.push(sourceLayer(parts));
+  if (/\bquery\(|\b__fetch\(|\b__write\(|\b__crud\(|\b__refetch\(|\b__send\(/.test(body)) out.push(sourceLayer(parts, shared));
   return out.join('\n  ');
 }
 
 // only the runtime symbols the emitted code references — `signal, effect` for a counter, not all nine. A stray
 // match merely imports an unused symbol (the bundler drops it); a miss can't happen (the emitter always writes
 // these as `name(` calls / `__sym` references that `\bname\b` catches).
-export const RUNTIME_SYMBOLS: ReadonlyArray<string> = ['signal', 'computed', 'effect', 'untrack', 'root', 'onCleanup', '__device', '__urlRead', '__urlSet', '__watchImages', '__t', '__lang', '__langUse', '__langInit', '__langList', '__eq', '__rowKey', '__id', '__has', '__order', '__leave', '__chart', '__arc', '__drag', '__drop', '__clone', '__bind'];
+export const RUNTIME_SYMBOLS: ReadonlyArray<string> = ['signal', 'computed', 'effect', 'untrack', 'root', 'onCleanup', '__device', '__urlRead', '__urlSet', '__watchImages', '__t', '__lang', '__langUse', '__langInit', '__langList', '__eq', '__rowKey', '__id', '__has', '__order', '__leave', '__chart', '__arc', '__drag', '__drop', '__clone', '__bind', '__when', '__each', '__mk', '__ap', '__island', '__at', '__gesture'];
+const dataImport = (code: string): string => (code.includes('__dataLayer(') ? `import { __dataLayer } from 'virtual:muten/data';\n` : '');
 function runtimeImport(code: string): string {
   const used = RUNTIME_SYMBOLS.filter((s) => new RegExp(`\\b${s}\\b`).test(code));
   return used.length ? `import { ${used.join(', ')} } from 'virtual:muten/runtime';\n` : '';
@@ -246,8 +265,8 @@ function runtimeImport(code: string): string {
 // One .store domain slice -> shared ESM module (state + get + actions, no DOM).
 export function emitStore(parts: EmitParts): string {
   const body = [parts.stateDecls, parts.getDecls, parts.actionDecls, parts.effectDecls].join('\n');
-  const pre = prelude(parts, body);
-  return `${runtimeImport(pre + body)}${parts.storeImports ? parts.storeImports + '\n' : ''}${parts.externImports}
+  const pre = prelude(parts, body, true);
+  return `${runtimeImport(pre + body)}${dataImport(pre)}${parts.storeImports ? parts.storeImports + '\n' : ''}${parts.externImports}
 
   ${pre}
 
@@ -339,8 +358,8 @@ ${parts.staticHtml}
 // ESM page module Vite bundles (npm imports, HMR, SPA).
 export function emitModule(parts: EmitParts): string {
   const body = [parts.paramDecls, parts.stateDecls, parts.getDecls, parts.actionDecls, parts.componentDecls, parts.renderBody, parts.effectDecls].join('\n');
-  const pre = prelude(parts, body);
-  return `${runtimeImport(pre + body)}${parts.storeImports}
+  const pre = prelude(parts, body, true);
+  return `${runtimeImport(pre + body)}${dataImport(pre)}${parts.storeImports}
 ${parts.externImports}
 export const screen = ${JSON.stringify(parts.screen)};
 export const css = ${JSON.stringify(parts.projectCss)};

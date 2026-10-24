@@ -4,6 +4,8 @@
 // Consumed by logic.ts only.
 
 import { keyParts, keyPattern } from '#engine/ir/translate-check.js';
+import { frozenValue } from '#engine/compile/frozen.js';
+export { freeze } from '#engine/compile/frozen.js';
 import type { CompileCtx, Expr, Scope } from '#engine/shared/types.js';
 
 /** `t("login.email")` / `t("plan.left", used, cap)` → `__t(<language>, __T, key, …values)`, recording the key it needs.
@@ -11,7 +13,7 @@ import type { CompileCtx, Expr, Scope } from '#engine/shared/types.js';
 export function translateCall(ctx: CompileCtx, args: Expr[], compileExpr: (expr: Expr, scope?: Scope) => string): string {
   const [key, ...values] = args;
   if (key) {
-    const parts = keyParts(key);
+    const parts = keyParts(key, (name) => frozenValue(ctx, name));   // `who.{kind}.h1` with a `kind` nothing writes: one key
     if (parts.every((part) => part !== null)) ctx.tKeys.add(parts.join(''));
     else { const pattern = keyPattern(parts); if (pattern) ctx.tPatterns.push(pattern); }
   }

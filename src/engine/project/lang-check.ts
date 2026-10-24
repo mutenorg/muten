@@ -5,7 +5,7 @@
 //   a file named spanish.lang                   lang-code: lang.use() and <html lang> speak codes (es, en, pt-BR)
 import { readFileSync } from 'node:fs';
 import { basename, relative } from 'node:path';
-import { langFiles, parseLang, LANG_EXT } from '#engine/project/lang-files.js';
+import { langFiles, parseLang, readI18n, LANG_EXT } from '#engine/project/lang-files.js';
 import { valuesNeeded } from '#engine/ir/translate-check.js';
 import { diag, ParseError } from '#engine/shared/diagnostics.js';
 import type { Diagnostic, Loc } from '#engine/shared/types.js';
@@ -44,9 +44,16 @@ function compare(code: string, own: Parsed, others: { [code: string]: Parsed }):
   return out;
 }
 
+// the languages that ship: every .lang file, or only those muten.config's `i18n { languages }` lists (a draft stays out
+// of the comparison until it is listed)
+function shipped(appRoot: string): { [code: string]: string } {
+  const { languages } = readI18n(appRoot);
+  return Object.fromEntries(Object.entries(langFiles(appRoot)).filter(([code]) => !languages || languages.includes(code)));
+}
+
 function parsedAll(appRoot: string, skip?: string): { [code: string]: Parsed } {
   const out: { [code: string]: Parsed } = {};
-  for (const [code, file] of Object.entries(langFiles(appRoot))) {
+  for (const [code, file] of Object.entries(shipped(appRoot))) {
     if (file === skip) continue;
     try { out[code] = parseLang(readFileSync(file, 'utf8')); } catch { /* reported on its own file */ }
   }
@@ -56,7 +63,7 @@ function parsedAll(appRoot: string, skip?: string): { [code: string]: Parsed } {
 /** Every .lang file's diagnostics, for `muten check`. */
 export function checkLang(appRoot: string): Array<{ file: string } & Diagnostic> {
   const out: Array<{ file: string } & Diagnostic> = [];
-  const files = langFiles(appRoot);
+  const files = shipped(appRoot);
   const all = parsedAll(appRoot);
   for (const [code, file] of Object.entries(files)) {
     const found: Diagnostic[] = [];

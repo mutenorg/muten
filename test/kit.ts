@@ -9,6 +9,7 @@ import { toDoc } from '#engine/ir/flatten.js';
 import { validate } from '#engine/ir/validate.js';
 import { compileModule } from '#engine/compile/compile.js';
 import { scriptOrigins, withScriptOrigins, DEFAULT_CSP } from '../dist/dev-security.js';
+import { dataModule } from '#engine/compile/emit.js';
 
 let f = 0;
 const ok = (label, cond, extra = '') => { console.log((cond ? '✓' : '✗') + ' ' + label + (cond ? '' : '   ← ' + extra)); if (!cond) f++; };
@@ -21,7 +22,7 @@ const files = 'state { photo = null : file  photos = [] : list<file>  saved = ""
 ok('a file state, File bound to it, its name and size, preview and resize check clean', codes(files).length === 0, codes(files).join());
 const filesJs = js(files);
 ok('File is a drop zone that filters by accept; a list<file> takes several', filesJs.includes("__in.accept = \"image/*\"") && filesJs.includes('__in.multiple = true') && filesJs.includes("addEventListener('drop'"));
-ok('post sends what it is given as a form when it holds a file (__payload)', filesJs.includes('function __payload(body)') && filesJs.includes('new FormData()'));
+ok('post sends what it is given as a form when it holds a file (__payload, in the shared data layer)', filesJs.includes('__dataLayer(') && dataModule().includes('function __payload(body)') && dataModule().includes('new FormData()'));
 ok('a file tells only its name, size and type', codes('state { photo = null : file }\nPage { Text "{photo.nmae}" }').join() === 'unknown-member>name');
 ok('File binds a file state', codes('state { photo = "" : text }\nPage { File bind(photo) "x" }').includes('bind-type'));
 

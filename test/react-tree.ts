@@ -10,13 +10,14 @@ import { compileModule } from '#engine/compile/compile.js';
 let f = 0;
 const ok = (label, cond, extra = '') => { console.log((cond ? '✓' : '✗') + ' ' + label + (cond ? '' : '   ← ' + extra)); if (!cond) f++; };
 const page = (body) => toDoc(parse(`screen p\n${body}`));
-const codes = (body) => validate(page(body), {}).diagnostics.map((d) => d.code);
+const codes = (body) => validate(page(body), {}).diagnostics.filter((d) => d.severity === 'error').map((d) => d.code);   // errors: `use react` is written on purpose here, its use-react-redundant warning is expected
 const js = (body) => compileModule(page(body), {}, '', {}, {}, {});
 
 const chart = 'use react LineChart, Line, XAxis from "recharts"\nstate { sales = [ { day: "lun", total: 1 } ] : list }\nPage { LineChart(width: 400, height: 200, data: sales) { XAxis(dataKey: "day") Line(dataKey: "total") } }';
 ok('several components from one library, composed', codes(chart).length === 0, codes(chart).join());
 const chartJs = js(chart);
-ok('one namespace per library, each part picked by name', chartJs.includes('import * as __react_ns_LineChart from "recharts";') && chartJs.includes('__react_pick(__react_ns_LineChart, "XAxis", [])'));
+// (the namespace is loaded when the island wakes: runtime-island.ts, react-tree.ts reactLoader)
+ok('one namespace per library, each part picked by name', /__react_ns_LineChart = __l0;/.test(chartJs) && (chartJs.match(/import\("recharts"\)/g) || []).length === 1 && chartJs.includes('__react_pick(__react_ns_LineChart, "XAxis", [])'), chartJs.match(/const __react_load[^\n]*/)?.[0]);
 ok('children are React children of their component, in one island', /__root\.render\(__react_h\(__react_pick\(__react_ns_LineChart, "LineChart", \[\]\), \{[^}]*"data": sales\.get\(\)[^}]*\}, __react_h\(__react_pick\(__react_ns_LineChart, "XAxis"/.test(chartJs), chartJs.match(/__root\.render\([^\n]*/)?.[0]);
 
 const dialog = 'use react Dialog from "@radix-ui/react-dialog"\nstate { n = 0 : number }\naction more() mutates n { n.set(n + 1) }\nPage { Dialog.Root { Dialog.Trigger { Text "Abrir" } Dialog.Content { Text "Van {n}" Button "Sumar" -> more } } }';

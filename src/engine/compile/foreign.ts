@@ -25,7 +25,8 @@ export function foreignImport(def: ImportDef, index = 0): string {
   const name = def.names[0] || '';
   if (def.kind === UseKind.Element) return `import ${from};`;
   if (def.kind === UseKind.Widget) return `import { mount as __custom_${name} } from ${from};`;
-  if (def.kind === UseKind.React) return `import * as __react_ns_${name} from ${from};`;   // its components are picked by name at render (react-tree.ts)
+  if (def.kind === UseKind.React) return `import * as __react_ns_${name} from ${from};`;
+  if (def.kind === UseKind.Vue || def.kind === UseKind.Svelte || def.kind === UseKind.Solid) return '';   // framework-island.ts frameworkLoader   // its components are picked by name at render (react-tree.ts)
   return OWN_FILE.test(def.from) ? `import { ${def.names.join(', ')} } from ${from};` : packageBindings(def, index, 'const').join('\n');
 }
 

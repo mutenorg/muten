@@ -153,7 +153,7 @@ const printAction = (name: string, a: ActionDef): string => {
   return `${head} ${block(a.body)}${a.failed ? ` failed ${block(a.failed)}` : ''}`;
 };
 const printRoute = (r: Route): string =>
-  `${JSON.stringify(r.url)} -> ${r.page}${r.layout ? ` in ${r.layout}` : ''}${r.guard ? ` guard ${printExpr(r.guard)}${r.redirect ? ` else ${JSON.stringify(r.redirect)}` : ''}` : ''}`;
+  `${JSON.stringify(r.url)} -> ${r.page}${r.layout ? ` in ${r.layout}` : ''}${r.without ? ` without ${r.without}` : ''}${r.guard ? ` guard ${printExpr(r.guard)}${r.redirect ? ` else ${JSON.stringify(r.redirect)}` : ''}` : ''}`;
 const printPart = (name: string, part: PartDef): string =>
   `part ${name}(${part.params.map((pp) => `${pp.name}: ${pp.type}`).join(', ')}) {\n${printNode(part.tree, IND)}\n}`;
 const block = (kw: string, body: string): string => `${kw} {\n${body}\n}`;
@@ -167,7 +167,9 @@ export function print(ir: IR): string {
 
   if (ir.consts) for (const [n, v] of Object.entries(ir.consts)) push(`const ${n} = ${printScalar(v)}`);
   push(ir.screen ? `screen ${ir.screen}` : undefined);
-  if (ir.imports) for (const i of ir.imports) push(`use ${i.names.map((n) => (i.returns?.[n] ? `${n}: ${i.returns[n]}` : n)).join(', ')} from ${JSON.stringify(i.from)}`);
+  for (const sheet of ir.stylesheets || []) push(`use ${JSON.stringify(sheet)}`);
+  // its kind (`use react`, `use element Rating "star-rating"`) and `from script` are part of what it imports
+  if (ir.imports) for (const i of ir.imports) push(`use ${i.kind ? i.kind + ' ' : ''}${i.names.map((n) => (i.returns?.[n] ? `${n}: ${i.returns[n]}` : n)).join(', ')}${i.tag ? ' ' + JSON.stringify(i.tag) : ''} from ${i.script ? 'script ' : ''}${JSON.stringify(i.from)}`);
   if (ir.meta) push(block('meta', Object.entries(ir.meta).map(([k, v]) => `${IND}${k} ${JSON.stringify(v)}`).join('\n')));
   if (ir.params) for (const p of ir.params) push(`param ${p}`);
   if (ir.api) push(kvBlock('api', Object.entries(ir.api), ':'));
@@ -182,7 +184,7 @@ export function print(ir: IR): string {
   if (ir.effects) for (const body of ir.effects) push(block('effect', body.map((s) => IND + printStmt(s, IND)).join('\n')));
   if (ir.parts) for (const [n, part] of Object.entries(ir.parts)) push(printPart(n, part));
   if (ir.shell) push(block('shell', (ir.shell.children || []).map((c) => printNode(c, IND)).join('\n')));
-  for (const [name, tree] of Object.entries(ir.layouts || {})) push(block(`layout ${name}`, (tree.children || []).map((c) => printNode(c, IND)).join('\n')));
+  for (const [name, tree] of Object.entries(ir.layouts || {})) push(block(`layout ${name}${ir.defaultLayout === name ? ' default' : ''}`, (tree.children || []).map((c) => printNode(c, IND)).join('\n')));
   if (ir.tree) push(printNode(ir.tree, ''));
   if (ir.routes) push(block('routes', ir.routes.map((r) => IND + printRoute(r)).join('\n')));
 

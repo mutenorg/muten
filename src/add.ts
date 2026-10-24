@@ -1,12 +1,16 @@
-// `muten add <name...>` — the registry seam's CLI. Two kinds of name:
-//   • lowercase (e.g. `devtools`, `shadcn`) = a CONNECTABLE PLUGIN → npm-install `@muten/<name>` (if needed) and
-//     enable it in muten.config (`plugins { <name> {} }`). One command configures everything, like `ng add`.
-//   • PascalCase (e.g. `Button`) = a registry COMPONENT → copy its source (a muten part) into src/parts/ (own it).
+// `muten add <name...>` — the registry seam's CLI. Each name is the first of these it matches:
+//   • a registry COMPONENT, by its name or its part (`alert-dialog`, `AlertDialog`) → copy its source (a muten part)
+//     into src/parts/ (own it).
+//   • a CONNECTABLE PLUGIN (e.g. `shadcn`, `mobile`) → npm-install `@muten/<name>` (if needed) and enable it in
+//     muten.config (`plugins { <name> {} }`). One command configures everything, like `ng add`.
+//   • any other npm package (`dayjs`, `@scope/lib`) → installed with the app's package manager, checked to run in a
+//     browser, weighed, and the `use` line to write printed (add-package.ts).
 // The core ships this command; PLUGINS ship the registry data (registry.json) and/or the `muten.devBoot` hook.
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
+import { addPackage } from './add-package.js';
 
 // `component` (PascalCase) marks a Custom-backed entry: besides the .muten part, copy the sibling .js
 // (same basename) into src/components/<component>.js, where muten's `Custom` primitive loads it.
@@ -77,12 +81,20 @@ function discoverRegistries(root: string): Source[] {
   return out;
 }
 
+// every component of the installed registries, by its name (`alert-dialog`) and by its part (`AlertDialog`)
+function registryIndex(sources: Source[]): Map<string, { dir: string; entry: RegistryEntry }> {
+  const index = new Map<string, { dir: string; entry: RegistryEntry }>();
+  for (const { dir, reg } of sources) for (const entry of reg.components || []) {
+    for (const key of [entry.name, entry.part]) if (key && !index.has(key)) index.set(key, { dir, entry });
+  }
+  return index;
+}
+
 function ejectComponents(root: string, names: string[]): void {
   const sources = discoverRegistries(root);
   if (!sources.length) { console.error('✖ no component registry installed. Add one first, e.g. `muten add shadcn`.'); process.exit(1); }
 
-  const index = new Map<string, { dir: string; entry: RegistryEntry }>();
-  for (const { dir, reg } of sources) for (const e of reg.components || []) if (!index.has(e.name)) index.set(e.name, { dir, entry: e });
+  const index = registryIndex(sources);
 
   const partsDir = join(root, 'src', 'parts');
   mkdirSync(partsDir, { recursive: true });
@@ -97,6 +109,8 @@ function ejectComponents(root: string, names: string[]): void {
     seen.add(n);
     const hit = index.get(n);
     if (!hit) { console.error(`✖ unknown component "${n}" (not in any installed registry)`); missing = true; continue; }
+    if (seen.has(hit.entry.name) && n !== hit.entry.name) continue;
+    seen.add(hit.entry.name);
     copyFileSync(join(hit.dir, hit.entry.file), join(partsDir, basename(hit.entry.file)));
     added.push(`${hit.entry.part}  →  src/parts/${basename(hit.entry.file)}`);
     if (hit.entry.component) { // Custom-backed: copy the host .js into src/components/ so `Custom` can load it
@@ -112,10 +126,23 @@ function ejectComponents(root: string, names: string[]): void {
   if (missing) process.exit(1);
 }
 
-// route each name: lowercase = connectable plugin (install + configure); PascalCase = registry component (eject).
-export function addComponents(root: string, names: string[]): void {
-  const plugins = names.filter((n) => /^[a-z]/.test(n));
-  const components = names.filter((n) => !/^[a-z]/.test(n));
-  for (const p of plugins) addPlugin(root, p);
+/** Whether `name` is one of muten's own plugins (@muten/<name> installed here, or on npm). */
+function isMutenPlugin(root: string, name: string): boolean {
+  if (isInstalled(root, name)) return true;
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  const probe = spawnSync(npm, ['view', `@muten/${name}`, 'name'], { cwd: root, encoding: 'utf8', shell: false });
+  return probe.status === 0 && probe.stdout.trim() === `@muten/${name}`;
+}
+
+// route each name, first match wins: a component of an installed registry (eject: `card`, `Card`); a muten plugin
+// (install + configure); any other npm package (install, check, say how to use it: add-package.ts). PascalCase is
+// always a component.
+export async function addComponents(root: string, names: string[]): Promise<void> {
+  const known = registryIndex(discoverRegistries(root));
+  const components = names.filter((n) => known.has(n) || !/^[a-z@.]/.test(n));
+  for (const name of names.filter((n) => !components.includes(n))) {
+    if (PLUGIN_NAME.test(name) && isMutenPlugin(root, name)) addPlugin(root, name);
+    else if (!(await addPackage(root, name))) process.exitCode = 1;
+  }
   if (components.length) ejectComponents(root, components);
 }

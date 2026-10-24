@@ -7,7 +7,8 @@ import { BOp, Ek, Nt } from '#engine/shared/vocab.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { mergeImports } from '#engine/ir/imports.js';
 import { ParseError } from '#engine/shared/diagnostics.js';
-import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap, ArgValue, PartDef, PartParam, ExprPropKey } from '#engine/shared/types.js';
+import { strayParams, strayArgs } from '#engine/ir/part-params.js';
+import type { IR, Doc, IRNode, NodeProps, StringPropValue, Expr, Interp, ArgMap, ArgValue, PartDef, PartParam, ExprPropKey, Loc } from '#engine/shared/types.js';
 
 type Parts = { [name: string]: PartDef };
 
@@ -63,14 +64,20 @@ function fallbacks(params: PartParam[]): ArgMap {
 function composeNode(node: IRNode, parts: Parts, used: Set<string>, chain: Set<string> = new Set(), slot: IRNode[] = []): IRNode {
   const part = parts[node.type];
   if (part) {                                          // it's a part instance
-    if (chain.has(node.type)) throw new Error(`part "${node.type}" references itself (directly or through another part) — parts inline at build, so a cycle can never terminate. Remove the self-reference.`);
+    if (chain.has(node.type)) {   // a finding at the line that closes the cycle (check, --json), not a crash
+      const cycle = new ParseError(`part "${node.type}" references itself (directly or through another part) — parts inline at build, so a cycle can never terminate. Remove the self-reference.`, node.place || node.loc);
+      cycle.code = 'part-cycle';
+      throw cycle;
+    }
     used.add(node.type);
     const kids = (node.children || []).flatMap((c) => composeChild(c, parts, used, chain, slot)); // the call's children become this part's slot content (forwarding any enclosing slot)
     const args = { ...fallbacks(part.params), ...(node.args || {}) };   // a param the call leaves out takes its declared default
     let inlined: IRNode;
-    try { inlined = substitute(part.tree, args, node.type); }   // every inlined node remembers which part file it was written in
+    try { inlined = substitute(part.tree, args, { name: node.type, part }, node.place || node.loc || null); }   // every inlined node remembers which part file it was written in
     catch (error) { const missing = new ParseError(`${node.type}(…): ${error instanceof Error ? error.message : String(error)}`, node.loc); missing.code = 'part-arg-missing'; throw missing; }   // a diagnostic at the CALL (file:line in check), not a crash
     const composed = composeNode(inlined, parts, used, new Set([...chain, node.type]), kids);   // resolve nested parts; the part's `slot` fills with kids
+    const strayArgsHere = strayArgs(node.type, part, node);   // an argument that is no parameter: said at the call (part-params.ts)
+    if (strayArgsHere.length) composed.strays = [...(composed.strays || []), ...strayArgsHere];
     // The instance root keeps the CALL SITE — the line in the page where this part was written. It is the only line the
     // app owns for that whole subtree (a plugin part's own file lives in node_modules and must never be edited), and
     // without it a click on the part's chrome had nothing nearer than the page root to anchor to.
@@ -91,6 +98,8 @@ function composeNode(node: IRNode, parts: Parts, used: Set<string>, chain: Set<s
   // this branch too — `substitute` stamps them and `composeNode` runs over the result, so dropping them here loses them.
   if (node.ownerPart) out.ownerPart = node.ownerPart;
   if (node.partLoc) out.partLoc = node.partLoc;
+  if (node.place) out.place = node.place;
+  if (node.strays) out.strays = node.strays;
   if (node.fromPart) out.fromPart = node.fromPart;
   if (node.partArgs) out.partArgs = node.partArgs;
   if (node.args) out.args = node.args; // unresolved part instance (typo): validate flags it unknown-part
@@ -112,15 +121,20 @@ function composeChild(c: IRNode, parts: Parts, used: Set<string>, chain: Set<str
 // reader (or a model) to a line that does not exist. It travels as `partLoc` + `ownerPart` instead, so the element
 // picker can open the right file at the right line while the oracle keeps pointing at the page. Nested parts keep their
 // own owner: the innermost file that actually holds the source wins.
-function substitute(node: IRNode, args: ArgMap, owner: string): IRNode {
+function substitute(node: IRNode, args: ArgMap, from: { name: string; part: PartDef }, call: Loc | null): IRNode {
+  const owner = from.name;
   const out: IRNode = { type: node.type };
   out.ownerPart = node.ownerPart || owner;
+  const strays = node.place ? [] : strayParams(owner, from.part, node);   // a `$name` that is no parameter, on this node as written
+  if (strays.length) out.strays = strays;
   const src = node.partLoc || node.loc;
   if (src) out.partLoc = src;
+  const place = node.place || (node.loc ? { line: node.loc.line, col: node.loc.col, in: { part: owner, call } } : null);
+  if (place) out.place = place;
   if (node.fromPart) out.fromPart = node.fromPart;
   if (node.props) out.props = subProps(node.props, args);
   if (node.args) out.args = subArgs(node.args, args);    // args of nested parts
-  if (node.children) out.children = node.children.map((c) => substitute(c, args, owner));
+  if (node.children) out.children = node.children.map((c) => substitute(c, args, from, call));
   return out;
 }
 

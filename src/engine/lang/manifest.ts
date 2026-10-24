@@ -247,7 +247,7 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
   },
 };
 
-export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'data', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group', 'eager', 'checked', 'accept', 'currency'];
+export const MODIFIERS = ['bind', 'submit', 'where', 'columns', 'options', 'class', 'alt', 'inputs', 'on', 'aria', 'data', 'style', 'disabled', 'draggable', 'droptarget', 'min', 'max', 'step', 'id', 'group', 'eager', 'checked', 'accept', 'currency', 'lazy', 'wake'];
 export const MODIFIER_DOCS = {
   bind: 'Two-way bind to a @state, e.g. `bind @search`.',
   submit: 'Action to run on form submit, e.g. `submit createUser`.',
@@ -345,8 +345,15 @@ export const BUILTIN_DOCS: { [k: string]: string } = {
   dayKey: 'dayKey(isoText) → the calendar day as "YYYY-MM-DD" (drops the time). Match an event to a day cell or group by day: `when dayKey(event.date) == dayKey(cell.date) { … }`.',
   addDays: 'addDays(isoText, n) → the date shifted by n days (n may be negative), as an ISO string. Compute a due date or a range bound.',
 };
-export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'failed', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'layout', 'in', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'into', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from', 'match', 'provider', 'new', 'script', 'react'];
+export const KEYWORDS = ['screen', 'entity', 'state', 'store', 'const', 'theme', 'get', 'effect', 'action', 'mutates', 'failed', 'mock', 'sources', 'api', 'meta', 'routes', 'shell', 'layout', 'in', 'guard', 'else', 'part', 'param', 'query', 'every', 'live', 'persist', 'post', 'put', 'delete', 'body', 'into', 'if', 'when', 'each', 'as', 'where', 'by', 'with', 'and', 'or', 'not', 'contains', 'use', 'from', 'match', 'provider', 'new', 'script', 'react', 'fn', 'settle', 'element', 'widget', 'vue', 'svelte', 'solid'];
 export const KEYWORD_DOCS = {
+  fn: 'A TypeScript function inside the page, checked with it: `fn total(p: Product): number { return p.price * 1.19 }`.',
+  settle: 'Runs once a value stops changing: `settle typed 350ms { find.set(typed) }` (a search asks once per pause).',
+  element: 'A Web Component from npm: `use element Rating "sl-rating" from "…"`.',
+  widget: 'A module from npm exporting `mount(el, inputs, on)`: `use widget Map from "…"`.',
+  vue: 'A compiled Vue component, mounted as an island: `use vue DatePicker from "…"`.',
+  svelte: 'A compiled Svelte 5 component, mounted as an island: `use svelte Chart from "…"`.',
+  solid: 'A compiled Solid component, mounted as an island: `use solid Sortable from "…"`.',
   screen: 'Declares the screen name: `screen users_dashboard`.',
   entity: 'Declares a data shape + validation: `entity User { name text required  email email required  zip text pattern:"^\\d{5}$" }` (implicit uuid id). Constraints: `required`, `min:N`, `max:N`, `pattern:"<regex>"`. An `email` field validates its format on submit; `pattern` matches a value against your regex.',
   state: 'Declares reactive state: `state { search = "" : text  users = query listUsers : list<User> }`.',

@@ -34,7 +34,7 @@ rmSync(app, { recursive: true, force: true });
 const codes = (src) => validate(toDoc(parse(src))).diagnostics.map((d) => d.code + (d.suggestion ? ':' + d.suggestion : ''));
 ok('a misspelled type is caught with the right one', codes('screen s\nstate { n = 0 : numbr }\nPage { Text "a" }').includes('unknown-type:number'));
 ok('lst<number> suggests list<number>', codes('screen s\nstate { n = [] : lst<number> }\nPage { Text "a" }').includes('unknown-type:list<number>'));
-ok('an entity type is fine', codes('screen s\nentity U { n text }\nstate { u = null : U }\nPage { Text "a" }').length === 0);
+ok('an entity type is fine', codes('screen s\nentity U { n text }\nstate { u = null : U }\nPage { Text "{u.n}" }').length === 0);
 ok('persist on a query is an error', codes('screen s\nentity U { n text }\nstate { u = query us : list<U> persist }\nsources { us: "/u" }\nPage { Text "a" }').includes('persist-query'));
 ok('a dotted ref to no store names the stores', validate(toDoc(parse('screen s\nPage { Text "{auth.on}" }')), { stores: ['cart'] }).diagnostics[0]?.message.includes('stores: cart'));
 

@@ -6,6 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parse } from '#engine/lang/parse.js';
 import { ParseError } from '#engine/shared/diagnostics.js';
+import { routeLayout } from '#engine/project/layouts.js';
 import type { RouteEntry, Value } from '#engine/shared/types.js';
 
 export function readRoutes(appRoot: string): RouteEntry[] {
@@ -20,7 +21,7 @@ export function readRoutes(appRoot: string): RouteEntry[] {
   const pagesDir = join(appRoot, 'src', 'pages');
   const routes: RouteEntry[] = (ir.routes || []).map((r) => ({
     route: r.url.replace(/^\//, ''), page: r.page, screenPath: join(pagesDir, r.page, r.page + '.muten'),
-    ...(r.layout ? { layout: r.layout } : {}),
+    ...(routeLayout(ir, r) ? { layout: routeLayout(ir, r) } : {}),
     ...(r.guard ? { guard: r.guard, redirect: r.redirect } : {}),
   }));
   if (!routes.length) throw new Error(`${rel(root)} has no routes. Add:  routes { /url -> page }`);

@@ -12,3 +12,13 @@ export function writeAppMap(root: string, map: object): string {
   writeFileSync(file, JSON.stringify(map, null, 2));
   return file;
 }
+
+/** The bundle's own record (esbuild's metafile: every output and the source modules inside it, by bytes), next to the
+ *  app map: what to read to know why a chunk weighs what it does. Local only, like the map. */
+export function writeBundleRecord(root: string, record: object): string {
+  const dir = join(root, '.muten');
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, 'bundle.json');
+  writeFileSync(file, JSON.stringify(record));
+  return file;
+}

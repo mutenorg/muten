@@ -145,9 +145,9 @@ const diagsOf = (src, ctx = {}) => validate(toDoc(parse(src)), ctx).diagnostics;
   // a built-in compiles to `__b_<name>`, so a state may share its name AND the page may still call the built-in
   const money = diagsOf('screen s\nstate { money = 5 : number  date = "2026-01-02" : text }\nPage { Text "{money(money)} {date(date)}" }');
   check('a state named like a built-in is fine (`money`, `date`)', money.length === 0, JSON.stringify(money.map((x) => x.code)));
-  const both = compileModule(toDoc(parse('screen s\nstate { money = 5 : number }\nPage { Text "{money(money)}" }')));
+  const both = compileModule(toDoc(parse('screen s\nstate { money = 5 : number }\naction up mutates money { money.set(money + 1) }\nPage { Text "{money(money)}"  Button "+" -> up }')));
   check('…and the call still reaches the built-in', both.includes('__b_money(money.get()') && both.includes('function __b_money('), both.match(/[^\n]*money[^\n]*/g)?.slice(0, 3).join(' | '));
-  const own = compileModule(toDoc(parse('screen s\nstate { n = 5 : number }\nget money(x) = x * 2\nPage { Text "{money(n)}" }')));
+  const own = compileModule(toDoc(parse('screen s\nstate { n = 5 : number }\naction up mutates n { n.set(n + 1) }\nget money(x) = x * 2\nPage { Text "{money(n)}"  Button "+" -> up }')));
   check('a `get money(…)` of the page wins over the built-in', own.includes('function money(x)') && own.includes('money(n.get())') && !own.includes('__b_money'), own.match(/[^\n]*money[^\n]*/g)?.slice(0, 3).join(' | '));
   const us = diagsOf('screen s\nstate { __x = 0 : number }\nPage { Text "x" }').find((x) => x.code === 'reserved-name');
   check('state with `__` prefix flagged (runtime-internal)', !!us, 'no diagnostic');
@@ -304,7 +304,7 @@ const diagsOf = (src, ctx = {}) => validate(toDoc(parse(src)), ctx).diagnostics;
 {
   const unnamed = diagsOf('screen s\nstate { n = 1 : number  q = "" : text }\nPage { Number bind(n)  SearchField bind(q) "Buscar"  Number bind(n) aria(label: "Cantidad") }').filter((d) => d.code === 'field-unnamed');
   check('a field with no text is flagged, one with text or aria(label) is not', unnamed.length === 1, JSON.stringify(unnamed));
-  const js = compileModule(toDoc(parse('screen s\nstate { n = 1 : number  q = "" : text  ch = "x" : text }\nPage { Number bind(n)  SearchField bind(q) "Mensaje a #{ch}"  Button "Ir" }')));
+  const js = compileModule(toDoc(parse('screen s\nstate { n = 1 : number  q = "" : text  ch = "x" : text }\naction pick mutates ch { ch.set("y") }\nPage { Number bind(n)  SearchField bind(q) "Mensaje a #{ch}"  Button "Ir" -> pick }')));
   check('no made-up English name', !js.includes('"Number"') && !js.includes('"Search"'), js.match(/aria-label[^\n]*/g)?.join(' | '));
   check('an interpolated text names the field and follows it', js.includes("effect(() => el_n3.setAttribute('aria-label', ") || /setAttribute\('aria-label', "Mensaje a #" \+/.test(js), js.match(/aria-label[^\n]*/g)?.join(' | '));
   check('a Button is type=button (built or cloned)', js.includes(".type = 'button';") || js.includes('<button type=\\"button\\"'), js.match(/[^\n]*Ir[^\n]*/)?.[0]);

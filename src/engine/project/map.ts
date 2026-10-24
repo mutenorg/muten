@@ -7,6 +7,7 @@ import { readRoutes } from '#engine/project/routes.js';
 import { load, loadAllParts, findStores } from '#engine/project/load.js';
 import { storeContext } from '#engine/project/context.js';
 import { sourceRequest } from '#engine/shared/source.js';
+import { codeLines } from '#engine/project/code-lines.js';
 import type { AppMap, Doc, Value } from '#engine/shared/types.js';
 
 // One route entry from a loaded page (no compile). Shared by build.ts and mapApp so the shape never drifts.
@@ -24,7 +25,7 @@ export async function mapApp(appRoot: string): Promise<AppMap> {
   const parts = await loadAllParts(appRoot);
   const pages = readRoutes(appRoot);
   const { storesMeta } = storeContext(findStores(join(appRoot, 'src'))); // domain -> {state, gets, actions}
-  const map: AppMap = { app: appRoot.split(/[\\/]/).pop() || '', parts: Object.keys(parts), stores: storesMeta, routes: {} };
+  const map: AppMap = { app: appRoot.split(/[\\/]/).pop() || '', code: codeLines(appRoot), parts: Object.keys(parts), stores: storesMeta, routes: {} };
   for (const page of pages) {
     const { doc, sources } = await load(page.screenPath, parts);
     map.routes['/' + page.route] = { ...routeEntry(relative(appRoot, page.screenPath), doc, sources), ...(page.layout ? { layout: page.layout } : {}) };

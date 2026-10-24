@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, existsSync, rmSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileInside, hostAllowed, isSecretPath, openInEditor, withCsp, cspFrom, DEFAULT_CSP, hostRuleProblem, securityHeaders, headersFrameProtected } from '../dist/dev-security.js';
-import { BUILTINS_JS } from '#engine/compile/emit.js';
+import { BUILTINS_JS, dataModule } from '#engine/compile/emit.js';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
 import { compileModule, compile } from '#engine/compile/compile.js';
@@ -95,7 +95,8 @@ check('relative path kept', __safeUrl('/product/12', false) === '/product/12' &&
 check('empty stays empty', __safeUrl('', false) === '' && __safeUrl(null, false) === '');
 
 // the compiler routes an interpolated href/src through __safeUrl, and leaves an authored one alone
-const src = 'screen t\nstate { u = "" : text }\nPage { Link "go" -> "{u}"  Image "{u}" alt("x")  Link "home" -> "/home" }';
+// (u is written by an action, so it is data that arrives at run time; a state nothing writes folds to what the author wrote)
+const src = 'screen t\nstate { u = "" : text }\naction go(v: text) mutates u { u.set(v) }\nPage { Link "go" -> "{u}"  Image "{u}" alt("x")  Link "home" -> "/home" }';
 const js = compileModule(toDoc(parse(src)));
 check('interpolated href goes through __safeUrl', /__bind\(el_\w+, "href", \(\) => __safeUrl\([^;]*, false\)\);/.test(js), js.slice(0, 400));
 check('interpolated src goes through __safeUrl', /__bind\(el_\w+, "src", \(\) => __safeUrl\([^;]*, true\)\);/.test(js));
@@ -114,10 +115,13 @@ check('__seg keeps a plain id', __seg('abc-123') === 'abc-123');
 
 // the user's session only goes to the app's own origins; the live socket never puts it in the url
 const liveJs = compileModule(toDoc(parse('screen t\nentity M { id text }\nstate { m = query msgs live : list<M> }\nsources { msgs: { url: "/messages/live" } }\nPage { Text "x" }')));
-check('headers are scoped by url', /__hdrs\(q\.url\)|__hdrs\(url\)/.test(liveJs) || /__hdrs\(q\.url\)/.test(reqJs));
-check('no bearer in the socket url', !/__all\.token/.test(liveJs) && !/__all\.token/.test(reqJs));
-check('bearer as a subprotocol', /muten\.bearer\./.test(liveJs) || /muten\.bearer\./.test(reqJs));
-const scope = new Function('location', 'globalThis', `const __API = { base: "https://api.app.com" }; ${reqJs.match(/const __OWN = [^\n]*/)[0]}\n${reqJs.match(/const __own = [^\n]*/)[0]}\n${reqJs.match(/const __hdrs = [^\n]*/)[0]}\nreturn __hdrs;`);
+// the data layer (headers, sockets, requests) lives once per app in virtual:muten/data; the pages call it
+const layerJs = dataModule();
+check('a page that sends data takes the shared layer', reqJs.includes('__dataLayer(') && reqJs.includes("from 'virtual:muten/data'"));
+check('headers are scoped by url', /__hdrs\(q\.url\)|__hdrs\(url\)/.test(layerJs));
+check('no bearer in the socket url', !/__all\.token/.test(layerJs));
+check('bearer as a subprotocol', /muten\.bearer\./.test(layerJs));
+const scope = new Function('location', 'globalThis', `const __API = { base: "https://api.app.com" }; ${layerJs.match(/const __OWN = [^\n]*/)[0]}\n${layerJs.match(/const __own = [^\n]*/)[0]}\n${layerJs.match(/const __hdrs = [^\n]*/)[0]}\nreturn __hdrs;`);
 const hdrs = scope({ href: 'https://app.com/x', origin: 'https://app.com' }, { __mutenHeaders: () => ({ authorization: 'Bearer s3cret' }) });
 check('session sent to the page origin', hdrs('https://app.com/me').authorization === 'Bearer s3cret');
 check('session sent to the declared api base', hdrs('https://api.app.com/me').authorization === 'Bearer s3cret');
@@ -141,6 +145,7 @@ check('default headers refuse other sites framing the app', hdr.includes("frame-
 check('default headers carry nosniff + HSTS', hdr.includes('nosniff') && hdr.includes('Strict-Transport-Security'));
 check('frame "deny" → none', securityHeaders({ frame: 'deny' }).includes("frame-ancestors 'none'"));
 check('headers "off" → nothing', securityHeaders({ headers: 'off' }) === null);
+check('hashed assets may be kept a year', /\/assets\/\*\n  Cache-Control: public, max-age=31536000, immutable/.test(hdr));
 check('an app _headers without frame protection is flagged', !headersFrameProtected('/*\n  X-Content-Type-Options: nosniff') && headersFrameProtected("/*\n  Content-Security-Policy: frame-ancestors 'self'"));
 
 // persisted state: a stored value of the wrong type falls back (a planted string never becomes the app's list or flag)
@@ -164,7 +169,7 @@ check('api { credentials: "include" } reaches the request', sourceRequest({ url:
 check('credentials works without a base (same-origin API)', sourceRequest({ url: '/messages' }, { credentials: 'include' }).credentials === 'include');
 check('an unknown credentials value is ignored', sourceRequest('/m', { base: 'https://a.b', credentials: 'everything' }).credentials === '');
 const credJs = compile(toDoc(parse('screen s\nstate { ms = query models : list<text> }\nsources { models: { url: "/x" } }\nPage { each ms.data as m { Span "{m}" } }')), {}, '', {}, {}, { format: 'module' });
-check('the runtime hands credentials to fetch', (credJs.match(/credentials: q\.credentials/g) || []).length >= 1);
+check('the runtime hands credentials to fetch', credJs.includes('__dataLayer(') && (layerJs.match(/credentials: q\.credentials/g) || []).length >= 1);
 
 // muten check: persisting a token or someone's personal data is flagged
 const { validate } = await import('#engine/ir/validate.js');

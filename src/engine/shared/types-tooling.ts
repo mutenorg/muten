@@ -53,7 +53,7 @@ export interface EffectRun { (): void; readonly sync: boolean; dispose(): void; 
 // `loc` is the node's line in the PAGE. A node inlined from a part has none — `owner`/`oloc` say which part file its
 // source lives in and where. The element picker climbs to the nearest `loc` (a line the app owns) and reports `owner`
 // as a hint; it must never turn `owner` into a path, because a plugin part's file lives in node_modules.
-export interface MountedNode { el: Element; parent: Element; dispose?: () => void; type?: string; part?: string; partArgs?: { [name: string]: string }; loc?: { line: number; col: number }; owner?: string; oloc?: { line: number; col: number }; }
+export interface MountedNode { el: Element; parent: Element; dispose?: () => void; type?: string; part?: string; partArgs?: { [name: string]: string }; loc?: { line: number; col: number }; owner?: string; oloc?: { line: number; col: number }; reads?: string[]; }
 export type NodeRegistry = { [id: string]: MountedNode };
 /** The live HMR handle stashed on a mounted page's root element (`el.__muten`): the reactive context (state/
  *  actions as addressable data, so a patch can rebuild a node against the SAME signals) + the node registry. */
@@ -61,7 +61,7 @@ export interface PageInstance { el: Element; ctx: { [name: string]: unknown }; n
 /** A compiled page/shell module: its scoped CSS + a mount() that builds it into a root element (returning it). */
 export interface PageModule { css: string; mount(root: Element, params?: { [key: string]: string }): Element; meta?: { [key: string]: string }; screen?: string; }
 /** One route's lazy loader + optional guard/redirect (the hash router consumes a map of these). */
-export interface RouteDef { load(): Promise<PageModule>; guard?: () => boolean; redirect?: string; layout?: string; }
+export interface RouteDef { page?: string; load(): Promise<PageModule>; guard?: () => boolean; redirect?: string; layout?: string; }
 /** The lazy loaders of the app's layouts, by name (a layout module mounts like the shell and returns its outlet). */
 export interface LayoutDefs { [name: string]: () => Promise<PageModule>; }
 
@@ -74,8 +74,14 @@ export type ClassValidatorLoader = (cssPath: string, base: string, themeRaw: The
 export interface StylingPlugin { theme?: ThemeAdapter; validate?: ClassValidatorLoader; classes?: { [slot: string]: string }; }
 
 /** The app graph the build emits to app.map.json (+ serves live at /_muten/graph): the root the AI reads. */
+/** Files and non-blank lines of one kind of code (code-lines.ts). */
+export interface LineCount { files: number; lines: number }
+/** How much of an app is muten (.muten, .store) and how much JS/TS, Customs apart; mutenShare is a percentage. */
+export interface CodeLines { muten: LineCount; script: LineCount; customs: LineCount; mutenShare: number }
+
 export interface AppMap {
   app: string;
+  code?: CodeLines;     // muten's share of the app's lines (code-lines.ts)
   parts: string[];
   stores: { [domain: string]: StoreSlice };
   routes: { [url: string]: { file: string; models: string[]; state: { [name: string]: Value }; sources: { [name: string]: string }; layout?: string } };

@@ -137,6 +137,8 @@ export interface ValidateCtx {
   routes?: string[];   // every declared route url ("/", "/product/:pid"); a static `Link -> "/x"` must match one. undefined -> not threaded (skip)
   translations?: Translations;   // the app's src/lang/*.lang: t("key") must name a key every language has
   themeValues?: ThemeRaw;        // theme.muten: `theme.colors.primary` must name a value it has
+  places?: boolean;   // findings inside a part keep their place in the part's file (Loc.in), for `check` to resolve; else the call in the page
+  around?: { ids: string[]; where: string };   // a layout: the ids EVERY page mounted in it declares (its `#top` link lands there), and how to name those pages in a message
   selfRoute?: string;  // THIS page's own url. A link to it is provably dead: the router's `go()` ignores a nav to the current path
 }
 

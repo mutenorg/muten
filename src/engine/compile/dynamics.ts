@@ -1,8 +1,9 @@
 // dynamics: what any element may carry on top of its own code: its id (an anchor), classes that follow state
-// (`class(on when x)`, `class("status-{x}")`), events (`on(event: action)`, with the natural value as the argument),
+// (`class(on when x)`, `class("status-{x}")`), events (`on(event: action)`, with the natural value as the argument;
+// touch gestures too: `on(swipe-left: next)`, `on(pinch: zoom)`),
 // a drag source or drop zone, aria/data attributes, `disabled when …`, and `style(name: …)` CSS variables. Every one
 // that reads state is an effect, so it follows it live.
-import { Ek, DATA_PREFIX } from '#engine/shared/vocab.js';
+import { Ek, DATA_PREFIX, GESTURES } from '#engine/shared/vocab.js';
 import type { Emitter, NodeProps } from '#engine/shared/types.js';
 
 // the value an event hands its action: an input its value, a key its key, a scroll how many pixels are left below
@@ -14,6 +15,10 @@ export function dynamicsLines(em: Emitter, id: string, p: NodeProps): void {
   if (p.id) em.push(`el_${id}.id = ${JSON.stringify(p.id)};`);   // id("features") — the anchor a `-> "#features"` scrolls to
   for (const c of p.class || []) if (typeof c !== 'string') {
     if ('interp' in c) {
+      // nothing in it reads state (a part's `class("notice-{tone}")` called with tone: "info"): set once, no effect
+      // re-checking a class that can never change
+      const fixed = c.interp.parts.every((part) => typeof part === 'string') ? c.interp.parts.join('').trim().split(/\s+/).filter(Boolean) : null;
+      if (fixed) { if (fixed.length) em.push(`el_${id}.classList.add(${fixed.map((token) => JSON.stringify(token)).join(', ')});`); continue; }
       // `class("status-{x}")` — interpolated token, applied reactively: swap the previous computed token(s)
       // for the new whenever the value changes (split() so a multi-word result is handled token-by-token).
       const js = em.interpConcat(c.interp);
@@ -32,6 +37,8 @@ export function dynamicsLines(em: Emitter, id: string, p: NodeProps): void {
   for (const [event, act] of Object.entries(p.on || {})) {
     if (typeof act !== 'string') continue;
     // synthetic: Esc anywhere on the page while this node is on screen (a modal, a sheet closes with it)
+    // a touch gesture (runtime-gesture.ts): one recognizer per element, whatever it listens for; a pinch hands the scale
+    if (GESTURES.has(event)) { em.push(`__gesture(el_${id}, ${JSON.stringify(event)}, (v) => ${em.logic.actionRef(act)}(v));`); continue; }
     if (event === 'escape') { em.push(`{ const __esc = (e) => { if (e.key === 'Escape') ${em.logic.actionRef(act)}(); }; document.addEventListener('keydown', __esc); onCleanup(() => document.removeEventListener('keydown', __esc)); }`); continue; }
     if (event === 'enter') em.push(`el_${id}.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ${em.logic.actionRef(act)}(); } });`); // synthetic: Enter submits (no newline); Shift+Enter is a newline
     // synthetic: `typed` fires ONCE the user stops typing (300ms after the last key), with the value — a search

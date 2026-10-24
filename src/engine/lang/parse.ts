@@ -8,7 +8,7 @@
 // Dispatch is data-driven via Maps (keyword -> handler, modifier -> handler, method -> builder), never growing if/else
 // chains. No magic strings.
 
-import { ParseError } from '#engine/shared/diagnostics.js';
+import { ParseError, closest } from '#engine/shared/diagnostics.js';
 import { PRIMITIVES } from '#engine/lang/manifest.js';
 import { DeclParser } from '#engine/lang/parse-decls.js';
 import { LANG_STORE, THEME_PROVIDER, FROM_SCRIPT, Tk, Pn, Kw, Nt, Mod, Ek, BOp, UOp, nonPrimitiveHint, DATA_PREFIX, PART_WRAP_CLASS } from '#engine/shared/vocab.js';
@@ -91,7 +91,7 @@ export class Parser extends DeclParser {
       [Mod.Accept, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); props.accept = this.eat(Tk.String).v; if (paren) this.eat(Tk.Punct, Pn.ParenR); }],   // File accept("image/*")
       [Mod.Alt, (props: NodeProps) => { const paren = this.at(Tk.Punct, Pn.ParenL); if (paren) this.next(); const t = this.eat(Tk.String); props.alt = this.parseInterpolation(t.v, t.pos + 1); if (paren) this.eat(Tk.Punct, Pn.ParenR); }],  // Image a11y/SEO alt text
       [Mod.Inputs, (props: NodeProps) => { props.inputs = { ...props.inputs, ...this.parseArgs() }; }],   // Custom inputs(k: value, ...)
-      [Mod.On, (props: NodeProps) => { props.on = { ...props.on, ...this.parseArgs() }; }],               // Custom on(event: action, ...)
+      [Mod.On, (props: NodeProps) => { props.on = { ...props.on, ...this.parseArgs(true) }; }],               // Custom on(event: action, ...)
       [Mod.Aria, (props: NodeProps) => { props.aria = { ...props.aria, ...this.parseAriaArgs() }; }],      // aria(label: "Close", expanded: isOpen) -> aria-*/role
       // data(slot: "card", state: isOpen ? "open" : "closed") -> data-* attrs. Stored beside aria's keys with the full `data-` name, so the
       // same compose/validate/compile path (literal = static, state-reading = effect) carries them; compile keeps a `data-` key as is.
@@ -107,6 +107,8 @@ export class Parser extends DeclParser {
       [Mod.Draggable, (props: NodeProps) => { props.draggable = this.parseExpr(); }],                 // draggable(item.id) — the id the drop carries
       [Mod.Droptarget, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); const t = this.eat(Tk.String); props.dropGroup = this.parseInterpolation(t.v, t.pos + 1); if (p) this.eat(Tk.Punct, Pn.ParenR); }], // droptarget("group") — the group interpolates, so `droptarget("{row.id}")` makes each row carry its own id (list reorder), while a static `droptarget("done")` is unchanged
       [Mod.Id, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.id = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // id("features") — a STATIC literal, so the oracle can prove every `-> "#features"` lands
+      [Mod.Lazy, (props: NodeProps) => { props.lazy = true; }],
+      [Mod.Wake, (props: NodeProps) => { props.wake = this.parseWake(); }],   // Custom X wake idle — when an island wakes   // Custom X lazy — a bare flag: mounted as it nears the screen (custom.ts)
       [Mod.Eager, (props: NodeProps) => { props.eager = true; }], // Image eager — a bare flag: this image loads at once, at high priority (lazy is the default)
       [Mod.Group, (props: NodeProps) => { const p = this.at(Tk.Punct, Pn.ParenL); if (p) this.next(); props.group = this.eat(Tk.String).v; if (p) this.eat(Tk.Punct, Pn.ParenR); }], // Details group("faq") — a STATIC name: the oracle checks it sits on a Details
     ]);
@@ -122,7 +124,10 @@ export class Parser extends DeclParser {
       [Kw.Entity, () => this.parseEntity(ir)],
       [Kw.State, () => this.parseState(Kw.State, ir.state)],
       [Kw.Store, () => { ir.store = ir.store || {}; this.parseState(Kw.Store, ir.store); }],   // app-global reactive state
-      [Kw.Get, () => this.parseGet(ir)],                                                       // store derived value
+      [Kw.Get, () => this.parseGet(ir)],
+      [Kw.Fn, () => this.parseFn(ir)],                                                         // TypeScript, written in place                                                       // store derived value
+      [Kw.Every, () => { const loc = this.locOf(this.next().pos); const ms = this.parseDuration(); (ir.timers = ir.timers || []).push({ ms, body: this.parseActionBody(), loc }); }], // `every 1m { … }`: a beat
+      [Kw.Settle, () => { const loc = this.locOf(this.next().pos); const watched = this.parseExpr(); const ms = this.parseDuration(); (ir.settles = ir.settles || []).push({ watched, ms, body: this.parseActionBody(), loc }); }], // once a value stops changing
       [Kw.Effect, () => { this.next(); (ir.effects = ir.effects || []).push(this.parseActionBody()); }], // store side-effect
       [Kw.Action, () => this.parseAction(ir)],
       [Kw.Mock, () => this.parseMock(ir)],
@@ -146,6 +151,7 @@ export class Parser extends DeclParser {
       }],
       [Kw.Use, () => { // `use a, b from "./lib.ts"` - named JS functions muten may call
         const loc = this.locOf(this.next().pos);
+        if (this.at(Tk.String)) { (ir.stylesheets = ir.stylesheets || []).push(this.next().v); return; }   // `use "swiper/css"`: a package's stylesheet
         if (this.parseForeignUse(ir)) return;   // `use element|widget|react Name … from "…"`: a component from npm
         // each name may say what it returns (`rowsOf: list<Row>`), so a list it gives back is read with its fields
         const names: string[] = [];
@@ -159,13 +165,25 @@ export class Parser extends DeclParser {
         this.eat(Tk.Ident, Kw.From);
         const script = this.at(Tk.Ident, FROM_SCRIPT) ? (this.next(), true) : false;   // `from script "https://…"`: a global, not a module
         const from = this.eat(Tk.String).v;
-        (ir.imports = ir.imports || []).push({ names, from, loc, ...(script ? { script } : {}), ...(Object.keys(returns).length ? { returns } : {}) });
+        const def = { names, from, loc, ...(script ? { script } : {}), ...(Object.keys(returns).length ? { returns } : {}) };
+        const list = (ir.imports = ir.imports || []);
+        list.push(def);
+        if (!script) for (const name of names) if (/^[A-Z]/.test(name)) this.plainUses.set(name, { def, list });   // a component, if it is used as one
       }],
     ]);
     while (!this.at(Tk.Eof)) {
       const tok = this.peek();
       const declaration = tok.t === Tk.Ident ? declarations.get(tok.v) : undefined;
+      const slip = !declaration && tok.t === Tk.Ident && /^[a-z]/.test(tok.v) ? closest(tok.v, declarations.keys()) : null;
       if (declaration) declaration();
+      else if (slip) {
+        // `prat Box(…)`, `etnity User { … }`: read as a UI node named `prat`, the part silently vanished (a parts file
+        // keeps no tree) or the rest of the file read as nonsense. A lowercase word one slip from a declaration is that slip.
+        const error = new ParseError(`\`${tok.v}\` is not a declaration: did you mean \`${slip}\`?`, this.locOf(tok.pos));
+        error.suggestion = slip;
+        error.from = tok.v;
+        throw error;
+      }
       else ir.tree = this.parseNode(); // anything else begins the tree root
     }
     return ir;
@@ -177,10 +195,16 @@ export class Parser extends DeclParser {
     ir.shell = { type: Nt.Shell, props: {}, children: this.parseChildren() };
   }
 
-  // `layout name { <node>* }`: chrome shared by the routes declared `in name`; mounted once, kept across them.
+  // `layout name [default] { <node>* }`: chrome shared by the routes declared `in name` (or by every route, when it is
+  // the `default` one, but those that say `without name`); mounted once, kept across them.
   private parseLayout(ir: IR): void {
     const start = this.eat(Tk.Ident, Kw.Layout);
     const name = this.eat(Tk.Ident).v;
+    if (this.at(Tk.Ident, Kw.Default)) {
+      const at = this.next();
+      if (ir.defaultLayout) throw new ParseError(`layout "${name}" cannot be the default too: "${ir.defaultLayout}" already is, and a route can mount in one layout only. Keep one \`default\` and put the other routes \`in ${name}\`.`, this.locOf(at.pos));
+      ir.defaultLayout = name;
+    }
     (ir.layouts = ir.layouts || {})[name] = { type: Nt.Layout, props: {}, children: this.parseChildren(), loc: this.locOf(start.pos) };
   }
 
@@ -272,7 +296,8 @@ export class Parser extends DeclParser {
     const type = head.v;
     const loc = this.locOf(head.pos);
     // a component from npm: `Rating(value: x)`, and a library's parts as its docs write them, `Dialog.Root { … }`
-    if (this.foreign.has(type) && !this.at(Tk.String)) {   // `Card class(…) { … }` too; `Text "…"` stays muten's (a library may also export a Text)
+    const asText = this.at(Tk.String);   // `Text "…"` stays muten's (a library may also export a Text)
+    if (!asText && (this.foreign.has(type) || (/^[A-Z]/.test(type) && this.adoptComponent(type)))) {   // `Card class(…) { … }` too; `Text "…"` stays muten's (a library may also export a Text)
       let path = type;
       while (this.at(Tk.Punct, Pn.Dot)) { this.next(); path += '.' + this.eat(Tk.Ident).v; }
       return this.parseForeignCall(path, loc);
@@ -365,7 +390,8 @@ export class Parser extends DeclParser {
       const classModifier = word === Mod.Class ? this.modifiers.get(Mod.Class) : undefined;
       if (classModifier) { this.next(); classModifier(props); continue; }
       if (word === Mod.On) { this.next(); props.on = { ...props.on, ...this.parseArgs(true) }; continue; }
-      if (this.modifiers.has(word)) throw new ParseError(`\`${word}(…)\` cannot be attached to \`${type}\` — a component from npm takes its props in \`${type}(…)\`, events in \`on(…)\` and \`class(…)\`.`, this.locOf(this.peek().pos));
+      if (word === Mod.Wake) { this.next(); props.wake = this.parseWake(); continue; }   // `Calendar(…) wake idle`
+      if (this.modifiers.has(word)) throw new ParseError(`\`${word}(…)\` cannot be attached to \`${type}\` — a component from npm takes its props in \`${type}(…)\`, events in \`on(…)\`, \`class(…)\` and \`wake\`.`, this.locOf(this.peek().pos));
       break;
     }
     const node: IRNode = { type: Nt.Custom, props, loc };

@@ -3,7 +3,12 @@
 // here we lock the generated shape — method, url (/:id), body, error handling, and the list mutation.
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
-import { compileModule, compileStore } from '#engine/compile/compile.js';
+import { compileModule as compilePage, compileStore as compileStoreModule } from '#engine/compile/compile.js';
+import { dataModule } from '#engine/compile/emit.js';
+// the data layer lives once per app now (virtual:muten/data); these checks read a page or a store together with it
+const withLayer = (code: string): string => (code.includes('__dataLayer(') ? `${code}\n${dataModule()}` : code);
+const compileModule = (...args: Parameters<typeof compilePage>): string => withLayer(compilePage(...args));
+const compileStore = (...args: Parameters<typeof compileStoreModule>): string => withLayer(compileStoreModule(...args));
 
 let f = 0;
 const ok = (l, c, e = '') => { console.log((c ? '✓' : '✗') + ' ' + l + (c ? '' : '   ← ' + e)); if (!c) f++; };
@@ -306,7 +311,7 @@ ok('the .pending signal is declared once', pendJs.split('const __pending_save = 
 {
   const { validate } = await import('#engine/ir/validate.js');
   const base = 'screen s\nentity M { name text }\nstate { msgs = query feed live : list<M>  local = [] : list<M> }\nsources { feed: "/live" }\n';
-  const codes = (action) => validate(toDoc(parse(base + action + '\nPage { Button "s" -> say }'))).diagnostics.map((d) => d.code);
+  const codes = (action) => validate(toDoc(parse(base + action + '\nPage { Button "s" -> say }'))).diagnostics.filter((d) => d.severity === 'error').map((d) => d.code);
   ok('send on a live query needs no mutates', codes('action say { msgs.send({ name: "x" }) }').length === 0, codes('action say { msgs.send({ name: "x" }) }').join(','));
   ok('send on a list that is not live is an error', codes('action say { local.send({ name: "x" }) }').includes('send-not-live'));
   const js = compileModule(toDoc(parse(base + 'action say { msgs.send({ name: "x" }) }\nPage { Button "s" -> say }')));

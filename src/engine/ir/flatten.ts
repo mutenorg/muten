@@ -75,6 +75,8 @@ function flatten(tree: IRNode): { rootId: string; nodes: { [id: string]: FlatNod
     if (node.partArgs) entry.partArgs = node.partArgs;   // dev: the part-call args -> DevTools "props"
     if (node.ownerPart) entry.ownerPart = node.ownerPart;   // dev: the part FILE this node's source lives in
     if (node.partLoc) entry.partLoc = node.partLoc;         // dev: its line inside that file — what the element picker edits
+    if (node.place) entry.place = node.place;               // that line and the call that reached it, for `check`
+    if (node.strays) entry.strays = node.strays;            // names its part does not declare (part-params.ts)
     if (node.args) entry.args = node.args; // unresolved part instance: lets the editor lint before compose
     nodes[id] = entry;                    // parent inserted before children so the map reads top-down
     entry.children = (node.children || []).map(visit);
@@ -92,5 +94,5 @@ export function toDoc(ir: IR): Doc {
   ir = inferLiteralListShapes(ir);   // literal-initialized lists get their element shape inferred (no `entity` needed)
   // a .store slice has state + actions but no node tree: produce an empty node map.
   const { rootId, nodes } = ir.tree ? flatten(ir.tree) : { rootId: undefined, nodes: {} };
-  return { screen: ir.screen, entities: ir.entities, state: ir.state, actions: ir.actions, gets: ir.gets || {}, getLocs: ir.getLocs, langFrom: ir.langFrom, fns: ir.fns || {}, effects: ir.effects || [], consts: ir.consts || {}, constraints: ir.constraints || {}, params: ir.params, meta: ir.meta, imports: ir.imports, rootId, nodes };
+  return { screen: ir.screen, entities: ir.entities, state: ir.state, actions: ir.actions, gets: ir.gets || {}, getLocs: ir.getLocs, langFrom: ir.langFrom, fns: ir.fns || {}, tsFns: ir.tsFns || {}, timers: ir.timers || [], settles: ir.settles || [], effects: ir.effects || [], consts: ir.consts || {}, constraints: ir.constraints || {}, params: ir.params, meta: ir.meta, imports: ir.imports, rootId, nodes };
 }

@@ -25,6 +25,9 @@ function closingBrace(raw: string, open: number): number {
 
 // Comparison operators as a table: [token kind, optional value] -> binary op.
 // Adding an operator is a single new row.
+// the brackets a block opens with, and what closes each (for the «the file ends while … is still open» message)
+const CLOSERS: { readonly [opener: string]: string } = { [Pn.BraceL]: Pn.BraceR, [Pn.ParenL]: Pn.ParenR, [Pn.BrackL]: Pn.BrackR };
+const CLOSING = new Set<string>([Pn.BraceR, Pn.ParenR, Pn.BrackR]);
 const COMPARISONS: Array<[Tk, string | undefined, BOp]> = [
   [Tk.Eq, undefined, BOp.Eq],
   [Tk.Neq, undefined, BOp.Neq],
@@ -75,9 +78,24 @@ export class Grammar {
   protected eat(kind: Tk, value?: string): Token {
     if (!this.at(kind, value)) {
       const tok = this.peek();
+      // the file ended mid-block: «expected string, got eof ""» said nothing; name the block left open and where it began
+      const open = tok.t === Tk.Eof ? this.unclosedOpener() : null;
+      if (open) throw new ParseError(`the file ends while the "${open.v}" opened on line ${this.locOf(open.pos).line} is still open: close it with "${CLOSERS[open.v]}"`, this.locOf(open.pos));
       throw new ParseError(`expected ${kind}${value ? ' "' + value + '"' : ''}, got ${tok.t} "${tok.v}"`, this.locOf(tok.pos));
     }
     return this.next();
+  }
+
+  /** The innermost `{` or `(` still open at the cursor, or null when every one before it was closed. */
+  protected unclosedOpener(): Token | null {
+    const stack: Token[] = [];
+    for (let i = 0; i < this.pos; i++) {
+      const tok = this.toks[i];
+      if (tok.t !== Tk.Punct) continue;
+      if (tok.v in CLOSERS) stack.push(tok);
+      else if (CLOSING.has(tok.v)) stack.pop();
+    }
+    return stack.length ? stack[stack.length - 1] : null;
   }
 
   /** A source index → { line, col }, by binary search over the recorded line offsets. */

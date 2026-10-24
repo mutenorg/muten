@@ -14,6 +14,9 @@ import { a11yDiagnostics } from '#engine/ir/a11y.js';
 import { checkActions } from '#engine/ir/validate-actions.js';
 import { schemaDiagnostics, SCALARS } from '#engine/ir/validate-schema.js';
 import { nodeWalker } from '#engine/ir/validate-nodes.js';
+import { located, onPageDiagnostic } from '#engine/ir/places.js';
+import { strayDiagnostics, withoutEchoes } from '#engine/ir/part-params.js';
+import { hygieneDiagnostics } from '#engine/ir/hygiene.js';
 import type { Doc, FlatNode, ValidateCtx, ValidateResult, Diagnostic, Expr, CallFacts, DataElement, RequestStmt, Loc } from '#engine/shared/types.js';
 
 /** What an async action exposes to a page: whether it is in flight, and how it failed. */
@@ -25,7 +28,14 @@ const STRINGY = ['text', 'string', 'email', 'uuid', 'date', 'password', 'textare
 // state names that hold a secret or a person's data: persisting them is flagged (see persist-sensitive below)
 const SENSITIVE_PERSIST = /(token|secret|password|passwd|session|jwt|bearer|apikey|api_key|email|phone|address|postal|card|cvv|iban|dni|cedula|ssn)/i;
 
+/** Every finding in a page (or a store, a layout). A finding inside a part keeps its place there only when `ctx.places`
+ *  asks for it (`check`, which knows the parts' files); everyone else gets the call in their own file (places.ts). */
 export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
+  const result = validateDoc({ ...doc, nodes: located(doc.nodes || {}) }, ctx);
+  return ctx.places ? result : { ...result, diagnostics: result.diagnostics.map(onPageDiagnostic) };
+}
+
+function validateDoc(doc: Doc, ctx: ValidateCtx): ValidateResult {
   const D: Diagnostic[] = [];
 
   const stateKeys = new Set(Object.keys(doc.state || {}));
@@ -45,10 +55,11 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   // that take parameters (`get initials(name) = …`)
   const fns = doc.fns || {};
   const ownsT = (doc.imports || []).some((def) => def.names.includes(TRANSLATE)) || TRANSLATE in fns;   // a `use t` of its own (Storio's i18n.ts)
-  const externs = new Set([...BUILTINS, ...(doc.imports || []).filter((i) => !i.kind).flatMap((i) => i.names), ...Object.keys(fns), ...(ctx.translations ? [TRANSLATE] : [])]);
+  const externs = new Set([...Object.keys(doc.tsFns || {}), ...BUILTINS, ...(doc.imports || []).filter((i) => !i.kind).flatMap((i) => i.names), ...Object.keys(fns), ...(ctx.translations ? [TRANSLATE] : [])]);
   // Anchor targets this page declares (`Section id("features")`), so a `Link -> "#features"` can be PROVEN to land.
   const anchorIds = new Set<string>();
   for (const node of Object.values(doc.nodes || {})) { const nodeId = node.props?.id; if (nodeId) anchorIds.add(nodeId); }
+  for (const nodeId of ctx.around?.ids || []) anchorIds.add(nodeId);   // a layout's in-page link lands in the pages it holds
   const EXTERNAL = /^([a-z][a-z0-9+.-]*:|\/\/)/i;   // http:, mailto:, tel:, protocol-relative — outside the closed world
   // A static href matches a declared route when the segment counts agree and every declared `:param` acts as a
   // wildcard — the same rule the runtime's matchRoute applies, so `-> "/product/42"` satisfies `"/product/:pid"`.
@@ -108,7 +119,7 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   // a call must name something callable (a built-in, a `use`'d function, a `get name(…)` here or in a store) with its arity
   for (const def of doc.imports || []) if (def.server) D.push(diag('server-package', def.server, { loc: def.loc ?? null, from: def.from }));
   const foreign = foreignNames(doc);   // what came from npm: its own methods and chains pass through (calls.ts)
-  const callFacts: CallFacts = { externs, foreign, fns, storeFns: ctx.storeFns, stores: storeDomains, arity: Object.assign({}, ...(doc.imports || []).map((def) => def.arity || {})),
+  const callFacts: CallFacts = { externs, foreign, fns, storeFns: ctx.storeFns, stores: storeDomains, arity: Object.assign({}, ...(doc.imports || []).map((def) => def.arity || {}), ...Object.entries(doc.tsFns || {}).map(([name, fn]) => ({ [name]: { min: fn.required, max: fn.params.length } }))),
     translations: ownsT ? undefined : ctx.translations };
   const checkCalls = (expr: Expr, loc?: Loc | null): void => { D.push(...callDiagnostics(expr, loc ?? null, callFacts)); };
 
@@ -448,6 +459,8 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   checkActions({ D, doc, ctx, checkExpr, itemPredScope, checkItemShadow, checkReqUrl, stateKeys, storeDomains, storeMemberMap, externs, foreign, actionNames });
 
   D.push(...a11yDiagnostics(nodes));   // names a screen reader can say, one h1 (a11y.ts)
+  D.push(...strayDiagnostics(nodes));  // an argument or a `$name` its part does not declare (part-params.ts)
+  D.push(...hygieneDiagnostics(doc, nodes, ctx.kind === 'store', speaks));   // no alt, unused state or action, untranslated words
 
   // styling under the oracle: validate every class() name against the styling plugin's RESOLVED theme
   // (a class validator the plugin supplies, loaded by the orchestrator). Catches typos on theme tokens
@@ -470,5 +483,6 @@ export function validate(doc: Doc, ctx: ValidateCtx = {}): ValidateResult {
   // see, but it must never fail `muten dev`/`bundle`/`build`. Every consumer keys off this flag, so if severity is not
   // honoured HERE it is decorative everywhere: the first warning validate ever emitted broke the whole showcase.
   D.push(...leafChildren(doc), ...reactListNodes(doc));
-  return { ok: !D.some((d) => d.severity === 'error'), diagnostics: D };
+  const said = withoutEchoes(D, nodes);
+  return { ok: !said.some((d) => d.severity === 'error'), diagnostics: said };
 }

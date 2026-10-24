@@ -12,8 +12,9 @@ const codes = (src) => validate(toDoc(parse(src)), {}).diagnostics.map((d) => d.
 
 const PAGE = `screen s
 state { who = "ana" : text  n = 2 : number }
+action more mutates n, who { n.set(n + 1)  who.set("eva") }
 get label(name: text, count) = upper(name) + " ×" + count
-Page { Text "{label(who, n)}" }`;
+Page { Text "{label(who, n)}"  Button "+" -> more }`;
 
 {
   const ir = parse(PAGE);
@@ -41,7 +42,7 @@ ok('an unknown function is still unknown', codes(PAGE.replace('label(who, n)', '
 {
   const ctx = { stores: { calc: { state: ['rate'], gets: [], actions: [], queries: [], fns: ['times'] } } };
   const vctx = { stores: ['calc'], storeMembers: { calc: ['rate'] }, storeFns: { calc: { times: ['x'] } } };
-  const src = 'screen s\nstate { n = 3 : number }\nPage { Text "{calc.times(n)}" }';
+  const src = 'screen s\nstate { n = 3 : number }\naction more mutates n { n.set(n + 1) }\nPage { Text "{calc.times(n)}"  Button "+" -> more }';
   const diags = (code) => validate(toDoc(parse(code)), vctx).diagnostics.map((d) => d.code);
   ok('store fn call validates', diags(src).length === 0, diags(src).join(','));
   ok('store fn arity is checked', diags(src.replace('calc.times(n)', 'calc.times(n, n)')).includes('fn-arity'));

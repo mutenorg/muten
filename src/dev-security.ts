@@ -71,13 +71,21 @@ function editorCommand(): { program: string; args: string[] } {
 
 /** Open `file` (relative to the app) at `line` in the editor, WITHOUT a shell: nothing in the request reaches one.
  *  Returns false when the file is not the app's own editable source or the line is not a number. */
-export function openInEditor(root: string, file: string, line: string): boolean {
-  if (!/^\d{1,7}$/.test(line)) return false;
-  if (!file || isAbsolute(file)) return false;
+/** `file` (relative to the app) as an absolute path when it is one of the app's own editable files, else null: inside
+ *  the app, not a secret, not a package's, an extension an editor opens. What the devtools may open, or fix. */
+export function appFile(root: string, file: string): string | null {
+  if (!file || isAbsolute(file)) return null;
   const base = resolve(root);
   const abs = resolve(base, file);
-  if (!abs.startsWith(base + sep) || isSecretPath(relative(base, abs)) || !EDITABLE.has(extname(abs).toLowerCase())) return false;
-  if (abs.split(sep).includes('node_modules') || !existsSync(abs) || statSync(abs).isDirectory()) return false;
+  if (!abs.startsWith(base + sep) || isSecretPath(relative(base, abs)) || !EDITABLE.has(extname(abs).toLowerCase())) return null;
+  if (abs.split(sep).includes('node_modules') || !existsSync(abs) || statSync(abs).isDirectory()) return null;
+  return abs;
+}
+
+export function openInEditor(root: string, file: string, line: string): boolean {
+  if (!/^\d{1,7}$/.test(line)) return false;
+  const abs = appFile(root, file);
+  if (!abs) return false;
   const { program, args } = editorCommand();
   const child = spawn(program, [...args, '-g', `${join(abs)}:${line}`], { shell: false, stdio: 'ignore', detached: true });
   child.on('error', () => { /* no editor on PATH: the request already answered */ });
@@ -180,6 +188,9 @@ export function securityHeaders(security: { [key: string]: unknown } | undefined
   const lines = ['/*'];
   if (frame) lines.push(`  Content-Security-Policy: frame-ancestors ${frame}`, `  X-Frame-Options: ${frame === "'none'" ? 'DENY' : 'SAMEORIGIN'}`);
   lines.push('  X-Content-Type-Options: nosniff', '  Referrer-Policy: strict-origin-when-cross-origin', '  Strict-Transport-Security: max-age=31536000');
+  // every file in /assets carries its content's hash in its name: a new version is a new name, so a browser may keep
+  // each one for a year and never ask again (without it, every visit asked for every chunk once more)
+  lines.push('', '/assets/*', '  Cache-Control: public, max-age=31536000, immutable');
   return lines.join('\n') + '\n';
 }
 

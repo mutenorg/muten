@@ -10,6 +10,7 @@ import { tokenize } from '#engine/lang/lexer.js';
 import { ParseError } from '#engine/shared/diagnostics.js';
 import { Tk, Pn } from '#engine/shared/vocab.js';
 import type { Loc, Translations, Token } from '#engine/shared/types.js';
+import { readMutenConfig, type ConfigBlock } from '#engine/project/config.js';
 
 export const LANG_DIR = 'lang';
 export const LANG_EXT = '.lang';
@@ -50,10 +51,32 @@ export function langFiles(appRoot: string): { [code: string]: string } {
   return Object.fromEntries(readdirSync(dir).filter((file) => file.endsWith(LANG_EXT)).sort().map((file) => [basename(file, LANG_EXT), join(dir, file)]));
 }
 
+/** muten.config's `i18n { languages [...]  default "es"  detect false }`: which languages ship, the one a reader
+ *  starts in when nothing else says (and the first a missing text falls back to), and whether the browser's language
+ *  counts. Without the block: every .lang file, the first one by name as the default, the browser counts. */
+export interface I18n { languages: string[] | null; fallback: string; detect: boolean }
+
+/** The app's i18n settings (a muten.config that does not parse is check's to report: the defaults then). */
+export function readI18n(appRoot: string): I18n {
+  let block: ConfigBlock = {};
+  try { const read = readMutenConfig(appRoot).i18n; if (read && typeof read === 'object' && !Array.isArray(read)) block = read; } catch { /* reported by check */ }
+  const languages = Array.isArray(block.languages) ? block.languages.filter((code): code is string => typeof code === 'string') : null;
+  return { languages, fallback: typeof block.default === 'string' ? block.default : '', detect: block.detect !== false };
+}
+
+/** The meta tag a page carries when the browser's language must not count (`i18n { detect false }`; runtime-lang.ts). */
+export const LANG_DETECT_META = 'muten-lang-detect';
+export function langDetectTag(appRoot: string): string {
+  return readI18n(appRoot).detect ? '' : `<meta name="${LANG_DETECT_META}" content="off">`;
+}
+
 /** Every language's texts, or undefined for an app with no src/lang (then `t` and `lang` are free names). A file that
  *  does not parse contributes nothing here: `check` reports it. */
 export function readTranslations(appRoot: string): Translations | undefined {
-  const files = Object.entries(langFiles(appRoot));
+  const { languages, fallback } = readI18n(appRoot);
+  // only the languages i18n lists (a draft .lang stays out), and the default first: it is where a reader starts when
+  // nothing else matches, and the first place a missing text is looked for (runtime-lang.ts reads them in this order)
+  const files = Object.entries(langFiles(appRoot)).filter(([code]) => !languages || languages.includes(code)).sort(([a], [b]) => Number(b === fallback) - Number(a === fallback));
   if (!files.length) return undefined;
   const out: Translations = {};
   for (const [code, file] of files) {

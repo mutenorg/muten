@@ -15,6 +15,7 @@ import { writeFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { homedir, platform } from 'node:os';
 import { bundle } from './runner.js';
+import { composeProbeCommand } from './compose-probe.js';
 
 // muten-managed toolchain: everything --install downloads lives HERE and nowhere else. No PATH, no registry, no
 // admin — `rm -rf ~/.muten` undoes the whole thing. The doctor looks here too, so an --install'd machine reports
@@ -99,6 +100,9 @@ function androidSdk(): string | undefined {
   ];
   return candidates.find((dir): dir is string => !!dir && existsSync(join(dir, 'platforms')));
 }
+
+/** What building an .apk needs on this machine, judged (`muten doctor` and `muten android` read the same verdicts). */
+export function androidRequirements(root?: string): Requirement[] { return [jdkVerdict(javaMajor(root)), sdkVerdict(androidSdk())]; }
 
 /** Judge a JDK major. Pure, so every branch is checkable without installing eight JDKs — and `os` is a parameter
  *  so the per-OS install line is checkable without three machines. */
@@ -259,6 +263,7 @@ function readProperty(file: string, key: string): string | undefined {
  *  what you want 90% of the time, and the other two are things you do to the thing it diagnosed. */
 export async function androidCommand(root: string, args: string[]): Promise<boolean> {
   if (args.includes('--install')) return androidInstall(root);
+  if (args.includes('--plan-b')) return composeProbeCommand(root, args.includes('--json'));   // the numbers for compiling to Compose (compose-probe.ts)
   if (args.includes('--build')) return androidBuild(root);
   return androidDoctor(root);
 }

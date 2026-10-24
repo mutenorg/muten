@@ -87,12 +87,12 @@ function checkCall(call: CallExpr, loc: Loc | null, facts: CallFacts): Diagnosti
   if (call.ctor) return null;
   if (call.chain && !foreign) return diag('no-methods', noMethodsMessage(call.fn + '(…)', call.chain[0].name), { loc, from: call.fn });
   if (dot === -1) {
-    if (!facts.externs.has(call.fn)) return diag('unknown-function', `"${call.fn}" is not a use'd function`, { loc, suggestion: closest(call.fn, [...facts.externs]), from: call.fn });
+    if (!facts.externs.has(call.fn)) return diag('unknown-function', `"${call.fn}" is not a function here: a built-in, a \`use\`d one, a \`fn\`, or a get with parameters`, { loc, suggestion: closest(call.fn, [...facts.externs]), from: call.fn });
     const own = facts.fns[call.fn];
     if (own) return arity(call, own.params, loc);
     const typed = facts.arity?.[call.fn];   // a `use`'d function whose package says how many values it takes
     if (typed && (call.args.length < typed.min || (typed.max >= 0 && call.args.length > typed.max)))
-      return diag('fn-arity', `"${call.fn}" takes ${typed.min === typed.max ? typed.min : typed.max < 0 ? `at least ${typed.min}` : `${typed.min} to ${typed.max}`} value${typed.max === 1 ? '' : 's'} (its package's types say so), not ${call.args.length}`, { loc, from: call.fn });
+      return diag('fn-arity', `"${call.fn}" takes ${typed.min === typed.max ? typed.min : typed.max < 0 ? `at least ${typed.min}` : `${typed.min} to ${typed.max}`} value${typed.max === 1 ? '' : 's'} (as it is declared), not ${call.args.length}`, { loc, from: call.fn });
     return null;
   }
   const head = call.fn.slice(0, dot);

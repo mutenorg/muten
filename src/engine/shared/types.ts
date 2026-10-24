@@ -3,7 +3,11 @@
 // no `as`, no phantom Record. Open-keyed maps use index signatures with real value types.
 // String/keyword/operator constants live in vocab.ts.
 
-import type { Tk, BOp, UOp, Ek, StOp, UseKind } from '#engine/shared/vocab.js';
+import type { TsFn, Timer, Settle } from '#engine/shared/types-fn.js';
+import type { Stray } from '#engine/shared/types-stray.js';
+import type { ThemeScale, ThemeProvider } from '#engine/shared/types-theme.js';
+
+import type { Tk, BOp, UOp, Ek, StOp, UseKind, WakeMode } from '#engine/shared/vocab.js';
 
 
 // ── 1. Primitive value shapes ───────────────────────────────────────────────
@@ -45,6 +49,12 @@ export interface Primitive {
 export interface Loc {
   line: number;
   col: number;
+  in?: PartPlace;   // set when the position is in a PART's file, not the file being read (see PartPlace)
+}
+/** A position inside part `part`'s own file, reached through the call at `call` (in the page, or itself inside another part). */
+export interface PartPlace {
+  part: string;
+  call: Loc | null;
 }
 
 
@@ -203,6 +213,7 @@ export interface ArgMap { [key: string]: ArgValue; }
 /** `fallback`: a literal the param takes when a call leaves it out (`size: text = "sm"`); without one the param is required. */
 export interface PartParam { name: string; type: string; fallback?: ArgValue; }
 export interface PartDef {
+  file?: string;   // the file it is written in (a plugin's: inside node_modules), so a finding inside it can name it
   params: PartParam[];
   tree: IRNode;
   // hoisted by the loader/analyzer so a part's @refs validate against its own data:
@@ -231,48 +242,7 @@ export interface Route {
   guard?: Expr;      // `guard auth.signedIn and not auth.blocked`: any expression, every ref a store member
   redirect?: string;
   layout?: string;   // `-> page in pro`: the route mounts inside the named `layout`, which stays mounted across its routes
-}
-
-/** A theme scale: step name (md/lg/…) → its CSS value ("16px", "1.5", "768px"). */
-export interface ThemeScale { [step: string]: string; }
-/** The theme.muten file as parsed: section name (space/colors/radius/…) → its scale. Open set:
- *  parseTheme reads any `<section> { <step> "value" }`, so colors/radius come for free. */
-export type ThemeRaw = { [section: string]: ThemeScale };
-
-/** The app's texts: language code → key → text (project/lang-files.ts). */
-export interface Translations { [code: string]: { [key: string]: string } }
-
-/** theme.muten's `provider ThemeProvider(theme: createTheme({ … })) from "@mui/material"`: what wraps every React
- *  component that comes from that package, so its pages only use the components. */
-export interface ThemeProvider { component: string; args: ArgMap; from: string; loc?: Loc; }
-
-/** theme.muten as a page sees it: its values, its providers and the `use` lines they call. */
-export interface ThemeKit { values: ThemeRaw; providers: ThemeProvider[]; imports: ImportDef[]; }
-
-/** The CSS library a `theme <name> { … }` connects (project/theme-library.ts). */
-export interface ThemeLibrary {
-  name: string;                            // as the theme writes it: shadcn
-  pkg: string;                             // the package it was found as: @muten/shadcn
-  dir: string;
-  css: string[];                           // its base stylesheets, always brought in
-  presets: { [name: string]: string };     // `preset noir` -> themes/noir.css
-  extras: { [name: string]: string };      // `with kit` -> kit.css
-  dark: string;                            // the selector its dark scheme hangs on
-  tailwind: boolean;                       // its stylesheets need Tailwind to be built
-  hasParts: boolean;                       // a muten plugin: its parts become available to every page
-}
-
-/** A theme ADAPTER: pure DATA describing how to render theme.muten's values for ANY styling backend.
- *  The engine has zero per-library logic — a new library is just a new adapter (no engine change). */
-export interface ThemeBlock {
-  open: string;                       // block opener — `:root {` by default, or whatever wrapper a styling plugin supplies
-  close: string;                      // usually `}`
-  attrs?: { [key: string]: string };  // literal lines inside (e.g. name/default); value `$scheme` -> theme.scheme.mode
-  sections: string[];                 // which theme.muten sections render in this block
-}
-export interface ThemeAdapter {
-  prefix: { [section: string]: string };  // section -> CSS var prefix (colors -> `--color-`); fallback `--<section>-`
-  blocks: ThemeBlock[];
+  without?: string;  // `-> page without site`: this route does not mount in the app's `default` layout
 }
 
 
@@ -299,6 +269,8 @@ export interface NodeProps {
   flags?: string[];         // Video boolean attrs: controls / autoplay / loop / muted / playsinline
   ordered?: boolean;        // List `ordered` -> <ol> instead of <ul>
   open?: boolean;           // Details `open` -> <details open> (expanded by default)
+  lazy?: boolean;           // Custom X lazy -> mounted (and what its mount imports, downloaded) as its place nears the screen
+  wake?: { mode: WakeMode; query?: string };   // an island's `wake idle` / `wake media "(min-width: 800px)"` (runtime-island.ts)
   eager?: boolean;          // Image eager -> loading=eager + fetchPriority=high; without it an Image is loading=lazy (it loads as it nears the screen)
   group?: string;           // Details group("faq") -> <details name="faq">: the browser keeps one of the group open
   head?: boolean;           // Row `head` -> a header row (its cells become <th>, grouped into <thead>)
@@ -365,6 +337,8 @@ export interface IRNode {
   // which part file owns it, and where inside that file. The element picker reads them to edit the right line.
   ownerPart?: string;  // dev: the part file this node's source lives in (the innermost one, for nested parts)
   partLoc?: Loc;       // dev: the node's position inside `ownerPart`'s own file
+  place?: Loc;         // the same position with the way it was reached (Loc.in): what `check` resolves to a file and a line
+  strays?: Stray[];    // names this node uses that its part does not declare (ir/part-params.ts): validate says them
 }
 
 /** The nested IR the parser produces. Optional members are populated as the grammar encounters them. */
@@ -383,6 +357,9 @@ export interface IR {
   getLocs?: { [name: string]: Loc };             // where each get is written
   langFrom?: Expr;                               // `lang from shop.lang`: the language this page's t(…) speaks
   fns?: { [name: string]: FnDef };               // `get name(params) = expr`: gets that take parameters
+  tsFns?: { [name: string]: TsFn };              // `fn name(…): T { … }`: TypeScript functions (types-fn.ts)
+  timers?: Timer[];                              // `every 1m { … }`: statements on a beat (types-fn.ts)
+  settles?: Settle[];                            // `settle q 350ms { … }`: once a value stops changing (types-fn.ts)
   effects?: Stmt[][];                            // .store reactive side-effects (each entry = one body)
   constraints?: { [entity: string]: EntityConstraints };
   mock?: { [name: string]: Value };              // inline test data
@@ -391,6 +368,7 @@ export interface IR {
   routes?: Route[];
   shell?: IRNode;
   layouts?: { [name: string]: IRNode };          // `layout pro { … slot … }` in app.muten: chrome shared by a group of routes
+  defaultLayout?: string;                        // `layout site default { … }`: every route mounts in it unless it says otherwise
   parts?: { [name: string]: PartDef };
   consts?: { [name: string]: Scalar };           // compile-time immutable scalars
   theme?: { [scale: string]: ThemeScale };       // project theme (raw blocks)
@@ -398,6 +376,7 @@ export interface IR {
   params?: string[];                             // route params declared by the page (`param id`), injected at mount
   meta?: { [k: string]: string };                // page <head> metadata (title/description -> tags + og)
   imports?: ImportDef[];                         // `use a, b from "./lib.ts"` -> named JS functions to call
+  stylesheets?: string[];                        // `use "swiper/css"` -> a package's stylesheet, in the app's CSS
 }
 
 
@@ -415,6 +394,8 @@ export interface FlatNode {
   partArgs?: { [name: string]: string };  // dev: readable part-call args -> DevTools "props"
   ownerPart?: string;  // dev: the part file this node's source lives in (see IRNode) — the picker's real target
   partLoc?: Loc;       // dev: the node's position inside `ownerPart`'s own file
+  place?: Loc;         // see IRNode
+  strays?: Stray[];    // see IRNode
   args?: ArgMap;  // unresolved part instance args (live-lint path, before compose)
 }
 
@@ -429,6 +410,9 @@ export interface Doc {
   rootId: string | undefined;
   nodes: { [id: string]: FlatNode };
   fns?: { [name: string]: FnDef };
+  tsFns?: { [name: string]: TsFn };
+  timers?: Timer[];
+  settles?: Settle[];
   gets?: { [name: string]: Expr };
   getLocs?: { [name: string]: Loc };
   langFrom?: Expr;
@@ -450,6 +434,7 @@ export interface Diagnostic {
   loc: Loc | null;
   suggestion: string | null;
   fix?: Fix | null;       // exact text to replace when a suggestion exists (AI applies deterministically)
+  word?: string | null;   // the text at fault, when the finding names one (with or without a fix): where `check` points
   related?: Loc | null;   // declaration loc of the referenced symbol (for navigation), when known
 }
 export interface ValidateResult {
@@ -463,6 +448,7 @@ export interface DiagOpts {
   severity?: Severity;
   from?: string | null;    // the bad token; with `suggestion` this becomes a `fix` { from, to }
   related?: Loc | null;    // declaration loc of the referenced symbol
+  word?: string | null;    // the text at fault when there is no `from` (defaults to `from`)
 }
 
 
@@ -471,4 +457,5 @@ export interface DiagOpts {
 // ── 12-14. Tooling, runtime and build shapes: types-tooling.ts (re-exported below) ──
 
 export * from '#engine/shared/types-compile.js';
+export * from '#engine/shared/types-theme.js';
 export * from '#engine/shared/types-tooling.js';

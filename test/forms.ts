@@ -68,7 +68,7 @@ Page { Form bind(d) submit(save) "Save" }`));
 ok('password/textarea/date form validates clean', validate(doc2).ok);
 const code2 = compile(doc2, {}, '', {}, {}, { format: 'module' });
 ok('password → input type="password"', /\.type = .password./.test(code2));
-ok('textarea → <textarea> element', code2.includes("createElement('textarea')"));
+ok('textarea → <textarea> element', (code2.includes("createElement('textarea')") || code2.includes("__mk('textarea'")));
 ok('date → input type="date"', /\.type = .date./.test(code2));
 ok('password length still validates (min:8)', code2.includes('Min 8 characters'));
 

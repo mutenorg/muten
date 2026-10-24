@@ -41,7 +41,7 @@ Table class("table") aria(label: "Users") {
   ok('reactive table validates', validate(doc).ok, '');
   const out = compile(doc, {});
   const code = out.split('<script type="module">')[1].split('</script>')[0];
-  ok('DOM path emits createElement("table")', code.includes("createElement('table')"), '');
+  ok('DOM path makes a <table> element', code.includes("createElement('table')") || code.includes("__mk('table'"), '');
 
   const registry: any[] = [];
   const makeEl = (tag: string): any => {
@@ -95,8 +95,9 @@ Stack class("card") data(slot: "card", size: "sm") aria(label: "Card") {
 {
   const src = `screen t
 state { tip = "" : text }
+action hint mutates tip { tip.set("Pista") }
 Stack {
-  Button "x" aria(label: "") data(name: "")
+  Button "x" aria(label: "") data(name: "") -> hint
   Button "y" aria(label: "Editar")
   Span "z" aria(label: tip)
 }`;
@@ -107,7 +108,7 @@ Stack {
   ok('label "Editar" → aria-label written', out.includes('setAttribute("aria-label", String("Editar"))'), out);
   ok('a live value that turns empty removes the attribute', out.includes('removeAttribute("aria-label")'), out);
   // a state named like the effect's local (v) must not be shadowed by it: `const v = String(v.get())` throws
-  const shadow = compile(toDoc(parse('screen t\nstate { v = "x" : text }\nStack { Span "y" aria(label: v) }')), {});
+  const shadow = compile(toDoc(parse('screen t\nstate { v = "x" : text }\naction set mutates v { v.set("z") }\nStack { Span "y" aria(label: v)  Button "z" -> set }')), {});
   ok('the live-attribute local cannot shadow a state of the page', !/const v = String\(v\./.test(shadow) && /const __av = String\(v\./.test(shadow), shadow);
 }
 
@@ -141,8 +142,8 @@ Span "{initials(who)} {hue(who)}"`));
 state { cols = [ { name: "A" }, { name: "B" } ] : list }
 Table { Row head { Cell "Name"  each cols as c { Cell "{c.name}" } } }`;
   const js = compile(toDoc(parse(src)), {});
-  const thCount = (js.match(/createElement\('th'\)|createElement\("th"\)/g) || []).length;
-  ok('a Cell inside each in a Row head is a <th>', thCount >= 2 && !/createElement\(['"]td['"]\)/.test(js), 'th=' + thCount);
+  const thCount = (js.match(/(?:createElement|__mk)\(['"]th['"]/g) || []).length;
+  ok('a Cell inside each in a Row head is a <th>', thCount >= 2 && !/(?:createElement|__mk)\(['"]td['"]/.test(js), 'th=' + thCount);
 }
 
 if (f) { console.error(`\n${f} FAILED`); process.exit(1); }

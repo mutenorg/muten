@@ -73,10 +73,14 @@ array    = "[" ( value ( "," value )* )? "]" ;
 object   = "{" ( ( ident | string ) ":" value ( "," … )* )? "}" ;
 
 routes   = "routes" "{" route* "}" ;                  # one route per line
-route    = path "->" ident ( "guard" "not"? dotted "else" path )? ;
+route    = path "->" ident ( "in" ident | "without" ident )? ( "guard" expr "else" path )? ;
+                                                      # in x: mount in layout x · without x: not in the default layout x
 path     = ( "/" ( ident | ":" ident )? )+ ;          # /  ·  /cart  ·  /product/:id   (:id = a route param)
 
 shell    = "shell" "{" node* "}" ;                    # persistent chrome; must contain a `slot`
+layout   = "layout" ident "default"? "{" node* "}" ;  # chrome a group of routes shares, kept while moving between them;
+                                                      # exactly one `slot`. `default`: every route mounts in it unless its
+                                                      # own line says `in` another or `without` it (one default per app)
 theme    = "theme" "{" ( ident "{" ( ident string )* "}" )* "}" ;   # space { md "16px" } …
 part     = "part" ident "(" ( param ( "," param )* )? ")" "{" node* "}" ;
 param    = ident ":" type ;

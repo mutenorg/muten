@@ -3,21 +3,28 @@
 // props changed (diffDoc). This machine only unless `--host` (a phone on the same wifi, with a QR to scan).
 // The build itself (model, plugin, CSS) lives in esbuild-muten.ts and is shared with `muten bundle`.
 import * as esbuild from 'esbuild';
-import { readFileSync, existsSync, readdirSync, realpathSync, watch } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, realpathSync, watch, mkdirSync } from 'node:fs';
 import { createServer, type ServerResponse, type IncomingMessage } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, relative, extname } from 'node:path';
 import { loadModel, mutenEsbuild, buildCss, buildFailureErrors, readIndexHtml } from './esbuild-muten.js';
-import { load } from '#engine/project/load.js';
+import { load, loadAllParts } from '#engine/project/load.js';
 import { compileNodePatch } from '#engine/compile/compile.js';
-import { devToken, fileInside, hostAllowed, openInEditor } from './dev-security.js';
+import { devToken, fileInside, hostAllowed, openInEditor, appFile } from './dev-security.js';
 import { envDefines } from '#engine/project/env.js';
 import { mapApp } from '#engine/project/map.js';
 import type { Doc } from '#engine/shared/types.js';
 import { ParseError, diag, formatDiagnostic } from '#engine/shared/diagnostics.js';
-import { nativeWebOptions } from '#engine/project/native-web.js';
+import { libraryOptions } from '#engine/project/bundle-options.js';
+import { waitForFix } from './dev-wait.js';
+import { placeRuntimeError } from './dev-errors.js';
+import { LAST_ERROR } from './report.js';
+import { devKeys } from './dev-keys.js';
+import { devtoolsAnswer, forgetIssues } from './devtools-server.js';
+
+const ERROR_BODY_MAX = 64 * 1024;   // a stack, not an upload
 
 const here = dirname(fileURLToPath(import.meta.url));
 // A QR encoder is Reed-Solomon, not a few lines — so this is the one place a dependency beats owning the code.
@@ -112,8 +119,9 @@ function diffDoc(a: Doc, b: Doc): { reload: boolean; patches: string[] } {
 // frame later, with no error object behind it): covering the page with it hid working screens (a TableView on a phone). this surfaces it like Vite, with the stack
 // (source maps attribute frames to the .muten file). Compile errors use the server-side overlay() instead.
 const devClient = (token: string): string => `<script>window.__MUTEN_DEV_TOKEN=${JSON.stringify(token)};(function(){function show(m){var d=document.getElementById('__mu_err');if(!d){d=document.createElement('div');d.id='__mu_err';document.body.appendChild(d);}d.style.cssText='position:fixed;inset:0;z-index:99999;background:#1a1a1f;color:#ffb4b4;font:13px/1.6 ui-monospace,monospace;overflow:auto';d.innerHTML='<div style="padding:16px 24px;background:#2a1416;color:#ff6b6b;font-weight:600;border-bottom:1px solid #471c1f">muten \\u2014 runtime error</div><pre style="padding:24px;white-space:pre-wrap">'+String(m).replace(/[<&]/g,function(c){return c==='<'?'&lt;':'&amp;';})+'</pre>';}
-addEventListener('error',function(e){if(!e.error&&/^ResizeObserver loop/.test(e.message||''))return;show((e.error&&e.error.stack)||e.message);});
-addEventListener('unhandledrejection',function(e){show('Unhandled promise rejection:\\n'+((e.reason&&e.reason.stack)||e.reason));});
+function place(s){try{fetch('/_muten/error',{method:'POST',headers:{'x-muten-token':window.__MUTEN_DEV_TOKEN,'content-type':'application/json'},body:JSON.stringify({stack:String(s)})}).then(function(r){return r.ok?r.json():null}).then(function(j){if(j&&j.text)show(j.text)}).catch(function(){})}catch(_){}}
+addEventListener('error',function(e){if(!e.error&&/^ResizeObserver loop/.test(e.message||''))return;var s=(e.error&&e.error.stack)||e.message;show(s);place(s);});
+addEventListener('unhandledrejection',function(e){var s=(e.reason&&e.reason.stack)||String(e.reason);show('Unhandled promise rejection:\\n'+s);place(s);});
 if(self===top){var __es=new EventSource('/_reload');__es.onmessage=function(e){var m;try{m=JSON.parse(e.data)}catch(_){return location.reload()}if(m.type==='css'){var l=document.querySelector('link[href^="/assets/boot.css"]');if(l){var n=l.cloneNode(false);n.setAttribute('href','/assets/boot.css?v='+Date.now());n.onload=function(){l.remove()};l.parentNode.insertBefore(n,l.nextSibling);}return;}if(m.type!=='patch')return location.reload();var rt=window.__muten_rt,pg=window.__muten_page;if(!rt||!pg||window.__muten_screen!==m.screen)return location.reload();try{for(var i=0;i<m.patches.length;i++){var p=m.patches[i],b=eval('('+p.src+')');if(!rt.patchNode(pg,p.id,function(c,par,n){return b(c,n,par,rt)}))return location.reload();}}catch(err){console.error('[muten hmr]',err);location.reload();}};addEventListener('pagehide',function(){__es.close()});addEventListener('pageshow',function(e){if(e.persisted)location.reload()});};})();</script>`;
 
 
@@ -126,12 +134,22 @@ export interface DevOptions { port: number; lan: boolean; hosts: string[] }
 export async function devEsbuild(root: string, options: DevOptions = { port: 5173, lan: false, hosts: [] }): Promise<void> {
   const { port } = options;
   const token = devToken(); // this run's secret: the page gets it in its dev client, a page on another origin never does
-  const model = await loadModel(root);
+  // an app that cannot even load (a broken app.muten, muten.config or theme.muten) keeps the server up with the error on
+  // the page, and loads again on the next save, instead of ending the process
+  let model: Awaited<ReturnType<typeof loadModel>>;
+  for (;;) {
+    try { model = await loadModel(root); break; }
+    catch (e) {
+      const message = describeFailure(e, root);
+      console.error('\n  \x1b[31m✗\x1b[0m ' + message + '\n  waiting for a fix… (save to retry)');
+      await waitForFix(root, port, options.lan ? undefined : '127.0.0.1', message);
+    }
+  }
   const outdir = join(root, '.muten-dev'); // a virtual base for output paths only — write:false, so nothing hits disk
   const ctx = await esbuild.context({
     entryPoints: { boot: join(root, 'src', 'app.muten') },
-    bundle: true, format: 'esm', splitting: true, sourcemap: true, write: false, ...nativeWebOptions(root, true),
-    define: { __MUTEN_DEV__: 'true', ...envDefines(root), ...nativeWebOptions(root, true).define }, // dev: keep the __muten_rt registry (HMR patch + DevTools reach the runtime through it)
+    bundle: true, format: 'esm', splitting: true, sourcemap: true, write: false, ...libraryOptions(root, true),
+    define: { __MUTEN_DEV__: 'true', ...envDefines(root), ...libraryOptions(root, true).define }, // dev: keep the __muten_rt registry (HMR patch + DevTools reach the runtime through it)
     // entry stays unhashed (index.html references /assets/boot.js); SHARED CHUNKS must be hashed, or ≥2 of them
     // (e.g. the runtime + a shared lib like fruta) both land on assets/chunk.js and esbuild aborts the dev build.
     outdir, entryNames: 'assets/[name]', chunkNames: 'assets/[name]-[hash]', assetNames: 'assets/[name]',
@@ -151,6 +169,7 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
       files = next;
       const css = await buildCss(root, model);
       cssBytes = css ? Buffer.from(css) : null;
+      forgetIssues();   // the devtools' Issues read check again after this build
       if (lastError) console.log('  \x1b[32m✓\x1b[0m fixed');
       lastError = '';
     } catch (e) {
@@ -252,11 +271,44 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
       catch (e) { res.statusCode = 500; res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) })); }
       return;
     }
+    const answer = url.startsWith('/_muten/') ? await devtoolsAnswer(root, url, new URLSearchParams((req.url || '').split('?')[1] || '')) : false;
+    if (answer !== false) { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(answer)); return; }   // the devtools' questions (devtools-server.ts)
+    if (url === '/_muten/error') {   // dev-only: a browser error's stack, read back to the .muten line (dev-errors.ts)
+      res.setHeader('Content-Type', 'application/json');
+      if (!trusted(req)) { res.statusCode = 403; res.end('{"ok":false,"error":"forbidden"}'); return; }
+      let body = '';
+      for await (const chunk of req) { body += chunk; if (body.length > ERROR_BODY_MAX) { res.statusCode = 413; res.end('{"ok":false}'); return; } }
+      let stack = '';
+      try { const parsed: unknown = JSON.parse(body); if (parsed && typeof parsed === 'object' && 'stack' in parsed && typeof parsed.stack === 'string') stack = parsed.stack; } catch { stack = ''; }
+      const placed = placeRuntimeError(stack, files, root, outdir);
+      try { mkdirSync(join(root, '.muten'), { recursive: true }); writeFileSync(join(root, LAST_ERROR), placed.text); } catch { /* the report just won't have it */ }   // for `muten report`
+      res.end(JSON.stringify(placed));
+      return;
+    }
+    if (url === '/_muten/fix') {   // the devtools' Fix: one finding's fix, only where its word still is (as check --fix)
+      res.setHeader('Content-Type', 'application/json');
+      if (!trusted(req)) { res.statusCode = 403; res.end('{"ok":false,"error":"forbidden"}'); return; }
+      const qs = new URLSearchParams((req.url || '').split('?')[1] || '');
+      const abs = appFile(root, qs.get('file') || '');
+      const line = Number(qs.get('line')), col = Number(qs.get('col')), from = qs.get('from') || '', to = qs.get('to') || '';
+      if (!abs || !/\.(muten|store)$/.test(abs) || !from || !to || !(line > 0) || !(col > 0)) { res.statusCode = 400; res.end('{"ok":false}'); return; }
+      const lines = readFileSync(abs, 'utf8').split('\n');
+      const text = lines[line - 1] ?? '';
+      if (!text.startsWith(from, col - 1)) { res.statusCode = 409; res.end('{"ok":false,"error":"the word is no longer there"}'); return; }
+      lines[line - 1] = text.slice(0, col - 1) + to + text.slice(col - 1 + from.length);
+      writeFileSync(abs, lines.join('\n'));
+      res.end('{"ok":true}');
+      return;
+    }
     if (url === '/__muten_open') { // dev-only: open a .muten file at a line in the user's editor (DevTools "open in editor")
       res.setHeader('Content-Type', 'application/json');
       if (!trusted(req)) { res.statusCode = 403; res.end('{"ok":false,"error":"forbidden"}'); return; }
       const qs = new URLSearchParams((req.url || '').split('?')[1] || '');
-      try { if (openInEditor(root, qs.get('file') || '', qs.get('line') || '1')) { res.end('{"ok":true}'); return; } } catch { /* spawn refused */ }
+      // a part is named, not filed, in the page: its file is found here (the devtools' «Open in editor» on a part)
+      let file = qs.get('file') || '';
+      const part = qs.get('part');
+      if (part) { const found = (await loadAllParts(root))[part]?.file; file = found ? relative(root, found) : ''; }
+      try { if (openInEditor(root, file, qs.get('line') || '1')) { res.end('{"ok":true}'); return; } } catch { /* spawn refused */ }
       res.statusCode = 404; res.end('{"ok":false,"error":"not found"}');
       return;
     }
@@ -280,6 +332,7 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
       if (lanAddresses().length) console.log(`  on your phone       → http://localhost:${bound}/_qr  (scan it)`);
       console.log('  \x1b[33m!\x1b[0m open to the network (--host): anyone on this wifi can load the app');
     } else console.log('  (this machine only; `muten dev --host` to open it to a phone on the same wifi)');
+    devKeys(root, `http://localhost:${bound}/`);   // o / c / h / q, in a terminal (dev-keys.ts)
   });
   httpServer.listen(port, options.lan ? undefined : '127.0.0.1');
 

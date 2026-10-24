@@ -24,8 +24,17 @@ interface Reaction {
   readonly sync: boolean;
   disposed: boolean;
   cell?: Cell;       // a derived value's own cell (its readers); an effect has none
+  node?: string;     // dev: the page node this effect draws (__at), for the devtools' x-ray and profiler
   compute(): void;   // run the function again (a derived value marks its readers dirty when its value changes)
 }
+
+// dev: which node the page is drawing now (the compiler says `__at("n5")` as it builds each one, only in dev), and who
+// listens to how long each effect of a node takes when it runs again. Nobody listening: nothing is timed.
+type Tracer = (node: string, ms: number) => void;
+let drawing: string | undefined;
+let tracer: Tracer | null = null;
+export function __at(node: string): void { drawing = node; }
+export function __traceWith(listen: Tracer | null): void { tracer = listen; }
 
 let current: Reaction | null = null;   // the reaction running now: what it reads, it depends on
 let owner: Array<Reaction | (() => void)> | null = null;   // reactions + teardowns created in the current scope
@@ -135,9 +144,15 @@ export function computed<T>(fn: () => T): Signal<T> {
 
 /** Runs `fn`, tracking every signal and derived value it reads; runs it again when any of them changes. */
 export function effect(fn: () => void, sync?: boolean): EffectRun {
+  let ran = false;
   const reaction: Reaction = {
-    mark: Mark.Dirty, sources: new Set(), effect: true, sync: !!sync, disposed: false,
-    compute() { run(reaction, fn); },
+    mark: Mark.Dirty, sources: new Set(), effect: true, sync: !!sync, disposed: false, node: drawing,
+    compute() {
+      if (!tracer || !reaction.node || !ran) { ran = true; run(reaction, fn); return; }   // the first run is the mount
+      const started = performance.now();
+      run(reaction, fn);
+      tracer(reaction.node, performance.now() - started);
+    },
   };
   if (owner) owner.push(reaction);                          // belongs to the current scope, disposable on unmount/navigation
   refresh(reaction);

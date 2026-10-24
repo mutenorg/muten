@@ -5,7 +5,7 @@ import { parse } from '#engine/lang/parse.js';
 import { print as printIR } from '#engine/ir/print.js';
 import { compose, composeDoc } from '#engine/ir/compose.js';
 import { mergeImports } from '#engine/ir/imports.js';
-import { layoutDiagnostics } from '#engine/project/layouts.js';
+import { layoutDiagnostics, routeLayout } from '#engine/project/layouts.js';
 import { compileModule } from '#engine/compile/compile.js';
 import { layoutDoc, layoutLoaders } from '../dist/layout-modules.js';
 import { route } from '../dist/runtime.js';
@@ -99,6 +99,53 @@ await go('/pub');
 ok('a route outside the layout drops it', outlet.children.length === 1 && outlet.children[0].tag === 'page:pub', JSON.stringify(outlet.children.map((c) => c.tag)));
 await go('/a');
 ok('coming back mounts the layout again', layoutMounts === 2 && outlet.children[0].tag === 'layout' && layoutLoads === 2, `mounts=${layoutMounts} loads=${layoutLoads}`);
+
+// ── the default layout: every route has it unless its own line says otherwise ──
+// (`layout site default`, `"/search" -> search without site`, `"/app" -> panel in admin`: each route's line says all)
+const site = parse(`
+layout site default {
+  Nav "Menú" { Link "Precios" -> "/pricing" }
+  slot
+}
+layout admin {
+  slot
+}
+routes {
+  "/"        -> home
+  "/pricing" -> pricing
+  "/search"  -> search without site
+  "/panel"   -> panel in admin
+}`);
+ok('`default` marks the layout every route gets', site.defaultLayout === 'site');
+ok('a route with no word of its own mounts in the default layout', routeLayout(site, site.routes[0]) === 'site' && routeLayout(site, site.routes[1]) === 'site');
+ok('`without site` leaves it out, on that route\'s own line', site.routes[2].without === 'site' && routeLayout(site, site.routes[2]) === undefined);
+ok('`in admin` mounts in another layout', routeLayout(site, site.routes[3]) === 'admin');
+ok('a clean default-layout app has no layout diagnostics', layoutDiagnostics(site).length === 0, JSON.stringify(layoutDiagnostics(site)));
+ok('print round-trips `default` and `without`', printIR(site).includes('layout site default {') && printIR(site).includes('"/search" -> search without site') && parse(printIR(site)).defaultLayout === 'site');
+ok('the boot loader gets the layout the default gives', layoutLoaders(site).includes('site'));
+let twoDefaults = '';
+try { parse('layout a default {\n  slot\n}\nlayout b default {\n  slot\n}\nroutes {\n  "/" -> home\n}'); } catch (e) { twoDefaults = e instanceof Error ? e.message : String(e); }
+ok('two default layouts is an error: a route mounts in one', twoDefaults.includes('already is'), twoDefaults);
+const layoutCodes = (source) => layoutDiagnostics(parse(source)).map((d) => d.code);
+ok('`without` a layout that does not exist is an error', layoutCodes('layout site default {\n  slot\n}\nroutes {\n  "/" -> home without sitee\n}').includes('unknown-layout'));
+ok('`without` on a route already `in` another is flagged', layoutCodes('layout site default {\n  slot\n}\nlayout admin {\n  slot\n}\nroutes {\n  "/" -> home in admin without site\n}').includes('without-in'));
+ok('`without` a layout that is not the default is flagged (it does nothing)', layoutCodes('layout site {\n  slot\n}\nroutes {\n  "/" -> home in site\n  "/x" -> x without site\n}').includes('without-not-default'));
+ok('a default layout is never «unused»', !layoutCodes('layout site default {\n  slot\n}\nroutes {\n  "/" -> home\n}').includes('unused-layout'));
+
+// ── a layout's in-page link lands in the pages it holds; its words speak the app's `lang from` ──
+{
+  const { validate } = await import('#engine/ir/validate.js');
+  const { toDoc } = await import('#engine/ir/flatten.js');
+  const withTop = parse('layout site default {\n  Link "Menú" -> "#top"\n  slot\n}\nroutes {\n  "/" -> home\n}\n');
+  const layoutOnly = toDoc({ ...withTop, tree: withTop.layouts.site });
+  const anchorCodes = (around) => validate(layoutOnly, { around }).diagnostics.filter((d) => d.code === 'unknown-anchor');
+  ok('a layout\'s `#top` is fine when every page in it declares id("top")', anchorCodes({ ids: ['top'], where: 'layout "site"' }).length === 0);
+  const missing = anchorCodes({ ids: [], where: 'layout "site"' });
+  ok('…and flagged, naming the layout, when not every page does', missing.length === 1 && missing[0].message.includes('not every page in layout "site"'), missing.map((d) => d.message).join());
+  const spoken = parse('lang from ui.lang\nlayout site default {\n  Text "{t(\"hi\")}"\n  slot\n}\nroutes {\n  "/" -> home\n}\n');
+  const built = layoutDoc(spoken, {}, 'site');
+  ok('`lang from` in app.muten: the layouts speak that language too', built?.doc.langFrom?.name === 'ui.lang', JSON.stringify(built?.doc.langFrom));
+}
 
 console.log(f ? `\n${f} FAILURE(S)` : '\nALL OK');
 process.exit(f ? 1 : 0);

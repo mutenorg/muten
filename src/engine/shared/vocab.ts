@@ -18,6 +18,7 @@ export enum Tk {
   Lte = 'lte',           // <=
   Gte = 'gte',           // >=
   FatArrow = 'fatarrow', // =>
+  Raw = 'raw',           // the signature and TypeScript body of a `fn`, as written (lexer.ts)
   Eof = 'eof',
 }
 
@@ -34,8 +35,8 @@ export enum Pn {
 /** Keywords and reserved idents the parser matches. */
 export enum Kw {
   Screen = 'screen', Entity = 'entity', State = 'state', Store = 'store',
-  Get = 'get', Effect = 'effect', Action = 'action', Mutates = 'mutates', Failed = 'failed',
-  Mock = 'mock', Sources = 'sources', Routes = 'routes', Shell = 'shell', Layout = 'layout', In = 'in',
+  Get = 'get', Fn = 'fn', Settle = 'settle', Effect = 'effect', Action = 'action', Mutates = 'mutates', Failed = 'failed',
+  Mock = 'mock', Sources = 'sources', Routes = 'routes', Shell = 'shell', Layout = 'layout', In = 'in', Default = 'default', Without = 'without',
   Part = 'part', Const = 'const', Theme = 'theme', Query = 'query', Every = 'every', Live = 'live', Persist = 'persist', Param = 'param', Api = 'api', Body = 'body', Into = 'into', Meta = 'meta',
   Use = 'use', From = 'from',
   When = 'when', Each = 'each', Match = 'match', As = 'as', Where = 'where', By = 'by', With = 'with', If = 'if', Else = 'else', Ordered = 'ordered', Open = 'open', Head = 'head',
@@ -148,6 +149,8 @@ export enum Mod {
   Data = 'data',   // data(slot: "card", state: open) — `data-*` attributes for CSS hooks (component libraries style by them); rides aria()'s machinery
   Group = 'group',   // Details group("faq") — siblings sharing a group open one at a time (native <details name>)
   Eager = 'eager',   // Image eager — load it now (the cover, the first thing seen); every other Image loads as it nears the screen
+  Lazy = 'lazy',     // Custom X lazy — mount it (and whatever its mount imports) only as its place nears the screen
+  Wake = 'wake',     // an island's wake: `wake load | idle | visible | media "(…)"` (runtime-island.ts)
   Accept = 'accept',
   Currency = 'currency',   // Number currency("COP") — a money field: grouped as the page's language writes it, decimals only if the currency has them   // File accept("image/*") — what the picker offers and what a drop takes
   Id = 'id',   // id("features") — a stable DOM id; the target an in-page `Link -> "#features"` anchor scrolls to
@@ -219,10 +222,19 @@ export enum TestKw {
   No = 'no',
   Wait = 'wait',     // wait 300: milliseconds
 }
+/** A host component's file in src/components/, by the extensions it may have: TypeScript first (`Map.ts`, its mount's
+ *  types checked at each call), then JavaScript. */
+export const HOST_EXTS: ReadonlyArray<string> = ['.ts', '.js'];
+/** When an island wakes (loads its library and draws): as the page opens, once the browser is idle, as its place nears
+ *  the screen (the default), or while a media query holds. Astro's `client:load|idle|visible|media`. */
+export enum WakeMode { Load = 'load', Idle = 'idle', Visible = 'visible', Media = 'media' }
+/** Touch gestures `on(…)` listens for on any element (runtime-gesture.ts); `pinch` hands its action the scale. */
+export const GESTURES: ReadonlySet<string> = new Set(['swipe-left', 'swipe-right', 'swipe-up', 'swipe-down', 'long-press', 'double-tap', 'pinch']);
 /** The extension of a test file, next to its page (`home.muten` + `home.test`). */
 export const TEST_EXT = '.test';
 
 /** What a `use` brings in: functions (the default), or a UI component from npm used like a part.
  *  `use element Rating "sl-rating" from "…"` (a Web Component) · `use widget Map from "…"` (exports `mount(el, inputs, on)`)
- *  · `use react DayPicker from "…"` (a React component, mounted as an island). */
-export enum UseKind { Element = 'element', Widget = 'widget', React = 'react' }
+ *  · `use react DayPicker from "…"` (a React component, mounted as an island) · `use vue` / `use svelte` / `use solid`
+ *  (a compiled component of that framework, an island too: framework-island.ts). */
+export enum UseKind { Element = 'element', Widget = 'widget', React = 'react', Vue = 'vue', Svelte = 'svelte', Solid = 'solid' }

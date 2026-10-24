@@ -1,9 +1,11 @@
 // readers: the small token readers every part of the screen grammar shares: a type (`list<User>`), a dotted name,
 // a parenthesized ident, a `where` clause rebuilt as text, a path, call args and their values, aria/style args, a
 // class name, a duration, an entity's constraints. Parser builds on these (readers → actions → declarations → tree).
-import { ParseError, argNotANameMessage } from '#engine/shared/diagnostics.js';
+import { ParseError, argNotANameMessage, closest } from '#engine/shared/diagnostics.js';
 import { Grammar } from '#engine/lang/grammar.js';
-import { Tk, Pn, Kw } from '#engine/shared/vocab.js';
+import { Tk, Pn, Kw, WakeMode } from '#engine/shared/vocab.js';
+
+const WAKE_MODES = new Map<string, WakeMode>(Object.values(WakeMode).map((mode) => [mode, mode]));
 import type { Expr, Interp, Value, FieldConstraint, ArgValue, ArgMap } from '#engine/shared/types.js';
 
 export class Readers extends Grammar {
@@ -121,11 +123,19 @@ export class Readers extends Grammar {
   }
 
 
+  // `wake idle` · `wake media "(min-width: 800px)"`: when an island wakes
+  protected parseWake(): { mode: WakeMode; query?: string } {
+    const word = this.eat(Tk.Ident);
+    const mode = WAKE_MODES.get(word.v);
+    if (!mode) throw new ParseError(`\`wake ${word.v}\`: an island wakes on ${[...WAKE_MODES.keys()].join(', ')}${closest(word.v, [...WAKE_MODES.keys()]) ? ` (did you mean \`${closest(word.v, [...WAKE_MODES.keys()])}\`?)` : ''}`, this.locOf(word.pos));
+    return mode === WakeMode.Media ? { mode, query: this.eat(Tk.String).v } : { mode };
+  }
+
   protected parseArgs(kebabKeys = false): ArgMap {
     this.eat(Tk.Punct, Pn.ParenL);
     const args: ArgMap = {};
     while (!this.at(Tk.Punct, Pn.ParenR)) {
-      const key = kebabKeys ? this.className() : this.eat(Tk.Ident).v;   // `on(sl-change: rate)`: a DOM event name
+      const key = kebabKeys && this.at(Tk.String) ? this.eat(Tk.String).v : kebabKeys ? this.className() : this.eat(Tk.Ident).v;   // `on(sl-change: rate)`: a DOM event name; `on("update:modelValue": pick)` one a word can't spell
       this.nestGuard(key);
       this.eat(Tk.Punct, Pn.Colon);
       args[key] = this.parseArgValue();

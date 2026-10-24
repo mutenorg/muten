@@ -6,6 +6,7 @@
 import { withUseTypes } from '#engine/project/npm-types.js';
 import { pluginNames } from '#engine/project/plugins.js';
 import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import { join, dirname, basename } from 'node:path';
 import { createRequire } from 'node:module';
 import { parse } from '#engine/lang/parse.js';
@@ -23,8 +24,37 @@ type Parts = { [name: string]: PartDef };
 // Parse a file, tagging a syntax error with its path so the CLI can report file:line:col instead of a bare message
 // (a `.store`/part/route error would otherwise escape validate and print locationless — the "AI loops forever" trap).
 function parseFile(file: string): IR {
-  try { return parse(readFileSync(file, 'utf8')); }
+  try { return withFnScripts(parse(readFileSync(file, 'utf8')), file); }
   catch (e) { if (e instanceof ParseError && !e.file) e.file = file; throw e; }
+}
+
+// A `fn` is TypeScript; the page it lives in compiles to JavaScript, so its types go here, once, with Node's own
+// stripper (the one `node --experimental-strip-types` runs muten's scripts with): it leaves blanks where types were, so
+// every line and column of the function stays where it was written. Not esbuild: this runs inside esbuild's plugin while
+// a build waits on it, and esbuild's synchronous call there never returns (`muten dev` hung on every file).
+function withFnScripts(ir: IR, file: string): IR {
+  for (const [name, fn] of Object.entries(ir.tsFns || {})) {
+    try { fn.js = stripTypes(fn.source); }
+    catch (error) {
+      const said = error instanceof Error ? error.message.split('\n')[0] : String(error);
+      const bad = new ParseError(`fn ${name}: TypeScript cannot read this: ${said}`, fn.loc ?? null);
+      bad.file = file;
+      throw bad;
+    }
+  }
+  return ir;
+}
+
+/** TypeScript as JavaScript, with Node's own stripper: blanks where the types were, so lines and columns stay. */
+export function stripTypes(source: string): string {
+  return quietly(() => stripTypeScriptTypes(source));
+}
+
+/** `run` without Node's one-time «stripTypeScriptTypes is experimental» line on stderr (check and dev print what is yours). */
+function quietly<T>(run: () => T): T {
+  const warn = process.emitWarning;
+  process.emitWarning = (): void => {};
+  try { return run(); } finally { process.emitWarning = warn; }
 }
 
 // A plugin registry's index (registry.json). `file` is the part to import; `component` (if present) names a
@@ -62,7 +92,7 @@ export async function loadPluginParts(appRoot: string): Promise<Parts> {
       catch (e) { pluginFileErrors.push({ file: filePath, message: e instanceof Error ? e.message : String(e), loc: e instanceof ParseError && e.loc ? e.loc : null }); continue; }
       const { css } = await resolveStyles(filePath);
       for (const [partName, def] of Object.entries(ir.parts || {}))
-        if (!(partName in PRIMITIVES)) out[partName] = { ...def, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css }; // primitive-named plugin parts yield to the primitive
+        if (!(partName in PRIMITIVES)) out[partName] = { ...def, file: filePath, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css }; // primitive-named plugin parts yield to the primitive
     }
   }
   return out;
@@ -164,7 +194,7 @@ export async function loadParts(dir: string): Promise<Parts> {
     const ir = parseFile(filePath);
     const { css } = await resolveStyles(filePath); // colocated .scss/.css for this part
     for (const [name, def] of Object.entries(ir.parts || {})) {
-      parts[name] = { ...def, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css, imports: anchorImports(filePath, ir.imports || []) };
+      parts[name] = { ...def, file: filePath, state: ir.state || {}, entities: ir.entities || {}, mock: ir.mock || {}, css, imports: anchorImports(filePath, ir.imports || []) };
     }
   }
   return parts;

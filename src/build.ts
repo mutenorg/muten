@@ -5,7 +5,7 @@ import { writeAppMap } from './app-map-file.js';
 import { cspFrom, withCsp, writeSecurityHeaders, scriptOrigins, withScriptOrigins } from './dev-security.js';
 import { writeFileSync, mkdirSync, rmSync, existsSync, cpSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { Nt, Fmt } from '#engine/shared/vocab.js';
+import { Fmt } from '#engine/shared/vocab.js';
 import { readRoutes, readApi, readSources } from '#engine/project/routes.js';
 import { renderSsrBody, fetchSources } from '#engine/project/ssr.js';
 import { routeEntry } from '#engine/project/map.js';
@@ -15,7 +15,7 @@ import { readMutenConfig, configClasses } from '#engine/project/config.js';
 import { pruneCss, filesText, PUBLIC_CODE } from './css-prune.js';
 import { guardJs } from '#engine/compile/guard.js';
 import { bundleUses, bundleCustoms } from './use-bundle.js';
-import { inlineSafe } from '#engine/compile/emit.js';
+import { inlineSafe, dataLayerScript } from '#engine/compile/emit.js';
 import { customComponents, buildCss, loadModel } from './esbuild-muten.js';
 import { themeLibrary, themeRoot, withThemeRoot } from '#engine/project/theme-library.js';
 import { validateStoresAndGuards } from '#engine/project/check-app.js';
@@ -23,11 +23,15 @@ import { validate } from '#engine/ir/validate.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { compile, compileStore } from '#engine/compile/compile.js';
 import { readTranslations } from '#engine/project/lang-files.js';
+import { configMetaTags } from '#engine/project/page-metas.js';
 import { readThemeKit } from '#engine/project/theme-values.js';
 import { withThemeImports } from '#engine/compile/react-tree.js';
 import { makeIconResolver } from './icons.js';
 import { formatDiagnostic, ParseError } from '#engine/shared/diagnostics.js';
+import { missingComponents } from '#engine/project/custom-check.js';
+import { onPageDiagnostic } from '#engine/ir/places.js';
 import type { Diagnostic, AppMap } from '#engine/shared/types.js';
+import { pwaHead, writePwa } from './pwa.js';
 
 // index.html's <head> without what each built page writes itself (charset, viewport, title, description, the CSP) and
 // without the dev entry script: the tags left are the app's own (icons, manifest, fonts, theme-color…).
@@ -58,7 +62,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   if (existsSync(join(appRoot, 'public'))) cpSync(join(appRoot, 'public'), outDir, { recursive: true });
   // what index.html's <head> carries beyond what each page writes for itself (a favicon, the manifest, install tags,
   // fonts): every page gets it. The SSG used to drop it, so sites shipped with no favicon and no installable manifest.
-  const headExtras = indexHeadExtras(appRoot);
+  const headExtras = [indexHeadExtras(appRoot), configMetaTags(appRoot), pwaHead(appRoot)].filter(Boolean).join('\n');   // + muten.config's metas (page-metas.ts) and `pwa { }`
 
   const sharedParts = await loadAllParts(appRoot); // parts are global: load all up front
   if (Object.keys(sharedParts).length) console.log(`Parts: ${Object.keys(sharedParts).join(', ')}`);
@@ -87,12 +91,14 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   // Dev resolves stores via virtual:muten/store/*; the static build has no equivalent, so
   // compileStore output is stripped of import/export and wrapped as a self-contained IIFE namespace.
   const appApi = readApi(appRoot);   // app-wide backend config, so a store's relative sources/`post` resolve against the base
-  const storeCode = Object.entries(storeIRs).map(([domain, ir]) => {
+  const storeBodies = Object.entries(storeIRs).map(([domain, ir]) => {
     const mod = compileStore({ state: ir.state || {}, gets: ir.gets || {}, fns: ir.fns || {}, actions: ir.actions || {}, effects: ir.effects || [], entities: ir.entities || {}, imports: ir.imports || [], domain, api: appApi, stores: storesMeta, translations }, ir.mock || {}, ir.sources || {});
     const exported = [...mod.matchAll(/^[ \t]*export (?:async )?(?:const|let|function) ([\w$]+)/gm)].map((match) => match[1]);   // what the module really exports: state, gets, fns, actions and their status signals
     const body = mod.replace(/^[ \t]*import .*$/gm, '').replace(/^([ \t]*)export /gm, '$1'); // strip imports/exports so the body is inlineable (runtime + __id are already in scope)
     return `const __store_${domain} = (function () {\n${body}\nreturn { ${exported.join(', ')} };\n})();`;
   }).join('\n');
+  // the stores share the data layer through `virtual:muten/data` when bundled; a standalone page carries it once
+  const storeCode = (storeBodies.includes('__dataLayer(') ? dataLayerScript() + '\n' : '') + storeBodies;
 
   // The standalone build is ONE self-contained HTML per route, so the app's look must be inlined: the
   // theme (`theme.muten` -> :root CSS vars) + the project stylesheet (`src/styles.css|scss`, which carries
@@ -144,16 +150,13 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
     // and the page threw «… is not defined» in the browser
     const useCode = await bundleUses(withThemeImports(doc, themeKit).imports || [], page.screenPath, appRoot);   // with what theme.muten's providers call
 
-    const { ok, diagnostics } = validate(doc, { parts: partNames, stores, storeMembers, storeFns, storeActions, storeEntities, storeSelfMut, iconExists, routes, selfRoute: '/' + page.route, translations, themeValues }); // project-aware validation (FULL parity with `check`)
+    const diagnostics = [...validate(doc, { parts: partNames, stores, storeMembers, storeFns, storeActions, storeEntities, storeSelfMut, iconExists, routes, selfRoute: '/' + page.route, translations, themeValues }).diagnostics, ...missingComponents(appRoot, doc).map(onPageDiagnostic)]; // project-aware validation (FULL parity with `check`)
+    const ok = !diagnostics.some((d) => d.severity === 'error');
     if (!ok) throw new Error(`/${page.route}\n` + diagnostics.map((d) => '   ' + formatDiagnostic(d, rel(page.screenPath))).join('\n'));
 
     // the Custom components the page uses: the app's own or a plugin's (the same lookup as `muten bundle`; this build
     // only read src/components, so a library's Custom parts failed here). One with imports of its own is bundled.
     const { components } = customComponents(appRoot, doc);
-    const customNames = [...new Set(Object.values(doc.nodes).filter((n) => n.type === Nt.Custom).map((n) => n.props?.component))];
-    // `use element|widget|react` (bundled with the uses); `Dialog.Root` comes from the library `Dialog` names
-    const fromNpm = new Set((doc.imports || []).filter((def) => def.kind).flatMap((def) => def.names));   // `use element|widget|react`: bundled with the uses
-    for (const name of customNames) if (typeof name === 'string' && name && !components[name] && !fromNpm.has(name.split('.')[0])) throw new Error(`/${page.route}: Custom component not found: src/components/${name}.js (nor in a plugin)`);
     const customCode = await bundleCustoms(components, appRoot);
 
     // Static pages emit zero-JS HTML. Reactive pages emit a CSR shell (empty #app + script);
@@ -228,6 +231,7 @@ export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), 
   const urls = built.map((r) => `  <url><loc>${base}/${r}</loc></url>`).join('\n');
   writeFileSync(join(outDir, 'sitemap.xml'), `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${urls}\n</urlset>\n`);
   writeFileSync(join(outDir, 'robots.txt'), `User-agent: *\nAllow: /\nSitemap: ${base}/sitemap.xml\n`);
+  writePwa(appRoot, outDir, null, [], (line) => console.log(line));   // `pwa { }`: no bundle graph here, so pages are stored as they are visited
   console.log(`✓ ${rel(join(outDir, 'sitemap.xml'))} + robots.txt (${built.length} route${built.length === 1 ? '' : 's'}${base ? '' : ' — pass --url=https://… for absolute URLs'})`);
 
   // the app graph names every route, guard, store and field: it stays on this machine (.muten/), out of the deployed folder

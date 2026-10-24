@@ -45,6 +45,13 @@ export function checkActions(facts: ActionCheck): void {
     else if (st.op === StOp.Extern) { if (!callable(st.fn)) D.push(diag('unknown-function', `"${st.fn}" is not a use'd function or an action of this file`, { suggestion: closest(st.fn, [...externs, ...actionNames]), from: st.fn })); for (const a of externArgs(st)) checkExpr(a, null, new Map()); }
     else if ('arg' in st && st.arg) checkExpr(st.arg, null, new Map());
   };
+  // `every`: the same statements as an effect, on a beat (no loop to fear: it re-runs on time, not on what it reads)
+  for (const settle of doc.settles || []) checkExpr(settle.watched, settle.loc ?? null, new Map());
+  for (const timer of [...(doc.timers || []), ...(doc.settles || [])]) for (const st of timer.body) {
+    const before = D.length;
+    checkEff(st);
+    for (let at = before; at < D.length; at++) if (!D[at].loc) D[at].loc = st.loc ?? timer.loc ?? null;
+  }
   for (const eff of doc.effects || []) {
     // self-referential effect = INFINITE LOOP: an effect re-runs on every signal it reads, so a TOP-LEVEL
     // write of a signal it reads (directly, or via a store action that does) self-triggers forever — the

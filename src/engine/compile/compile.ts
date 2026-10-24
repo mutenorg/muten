@@ -18,6 +18,7 @@ import { Nt, Ek, Fmt, URL_ATTRS, CUSTOM_MODULE, UseKind, SKIP_LINK_TEXT } from '
 import { CONTAINERS, editableFields, headCellIds } from '#engine/compile/helpers.js';
 import { emitStore, emitStatic, emitStaticHtml, emitSsr, emitModule, emitHtml, emitPatch } from '#engine/compile/emit.js';
 import { inlineSourceMap } from '#engine/compile/sourcemap.js';
+import { timerCode, settleCode } from '#engine/compile/timers.js';
 import { Logic } from '#engine/compile/logic.js';
 import { getOrder } from '#engine/ir/refs.js';
 import { formLines } from '#engine/compile/form.js';
@@ -31,11 +32,14 @@ import { dynamicsLines } from '#engine/compile/dynamics.js';
 import { MEDIA_NODES } from '#engine/compile/media.js';
 import { CONTROLS_NODES } from '#engine/compile/controls.js';
 import { foreignImport, REACT_RUNTIME, scriptGlobals } from '#engine/compile/foreign.js';
-import { speakTable } from '#engine/compile/translate.js';
-import { REACT_HELPERS, withThemeImports } from '#engine/compile/react-tree.js';
+import { frameworkLoader } from '#engine/compile/framework-island.js';
+import { nodeReads } from '#engine/compile/reads.js';
+import { speakTable, freeze } from '#engine/compile/translate.js';
+import { foldDoc } from '#engine/compile/fold.js';
+import { REACT_HELPERS, reactLoader, withThemeImports } from '#engine/compile/react-tree.js';
 import { foreignNames } from '#engine/ir/calls.js';
 import type {
-  Doc, NodeProps, Scope, Interp, StringPropValue, Value, Expr, Loc,
+  Doc, NodeProps, Scope, Stmt, Interp, StringPropValue, Value, Expr, Loc,
   CompileOpts, CompileCtx, StoreInput, EmitParts, Emitter, NodeEmitter,
 } from '#engine/shared/types.js';
 
@@ -63,7 +67,10 @@ export function compileStore(input: StoreInput = {}, data: { [name: string]: Val
 }
 
 export function compile(page: Doc, data: { [name: string]: Value } = {}, projectCss = '', components: { [name: string]: string } = {}, sources: { [name: string]: Value } = {}, opts: CompileOpts = {}): string {
-  const doc = withThemeImports(page, opts.themeKit);   // what theme.muten's providers call (react-tree.ts)
+  // what theme.muten's providers call (react-tree.ts); then every value known before it runs written in (fold.ts). Not in
+  // dev: HMR addresses every node by id, and a patch must find the branch a fold would have removed
+  const themed = withThemeImports(page, opts.themeKit);
+  const doc = opts.dev || opts.format === Fmt.Patch ? themed : foldDoc(themed);
   const { nodes, rootId, state, entities, screen } = doc;
 
   let lines: string[] = [];
@@ -98,9 +105,9 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
     state, entities, actions: doc.actions, consts: doc.consts || {}, gets: doc.gets || {}, effects: doc.effects || [],
     stateKeys, queryStates, stores: opts.stores || {}, usedStores, params: new Set(doc.params || []), storeEntities: opts.storeEntities,
     fns: doc.fns || {}, calls: callReturns(doc.imports), translations: opts.translations, themeValues: opts.themeValues ?? opts.themeKit?.values, langFrom: doc.langFrom, tKeys: new Set(), tPatterns: [], foreign: foreignNames(doc), useCalls: new Set((doc.imports || []).filter((def) => !def.kind).flatMap((def) => def.names)),
-    ownCalls: new Set([...Object.keys(doc.fns || {}), ...(doc.imports || []).filter((def) => !def.kind).flatMap((def) => def.names)]), persistScope: opts.persistScope ?? screen, format: opts.format, ctxRefs: opts.ctxRefs, dev: !!opts.dev,
+    ownCalls: new Set([...Object.keys(doc.fns || {}), ...Object.keys(doc.tsFns || {}), ...(doc.imports || []).filter((def) => !def.kind).flatMap((def) => def.names)]), persistScope: opts.persistScope ?? screen, format: opts.format, ctxRefs: opts.ctxRefs, dev: !!opts.dev,
   };
-  const logic = new Logic(ctx);
+  freeze(ctx, doc); const logic = new Logic(ctx);   // frozen.ts: states nothing writes, read as their value
   const pageScope: Scope = { locals: new Set() }; // page-level scope for interpolation, when/each
 
   // reactive element bits: id, conditional classes, events, drag, aria/data, disabled, style() (dynamics.ts)
@@ -109,6 +116,7 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
   const genChildren = (id: string, parentVar: string): void => {
     if (opts.format === Fmt.Patch) return; // HMR patch: emit the node's OWN element only; patchNode re-parents the live children
     for (const childId of nodes[id].children) genNode(childId, parentVar);
+    if (opts.dev) lines.push(`__at(${JSON.stringify(id)});`);   // back to this node: its own effects after its children are its
   };
 
   // interpolation parts joined into a JS string expression: "Hi, " + String(name ?? '') + ...
@@ -119,19 +127,20 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
   // set its class, then (after attributes/effects) attach it to its parent. Identical lines to before — this
   // factors the COMPILER's repetition, not the OUTPUT's: every node still emits create -> class -> … -> append.
   const declEl = (id: string, tag: string, cls: string): void => {
-    lines.push(`const el_${id} = document.createElement('${tag}');`);
-    lines.push(`el_${id}.className = ${JSON.stringify(cls)};`);
+    lines.push(`const el_${id} = __mk('${tag}', ${JSON.stringify(cls)});`);   // createElement + className, runtime-blocks.ts
   };
   // appendEl is the uniform "attach element to parent" — so registering the node for HMR here covers every
   // element primitive at once (no per-type code). Dev/patch only; prod bundles + SSR/static/store omit it (dead there).
+  const isData = (head: string): boolean => head in state || head in (doc.gets || {}) || head in (opts.stores || {});
   const appendEl = (id: string, parentVar: string): void => {
-    lines.push(`${parentVar}.appendChild(el_${id});`);
+    lines.push(`__ap(${parentVar}, el_${id});`);   // parent.appendChild, as one short call (runtime-blocks.ts)
     // `owner`/`oloc` say which PART FILE a node was written in and where — a node inlined from a part has no `loc`,
     // because that would be a line number belonging to another file. The element picker edits `owner:oloc`, not `loc`.
     if (opts.dev || opts.format === Fmt.Patch) {
       const n = nodes[id], ty = n?.type, fp = n?.fromPart, pa = n?.partArgs, lc = n?.loc, ow = n?.ownerPart, ol = n?.partLoc;
       const at = (l: Loc): string => JSON.stringify({ line: l.line, col: l.col });
-      lines.push(`__nodes[${JSON.stringify(id)}] = { el: el_${id}, parent: ${parentVar}${ty ? `, type: ${JSON.stringify(ty)}` : ''}${fp ? `, part: ${JSON.stringify(fp)}` : ''}${pa ? `, partArgs: ${JSON.stringify(pa)}` : ''}${lc ? `, loc: ${at(lc)}` : ''}${ow ? `, owner: ${JSON.stringify(ow)}` : ''}${ol ? `, oloc: ${at(ol)}` : ''} };`);
+      const rd = nodeReads(n?.props, isData);   // what the devtools' Inspect says it reads (reads.ts)
+      lines.push(`__nodes[${JSON.stringify(id)}] = { el: el_${id}, parent: ${parentVar}${ty ? `, type: ${JSON.stringify(ty)}` : ''}${fp ? `, part: ${JSON.stringify(fp)}` : ''}${pa ? `, partArgs: ${JSON.stringify(pa)}` : ''}${lc ? `, loc: ${at(lc)}` : ''}${ow ? `, owner: ${JSON.stringify(ow)}` : ''}${ol ? `, oloc: ${at(ol)}` : ''}${rd.length ? `, reads: ${JSON.stringify(rd)}` : ''} };`);
     }
   };
 
@@ -223,6 +232,7 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
   };
 
   function genNode(id: string, parentVar: string): void {
+    if (opts.dev) lines.push(`__at(${JSON.stringify(id)});`);   // dev: the effects built from here on draw this node (devtools)
     if (cloneable(id)) {
       lines.push(`const el_${id} = __clone(${JSON.stringify(renderStatic(id))});`);
       appendEl(id, parentVar);
@@ -283,18 +293,8 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
         lines.push(`function build_${id}(__p) {`);
         for (const l of body) lines.push('  ' + l);
         lines.push(`}`);
-        // The block owns EVERYTHING between its two markers, not the nodes it had when it was built: a nested
-        // `when`/`each` at the root inserts its nodes later, and a snapshot would leave those behind on hide.
-        lines.push(`const start_${id} = document.createComment('when');`);
-        lines.push(`const anchor_${id} = document.createComment('/when');`);
-        lines.push(`${parentVar}.appendChild(start_${id}); ${parentVar}.appendChild(anchor_${id});`);
-        lines.push(`let shown_${id} = null;`);
-        lines.push(`onCleanup(() => { if (shown_${id}) shown_${id}.dispose(); });`);
-        lines.push(`effect(() => {`);
-        lines.push(`  if (${condJS}) {`);
-        lines.push(`    if (!shown_${id}) { const __r = root(() => { const __f = document.createDocumentFragment(); build_${id}(__f); return __f; }); anchor_${id}.parentNode.insertBefore(__r.value, anchor_${id}); shown_${id} = __r; }`);
-        lines.push(`  } else if (shown_${id}) { shown_${id}.dispose(); __leave(start_${id}, anchor_${id}); shown_${id} = null; }`);
-        lines.push(`});`);
+        // the markers, the holder, the effect that builds or removes: once, in the runtime (runtime-blocks.ts)
+        lines.push(`__when(${parentVar}, () => ${condJS}, build_${id});`);
         break;
       }
 
@@ -328,35 +328,12 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
         lines.push(`function buildItem_${id}(__p, ${p.as}${p.index ? `, ${p.index}` : ''}) {`); // ${p.as} is the row signal; body refs compiled as ${p.as}.get() (same for the index signal)
         for (const l of body) lines.push('  ' + l);
         lines.push(`}`);
-        lines.push(`const start_${id} = document.createComment('each');`);
-        lines.push(`const anchor_${id} = document.createComment('/each');`);
-        lines.push(`${parentVar}.appendChild(start_${id}); ${parentVar}.appendChild(anchor_${id});`);
-        lines.push(`const map_${id} = new Map();`);
-        lines.push(`onCleanup(() => { for (const __e of map_${id}.values()) __e.dispose(); map_${id}.clear(); });`);
-        lines.push(`let order_${id} = [];`);
-        lines.push(`effect(() => {`);
         // `where` sees the index var too (`each xs as x, i where i >= from`): there it is the row's place in the list
-        // BEFORE the filter (a plain number), the only position a filter can ask about. The oracle already accepted
-        // `i` in the where while the filter's arrow never declared it, so it threw «i is not defined» at runtime.
+        // BEFORE the filter (a plain number), the only position a filter can ask about.
         const filterArgs = p.index ? `${p.as}, ${p.index}` : p.as;
-        lines.push(`  const __l = ${listJS}; const __rows = (Array.isArray(__l) ? __l : [])${filterJS ? `.filter((${filterArgs}) => ${filterJS})` : ''}${takeJS ? `.slice(0, ${takeJS})` : ''};`);   // fail-closed: a non-array never crashes the loop (renders empty)
-        lines.push(`  const __seen = new Set(); const __next = []; const __twins = new Map();`);
-        lines.push(`  for (const __row of __rows) {`);
-        lines.push(`    const __k = __rowKey(__row, __twins); __seen.add(__k);`);   // by id, else by content (runtime-key.ts)
-        lines.push(`    let __e = map_${id}.get(__k);`);
-        lines.push(`    if (__e) { if (!__eq(__e.data, __row)) { __e.data = __row; __e.sig.set(__row); } }`);
-        // A fragment row is bracketed by two markers and its nodes are read LIVE between them, for the same
-        // reason as `when`: a nested block at the row's root adds nodes after the row is built.
-        const rowNodes = wrapLi
-          ? `const __r = root(() => { const __c = document.createElement('li'); buildItem_${id}(__c, __sig${p.index ? ', __ix' : ''}); return __c; }); const __ns = [__r.value];`
-          : `const __r = root(() => { const __c = document.createDocumentFragment(); const __a = document.createComment('row'); const __b = document.createComment('/row'); __c.appendChild(__a); buildItem_${id}(__c, __sig${p.index ? ', __ix' : ''}); __c.appendChild(__b); return [__a, __b]; }); const [__a, __b] = __r.value; const __ns = { get nodes() { const __o = [__a]; let __n = __a; while (__n !== __b && __n.nextSibling) { __n = __n.nextSibling; __o.push(__n); } return __o; } };`;
-        lines.push(`    else { const __sig = signal(__row);${p.index ? ' const __ix = signal(0);' : ''} ${rowNodes} __e = { sig: __sig,${p.index ? ' idx: __ix,' : ''} ${wrapLi ? 'nodes: __ns,' : 'get nodes() { return __ns.nodes; },'} dispose: __r.dispose, data: __row }; map_${id}.set(__k, __e); }`);
-        lines.push(`    __next.push(__e);`);
-        lines.push(`  }`);
-        lines.push(`  for (const [__k, __e] of map_${id}) if (!__seen.has(__k)) { __e.dispose(); for (const __n of __e.nodes) __n.remove(); map_${id}.delete(__k); }`);
-        if (p.index) lines.push(`  for (let __i = 0; __i < __next.length; __i++) __next[__i].idx.set(__i);`); // reactive position: reorder/filter reindexes surviving rows
-        lines.push(`  __order(anchor_${id}.parentNode, anchor_${id}, __next, order_${id}); order_${id} = __next;`);
-        lines.push(`});`);
+        const rowsJS = `() => { const __l = ${listJS}; return (Array.isArray(__l) ? __l : [])${filterJS ? `.filter((${filterArgs}) => ${filterJS})` : ''}${takeJS ? `.slice(0, ${takeJS})` : ''}; }`;   // fail-closed: a non-array renders empty
+        // the markers, the keyed reconciliation, the rows' roots and moves: once, in the runtime (runtime-blocks.ts)
+        lines.push(`__each(${parentVar}, ${rowsJS}, buildItem_${id}, { index: ${!!p.index}, li: ${wrapLi} });`);
         break;
       }
 
@@ -382,7 +359,7 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
     if (opts.format === Fmt.Store) return false;  // store has no DOM; shell excluded by its `slot` (reactive type)
     if ((doc.params || []).length) return false;  // a param page needs mount(app, params), never the static path
     if (opts.routeGuard) return false;            // a guarded page runs its guard first
-    if ((doc.effects || []).length) return false;   // an effect runs on load (a chart, a map, analytics): static HTML would drop it
+    if ((doc.effects || []).length || (doc.timers || []).length || (doc.settles || []).length) return false;   // an effect runs on load (a chart, a map, analytics): static HTML would drop it
     return Object.keys(nodes).every(nodeIsStatic);
   }
 
@@ -407,8 +384,10 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
   // gets with parameters first, as hoisted functions (a get or another function may call one declared anywhere); their
   // parameters are plain locals in the body. A store exports them like its gets.
   const fnDecls = Object.entries(doc.fns || {}).map(([name, fn]) => `${opts.format === Fmt.Store ? 'export ' : ''}function ${name}(${fn.params.join(', ')}) { return ${logic.compileExpr(fn.body, { ...pageScope, locals: new Set([...pageScope.locals, ...fn.params]) })}; }`);
-  const getDecls = [...fnDecls, ...getOrder({ state, gets, entities: doc.entities || {}, storeEntities: ctx.storeEntities }).map((name) => `${getKw} ${name} = computed(() => ${logic.compileExpr(gets[name], pageScope)});`), logic.genCallQueries()].filter(Boolean).join('\n');   // a query of a function may read a get (`db`)
-  const effectDecls = logic.genEffects();
+  const tsDecls = Object.values(doc.tsFns || {}).map((fn) => `${opts.format === Fmt.Store ? 'export ' : ''}${(fn.js ?? fn.source).trim()}`);   // `fn` blocks, their types stripped by the loader
+  const getDecls = [...tsDecls, ...fnDecls, ...getOrder({ state, gets, entities: doc.entities || {}, storeEntities: ctx.storeEntities }).map((name) => `${getKw} ${name} = computed(() => ${logic.compileExpr(gets[name], pageScope)});`), logic.genCallQueries()].filter(Boolean).join('\n');   // a query of a function may read a get (`db`)
+  const statement = (st: Stmt): string[] => logic.stmtLines(st, { locals: new Set() });
+  const effectDecls = [logic.genEffects(), timerCode(doc.timers || [], statement), settleCode(doc.settles || [], statement, (watched) => logic.compileExpr(watched, pageScope))].filter(Boolean).join('\n  ');
 
   let staticHtml: string | null = null;
   if (staticPage) staticHtml = rootId ? renderStatic(rootId) : '';            // populates usedTokens via classFor
@@ -449,9 +428,12 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
   const storeImports = [...usedStores].map((domain) => `import * as __store_${domain} from 'virtual:muten/store/${domain}';`).join('\n');
 
   // `use a, b from "./lib.ts"` -> real ESM import of named JS functions (the seam to the JS ecosystem).
-  const externImports = [...(doc.imports || []).map(foreignImport),
+  // React: imported up front, or (a page module) loaded when an island wakes (react-tree.ts reactLoader)
+  const hasReact = (doc.imports || []).some((def) => def.kind === UseKind.React);
+  const wakeReact = hasReact && opts.format === Fmt.Module;
+  const externImports = [...(doc.imports || []).map((def, index) => (wakeReact && def.kind === UseKind.React ? '' : foreignImport(def, index))),
     ...moduleCustoms.map(([name, src]) => `import { mount as __custom_${name} } from ${JSON.stringify(src.slice(CUSTOM_MODULE.length))};`),
-    ...((doc.imports || []).some((def) => def.kind === UseKind.React) ? [REACT_RUNTIME] : [])].join('\n');
+    ...(hasReact ? [wakeReact ? reactLoader(doc.imports || []) : REACT_RUNTIME] : []), frameworkLoader(doc.imports || [], opts.format)].filter(Boolean).join('\n');
 
   // page <head> meta: title/description from the `meta` block; og:* auto-derived from them (one source).
   const metaIn = doc.meta || {};

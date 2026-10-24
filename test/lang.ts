@@ -30,10 +30,19 @@ ok('a key the language lacks falls back to another, then to the key', __t('en', 
 
 // ── compile: each page carries only its texts ──
 const translations = { es: { hello: 'Hola, {0}', 'plan.free': 'Gratis', 'plan.pro': 'Pro', unused: 'nunca' }, en: { hello: 'Hello, {0}', 'plan.free': 'Free', 'plan.pro': 'Pro', unused: 'never' } };
-const page = (body) => toDoc(parse(`screen p\nstate { name = "Ana" : text  tier = "free" : text }\n${body}`));
+const page = (body) => toDoc(parse(`screen p\nstate { name = "Ana" : text  tier = "free" : text }\naction upgrade() mutates tier { tier.set("pro") }\n${body}`));
 const js = compileModule(page('Stack { Text "{t("hello", name)}"  Text "{t("plan.{tier}")}" }'), {}, '', {}, {}, { translations });
-ok('t() compiles to the runtime lookup in the app language', js.includes('__t(__lang().get(), __T, "hello", name.get())'), js.match(/__t\([^)]*\)/)?.[0]);
+// (`name` is never written, so it arrives as its value, "Ana": fold.ts)
+ok('t() compiles to the runtime lookup in the app language', js.includes('__t(__lang().get(), __T, "hello", "Ana")'), js.match(/__t\([^)]*\)/)?.[0]);
 ok('the table has the keys used and the ones a run-time key fits, never the rest', js.includes('"plan.pro"') && js.includes('"hello"') && !js.includes('unused'));
+// a state nothing writes holds its first value for good: its run-time key is one key, not every key the pattern fits
+const frozenPage = toDoc(parse('screen p\nstate { tier = "free" : text }\nStack { Text "{t("plan.{tier}")}" }'));
+const frozenJs = compileModule(frozenPage, {}, '', {}, {}, { translations });
+ok('a key built from a state nothing writes brings only that key', frozenJs.includes('"plan.free"') && !frozenJs.includes('"plan.pro"'));
+const persisted = compileModule(toDoc(parse('screen p\nstate { tier = "free" : text persist }\nStack { Text "{t("plan.{tier}")}" }')), {}, '', {}, {}, { translations });
+ok('a persisted state is not frozen: every key its pattern fits', persisted.includes('"plan.free"') && persisted.includes('"plan.pro"'));
+const bound = compileModule(toDoc(parse('screen p\nstate { tier = "free" : text }\nStack { SearchField bind(tier)  Text "{t("plan.{tier}")}" }')), {}, '', {}, {}, { translations });
+ok('a state an input is bound to is not frozen', bound.includes('"plan.pro"'));
 ok('every page lists the languages (a switcher needs them)', js.includes('__langInit(["es","en"])'));
 const switcher = compileModule(page('Button "{lang.current}" -> flip\naction flip() { lang.use("en") }'.replace('Button', 'action x() { }\nStack { Button').replace('-> flip', '-> flip }')), {}, '', {}, {}, { translations });
 ok('lang.current reads the live language, lang.use() changes it', switcher.includes('__lang().get()') && switcher.includes('__langUse("en")'), switcher.slice(0, 400));
@@ -45,7 +54,7 @@ const none = compileModule(toDoc(parse('screen p\nText "hi"')), {}, '', {}, {}, 
 ok('an app with no src/lang ships nothing of it', !none.includes('__lang'));
 
 // ── validate ──
-const codes = (body) => validate(page(body), { translations }).diagnostics.map((d) => d.code + (d.suggestion ? '>' + d.suggestion : ''));
+const codes = (body) => validate(page(body), { translations }).diagnostics.filter((d) => d.severity === 'error').map((d) => d.code + (d.suggestion ? '>' + d.suggestion : ''));
 ok('a key no language has, with the closest one', codes('Text "{t("helo", name)}"').join() === 't-unknown-key>hello', codes('Text "{t("helo", name)}"').join());
 ok('a text that fills a value the call does not pass', codes('Text "{t("hello")}"').join() === 't-values');
 ok('a run-time key no key fits', codes('Text "{t("tier.{tier}")}"').join() === 't-unknown-key');
@@ -77,10 +86,11 @@ const outside = mkdtempSync(join(tmpdir(), 'muten-texts-'));
 mkdirSync(join(outside, 'src', 'lang'), { recursive: true });
 writeFileSync(join(outside, 'src', 'lang', 'es.lang'), 'hi "Hola, {0}"\nitems "{0} producto | {0} productos"\n');
 writeFileSync(join(outside, 'src', 'lang', 'en.lang'), 'hi "Hi, {0}"\nitems "{0} product | {0} products"\n');
-writeFileSync(join(outside, 'entry.ts'), "import { t, texts } from 'muten:texts';\nexport const out = [t('es', 'hi', 'Ana'), t('en', 'items', 1), t('en', 'items', 3), t('en', 'nope'), Object.keys(texts).sort().join()];\n");
+writeFileSync(join(outside, 'entry.ts'), "import { t, texts, has, ready } from 'muten:texts';\nexport const first = [Object.keys(texts).join(), t('es', 'hi', 'Ana'), has('hi'), has('nope')];\nawait ready('es');\nexport const out = [t('es', 'hi', 'Ana'), t('en', 'items', 1), t('en', 'items', 3), t('en', 'nope'), Object.keys(texts).sort().join(), 'hi' in texts.es];\n");
 const bundled = await esbuild.build({ entryPoints: [join(outside, 'entry.ts')], bundle: true, write: false, format: 'esm', platform: 'neutral', logLevel: 'silent', define: { __MUTEN_DEV__: 'false' }, plugins: [mutenEsbuild(outside, { translations: readTranslations(outside) })] });
 const run = await import('data:text/javascript;base64,' + Buffer.from(bundled.outputFiles[0].text).toString('base64'));
-ok('muten:texts gives a use function the same t(): its value, its plural, a missing key as itself', run.out.join('|') === 'Hola, Ana|1 product|3 products|nope|en,es', run.out.join('|'));
+ok('muten:texts loads one language first and answers from it until another lands', run.first.join('|') === 'en|Hi, Ana|true|false', run.first.join('|'));
+ok('muten:texts gives a use function the same t(): its value, its plural, a missing key as itself', run.out.join('|') === 'Hola, Ana|1 product|3 products|nope|en,es|true', run.out.join('|'));
 
 if (f) { console.log(`\n✗ ${f} failed`); process.exit(1); }
 console.log('\n✓ lang: all passed');
