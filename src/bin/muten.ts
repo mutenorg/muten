@@ -11,6 +11,7 @@ import { lintApp, lintWatch, findings } from '../lint.js';
 import { fixApp } from '../fix.js';
 import { doctorCommand } from '../doctor.js';
 import { reportCommand } from '../report.js';
+import { nativeCommand } from '../native-project.js';
 import { fmtCommand } from '../fmt.js';
 import { upgradeCommand } from '../upgrade.js';
 import { configSchema } from '#engine/project/config-check.js';
@@ -48,6 +49,7 @@ try {
   else if (cmd === 'upgrade') process.exitCode = (await upgradeCommand(root)) ? 0 : 1;   // installed vs published, and the line to run (upgrade.ts)
   else if (cmd === 'fmt') process.exitCode = fmtCommand(root, args.includes('--check')) ? 0 : 1;   // one shape for every file; only whitespace moves (fmt.ts)
   else if (cmd === 'doctor') process.exitCode = (await doctorCommand(root, json)) ? 0 : 1;   // everything the app needs, looked at once (doctor.ts)
+  else if (cmd === 'native') { const ok = await nativeCommand(root, args); process.exitCode = process.exitCode || (ok ? 0 : 1); }   // the app as an Expo (React Native) app, a proof of concept (native-project.ts)
   else if (cmd === 'report') process.exitCode = (await reportCommand(root)) ? 0 : 1;   // what a bug report needs, written to .muten/report.md, sent nowhere (report.ts)
   else if (cmd === 'explain') {   // what a finding's code means, how to fix it, the slip next to its fix (explain/)
     const code = args[1] || '';
@@ -67,6 +69,11 @@ try {
         console.log(`${report.applied.length} fixed${report.left.length ? `, ${report.left.length} left for you` : ''}\n`);
         process.exitCode = (await lintApp(root, false)) ? 1 : 0;
       }
+    }
+    else if (args.includes('--native')) {   // what will not reach the phone (React Native), at its CSS line or node
+      const { nativeLint } = await import('../native-lint.js');
+      process.exitCode = (await lintApp(root, json)) ? 1 : 0;
+      await nativeLint(root, json);
     }
     else process.exitCode = (await lintApp(root, json, args.includes('--changed'))) ? 1 : 0;   // not process.exit: piped, it cut stdout off at 64 kB (a big --json arrived broken)
   }

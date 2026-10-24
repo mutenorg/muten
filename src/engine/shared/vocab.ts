@@ -101,7 +101,7 @@ export const NON_PRIMITIVES: { [name: string]: string } = {
 export function nonPrimitiveHint(name: string): string { return NON_PRIMITIVES[String(name || '').toLowerCase()] || ''; }
 
 /** Compile output format. */
-export enum Fmt { Module = 'module', Store = 'store', Html = 'html', Ssr = 'ssr', Patch = 'patch' }
+export enum Fmt { Module = 'module', Store = 'store', Html = 'html', Ssr = 'ssr', Patch = 'patch', Native = 'native' }   // native: a React Native screen (engine/native/)
 
 /** Editable form-field kinds (how a Form renders an entity field). */
 export enum Fk { Text = 'text', Email = 'email', Number = 'number', Bool = 'bool', Enum = 'enum', Date = 'date', Password = 'password', Textarea = 'textarea' }

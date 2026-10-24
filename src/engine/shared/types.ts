@@ -458,4 +458,5 @@ export interface DiagOpts {
 
 export * from '#engine/shared/types-compile.js';
 export * from '#engine/shared/types-theme.js';
+export * from '#engine/shared/types-native.js';
 export * from '#engine/shared/types-tooling.js';

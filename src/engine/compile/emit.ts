@@ -237,7 +237,7 @@ const PERSIST_JS = `const __loadLocal = (k, fb) => { try { const v = localStorag
 
 // the runtime prelude a body needs: builtins called + persist (if it persists) + the source layer (if it
 // reads/writes/sends). Detection scans the COMPILED body for the helper-call patterns the emitter produces.
-function prelude(parts: EmitParts, body: string, shared = false): string {
+export function prelude(parts: EmitParts, body: string, shared = false): string {
   const out: string[] = [];
   const b = usedBuiltins(body);
   if (b) out.push(b);
@@ -256,8 +256,8 @@ function prelude(parts: EmitParts, body: string, shared = false): string {
 // match merely imports an unused symbol (the bundler drops it); a miss can't happen (the emitter always writes
 // these as `name(` calls / `__sym` references that `\bname\b` catches).
 export const RUNTIME_SYMBOLS: ReadonlyArray<string> = ['signal', 'computed', 'effect', 'untrack', 'root', 'onCleanup', '__device', '__urlRead', '__urlSet', '__watchImages', '__t', '__lang', '__langUse', '__langInit', '__langList', '__eq', '__rowKey', '__id', '__has', '__order', '__leave', '__chart', '__arc', '__drag', '__drop', '__clone', '__bind', '__when', '__each', '__mk', '__ap', '__island', '__at', '__gesture'];
-const dataImport = (code: string): string => (code.includes('__dataLayer(') ? `import { __dataLayer } from 'virtual:muten/data';\n` : '');
-function runtimeImport(code: string): string {
+export const dataImport = (code: string): string => (code.includes('__dataLayer(') ? `import { __dataLayer } from 'virtual:muten/data';\n` : '');
+export function runtimeImport(code: string): string {
   const used = RUNTIME_SYMBOLS.filter((s) => new RegExp(`\\b${s}\\b`).test(code));
   return used.length ? `import { ${used.join(', ')} } from 'virtual:muten/runtime';\n` : '';
 }

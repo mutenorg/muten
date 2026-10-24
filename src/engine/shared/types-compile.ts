@@ -4,6 +4,7 @@
 import type { Fmt, Fk } from '#engine/shared/vocab.js';
 import type { Logic } from '#engine/compile/logic.js';
 import type { ActionDef, Diagnostic, Doc, Entity, EntityConstraints, Expr, FlatNode, FnDef, ImportDef, Interp, Loc, NodeProps, RequestStmt, Scalar, StateDef, Stmt, StringPropValue, Value, Translations, ThemeRaw, ThemeKit } from '#engine/shared/types.js';
+import type { CssSheet, NativeReport } from '#engine/shared/types-native.js';
 
 /** App-global store slice, by domain: which members are state / gets / actions. */
 export interface StoreSlice {
@@ -16,6 +17,7 @@ export interface StoreSlice {
 
 export interface CompileOpts {
   format?: Fmt;
+  native?: { sheet: CssSheet; report: NativeReport };   // Fmt.Native: the app's CSS in, what translated and what did not out (engine/native/)
   stores?: { [domain: string]: StoreSlice };
   routeGuard?: { check: string; redirect: string };   // standalone build only: the route's guard as JS — the page checks it before it renders (never the zero-JS path)
   translations?: Translations;       // the app's texts (src/lang/*.lang): a page's t(…) table is cut from these

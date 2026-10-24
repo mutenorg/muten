@@ -33,6 +33,11 @@ import { MEDIA_NODES } from '#engine/compile/media.js';
 import { CONTROLS_NODES } from '#engine/compile/controls.js';
 import { foreignImport, REACT_RUNTIME, scriptGlobals } from '#engine/compile/foreign.js';
 import { frameworkLoader } from '#engine/compile/framework-island.js';
+import { nativeLooks } from '#engine/native/styles.js';
+import { nativeTree } from '#engine/native/tree.js';
+import { emitNative } from '#engine/native/emit-native.js';
+import { countGaps } from '#engine/native/report.js';
+import type { NativeGap } from '#engine/shared/types-native.js';
 import { nodeReads } from '#engine/compile/reads.js';
 import { speakTable, freeze } from '#engine/compile/translate.js';
 import { foldDoc } from '#engine/compile/fold.js';
@@ -372,7 +377,7 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
   }
 
   // ── orchestrate: compile every piece, then hand to the right emit target ─────────────────
-  const staticPage = (opts.format === Fmt.Ssr || opts.format === Fmt.Patch) ? false : isStatic(); // SSR/Patch always render the tree (genNode)
+  const staticPage = (opts.format === Fmt.Ssr || opts.format === Fmt.Patch || opts.format === Fmt.Native) ? false : isStatic(); // SSR/Patch/Native always render the tree (genNode)
   // route params -> local string consts read from the mount() argument (set by the router on match).
   const paramDecls = (doc.params || []).map((p) => `const ${p} = (__params || {})[${JSON.stringify(p)}] ?? '';`).join('\n  ');
   const stateDecls = [logic.genState(), logic.genActionSignals()].filter(Boolean).join('\n  ');
@@ -390,8 +395,11 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
   const effectDecls = [logic.genEffects(), timerCode(doc.timers || [], statement), settleCode(doc.settles || [], statement, (watched) => logic.compileExpr(watched, pageScope))].filter(Boolean).join('\n  ');
 
   let staticHtml: string | null = null;
+  let nativeOut: { tree: ReturnType<typeof nativeTree>; gaps: NativeGap[] } | null = null;
   if (staticPage) staticHtml = rootId ? renderStatic(rootId) : '';            // populates usedTokens via classFor
   else if (opts.format === Fmt.Patch && opts.patchRoot) genNode(opts.patchRoot, 'parent'); // HMR: just this node's subtree, into the `parent` arg
+  // a React Native screen: drawn here, before the texts table is cut (t() calls in the drawing name its keys)
+  else if (opts.format === Fmt.Native && opts.native) { const native = nativeLooks(doc, opts.native.sheet); nativeOut = { tree: nativeTree(doc, logic, native.looks, opts.iconResolver), gaps: native.gaps }; }
   else if (opts.format !== Fmt.Store && rootId) genNode(rootId, 'app');        // store has no DOM, only state + actions
   // __nodes: the HMR node registry (id -> { el, parent }), built by appendEl. Dev only (Patch supplies its own).
   const renderBody = (opts.dev && rootId ? 'const __nodes = {};\n  ' : '') + lines.join('\n  ');
@@ -447,6 +455,12 @@ export function compile(page: Doc, data: { [name: string]: Value } = {}, project
     renderBody: (opts.format === Fmt.Patch ? textTable : '') + renderBody + imageWatch, staticHtml: staticHtml ?? '', hasSlot, ctxNames, dev: !!opts.dev,
     storeDomain: opts.format === Fmt.Store ? opts.persistScope : undefined,
   };
+  if (nativeOut && opts.native) {   // a React Native screen: same logic, drawn by engine/native/
+    const { tree, gaps } = nativeOut;
+    opts.native.report.nodes = tree.nodes; opts.native.report.translated = tree.drawn;
+    opts.native.report.gaps = countGaps([...gaps, ...tree.gaps]);
+    return emitNative(parts, tree.jsx, tree.styles);
+  }
   const out = opts.format === Fmt.Patch ? emitPatch(parts, opts.patchRoot ?? '')   // HMR: one node's subtree as a (ctx, nodes, parent) builder
     : opts.format === Fmt.Store ? emitStore(parts)
     : opts.format === Fmt.Ssr ? emitSsr(parts)                                  // build-time pre-render factory (runs against a fake DOM)

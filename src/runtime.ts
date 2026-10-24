@@ -12,6 +12,8 @@ import { startHandOver, releaseSnapshot, snapshotShowing } from './runtime-snap.
 import { __island } from './runtime-island.js';
 import { __when, __each, __eq, __order, __mk, __ap } from './runtime-blocks.js';
 import { __rowKey } from './runtime-key.js';
+import { __has, __id } from './runtime-pure.js';
+export { __has, __id };
 import { __drag, __drop } from './dnd.js';
 import { __gesture } from './runtime-gesture.js';
 export { __leave, __rowKey, __drag, __drop, __gesture, __when, __each, __eq, __order, __mk, __ap };
@@ -50,11 +52,6 @@ export function patchNode(inst: PageInstance, id: string, build: (ctx: { [k: str
   return true;
 }
 
-// `a contains b`: list membership or case-insensitive substring, one operator for both.
-export function __has<T>(a: readonly T[] | string | null | undefined, b: T): boolean {
-  if (Array.isArray(a)) return a.includes(b);
-  return String(a ?? '').toLowerCase().includes(String(b ?? '').toLowerCase());
-}
 
 // Native chart: draw bar/line/area/point marks + a y-axis into an <svg> from `rows`, reading the `x`/`y`
 // field encodings. Full redraw per data change — charts are small, so keyed reconciliation isn't worth it.
@@ -194,10 +191,6 @@ export function __clone(html: string): Element {
   return copy;
 }
 
-let seq = 0;
-export function __id(): string {
-  return (globalThis.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'id-' + (++seq);
-}
 
 // Injects a page/shell stylesheet once, deduped by content (re-mounting a route doesn't pile up <style>s).
 const injected = new Set<string>();

@@ -3,7 +3,7 @@
 /** Each command and what it does, in the order one meets them. */
 export const COMMANDS: ReadonlyArray<[string, string]> = [
   ['dev [dir]', 'the app on this machine, rebuilt on every save (--host: open it to a phone on the wifi)'],
-  ['check [dir]', 'every finding, at its file and line (--json for an agent, --fix to apply the sure ones, --changed, --watch)'],
+  ['check [dir]', 'every finding, at its file and line (--json for an agent, --fix to apply the sure ones, --changed, --watch, --native for what will not reach the phone)'],
   ['explain <code>', 'what a finding means, how to fix it, the slip next to its fix'],
   ['fmt [dir]', 'one shape for every .muten and .store file; only whitespace moves (--check: say, do not write)'],
   ['test [dir]', 'the .test files, in a headless browser, on mock data (--only=name)'],
@@ -13,6 +13,7 @@ export const COMMANDS: ReadonlyArray<[string, string]> = [
   ['config --schema', "muten.config's blocks, keys and values as JSON (for the editor and an agent)"],
   ['upgrade [dir]', 'the muten this app has against the one published, and the line that moves it'],
   ['doctor [dir]', 'everything the app needs, looked at once: Node, muten, config, check, ports, Chrome, Android'],
+  ['native [dir]', 'the app as an Expo (React Native) app, checked; --start serves it to Expo Go, --android opens it on an emulator muten sets up, --screenshot <file>, --errors (every error of the running app, and its screen), --logs (its whole log, live), --compare [route…] (the phone next to the web, with how much matches)'],
   ['report [dir]', 'what a muten bug report needs, written to .muten/report.md (versions, packages, check, last error); sends nothing'],
   ['new page|store|app <name>', 'the structure of a page or a store, to fill in'],
   ['add <name>', 'a muten plugin (enabled) · any npm package (installed, checked, weighed, its use line) · PascalCase: a registry component'],
