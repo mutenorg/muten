@@ -38,8 +38,11 @@ ok('a query starts on its first read', js.includes('sig.get = () => { if (!sig._
 ok('a refetch marks the query started', js.includes('sig.__started = true; const tok = (sig.__tok'));
 ok('a first load shares an identical GET in flight, app-wide', js.includes('return __shared(q.url, init)') && js.includes('globalThis.__mutenFlight'));
 ok('a GET query starts from the last rows it showed (stale-while-revalidate)', js.includes('const __hit = __cache.get(sig.__key); if (__hit) sig.set({ data: __hit, loading: false, error: null }); __remember(sig);'));
-ok('the cache is keyed with the session headers and bounded', js.includes('function __cacheKey(url) { return JSON.stringify([url, __hdrs(url)]); }') && js.includes('if (__cache.size > 50)'));
-ok('the key is taken again when the request leaves (a store query is created before any session)', js.includes('if (sig.__key) sig.__key = __cacheKey(__src.url);'));
+ok('the cache is keyed with the session headers and bounded', js.includes("function __cacheKey(url, at) { return JSON.stringify([url, at || '', __hdrs(url)]); }") && js.includes('if (__cache.size > 50)'));
+// several queries reading different parts of one answer (`at`) must not start from each other's rows: the panel's
+// page drew its pieces with another list's rows for a second on every poll
+ok('the cache key holds the part of the answer a query reads', js.includes('__cacheKey(url, q.at)') && js.includes('sig.__key = __cacheKey(__src.url, __src.at); const __hit'));
+ok('the key is taken again when the request leaves (a store query is created before any session)', js.includes('if (sig.__key) sig.__key = __cacheKey(__src.url, __src.at);'));
 ok('actions are generated', js.includes('function buy(item)') && js.includes('function drop(item)'));
 
 // The emitted __crud, run for real against a fake server that answers late. The bug it exists for: a
