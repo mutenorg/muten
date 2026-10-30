@@ -180,5 +180,37 @@ check('persisting a harmless tab is not', !flagged.includes('tab'));
 check('the warning is a warning, not an error', persistDiag.diagnostics.filter((d) => d.code === 'persist-sensitive').every((d) => d.severity === 'warning'));
 
 rmSync(root, { recursive: true, force: true });
+// live queries on one address share ONE socket: each takes its own piece (`at`) of every message, a query that comes
+// late gets the last message at once, and the socket closes when the last query on it leaves
+{
+  const opened: FakeSocket[] = [];
+  class FakeSocket {
+    readyState = 0; closed = false; url: string;
+    onopen: (() => void) | null = null; onmessage: ((event: { data: string }) => void) | null = null; onerror: (() => void) | null = null; onclose: ((event: { code: number }) => void) | null = null;
+    constructor(url: string) { this.url = url; opened.push(this); }
+    send(): void {}
+    close(): void { this.closed = true; }
+  }
+  const cleanups: (() => void)[] = [];
+  const signal = <T>(value: T) => { let current = value; return { get: () => current, set: (next: T) => { current = next; } }; };
+  const body = layerJs.replace(/^import[^\n]*\n/, '').replace('export function __dataLayer', 'function __dataLayer');
+  const make = new Function('signal', 'onCleanup', '__id', 'WebSocket', 'location', `${body}\nreturn __dataLayer;`);
+  const dataLayer = make(signal, (fn: () => void) => cleanups.push(fn), () => 'id', FakeSocket, { origin: 'http://app.test', href: 'http://app.test/' });
+  const sources = { nodes: { url: 'http://app.test/platform/live', at: 'nodes' }, events: { url: 'http://app.test/platform/live', at: 'events' }, other: { url: 'http://app.test/other/live' } };
+  const layer = dataLayer({}, sources, {}, {});
+  const nodes = layer.query('nodes', true);
+  const events = layer.query('events', true);
+  check('two live queries on one address open one socket', opened.length === 1, opened.map((socket) => socket.url));
+  opened[0].onmessage?.({ data: JSON.stringify({ nodes: [{ id: 'n1' }], events: [{ id: 'e1' }, { id: 'e2' }] }) });
+  check('each query takes its own piece of the shared message', nodes.get().data.length === 1 && events.get().data.length === 2 && !nodes.get().loading && !events.get().loading);
+  const late = layer.query('events', true);
+  check('a query that joins late gets the last message at once', late.get().data.length === 2 && opened.length === 1);
+  layer.query('other', true);
+  check('another address gets its own socket', opened.length === 2);
+  for (const fn of cleanups.splice(0, 3)) fn();
+  check('the socket closes when its last query leaves', opened[0].closed && !opened[1].closed);
+}
+
+
 console.log(fails ? `\n${fails} security check(s) FAILED` : '\nall security checks passed');
 process.exit(fails ? 1 : 0);

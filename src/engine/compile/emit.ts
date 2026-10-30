@@ -138,7 +138,31 @@ const LAYER = `  const __DELAY = 450;
   function __payload(body) { if (body == null) return Promise.resolve(null); const isFile = (v) => typeof Blob !== 'undefined' && v instanceof Blob; return Promise.resolve(body).then((b) => { if (isFile(b)) return { body: b, type: b.type || 'application/octet-stream' }; if (!b || typeof b !== 'object' || Array.isArray(b)) return { body: JSON.stringify(b), type: 'application/json' }; return Promise.all(Object.entries(b).map(([k, v]) => Promise.resolve(v).then((x) => [k, x]))).then((entries) => { if (!entries.some(([, v]) => isFile(v) || (Array.isArray(v) && v.some(isFile)))) return { body: JSON.stringify(Object.fromEntries(entries)), type: 'application/json' }; const form = new FormData(); for (const [k, v] of entries) { if (v == null) continue; if (isFile(v)) form.append(k, v, v.name || k); else if (Array.isArray(v) && v.some(isFile)) v.forEach((x) => form.append(k, x, x.name || k)); else form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v)); } return { body: form, form: true }; }); }); }
   // a live message: a whole list replaces it; { upsert: row | rows } and { remove: id | ids } change only those rows
   function __live(name, rows, m, at) { if (m && !Array.isArray(m) && typeof m === 'object' && ('upsert' in m || 'remove' in m)) { let next = rows || []; const gone = [].concat(m.remove == null ? [] : m.remove); if (gone.length) next = next.filter((r) => !gone.includes(r && r.id)); const ups = __fill(name, [].concat(m.upsert == null ? [] : m.upsert)); for (const u of ups) { const at2 = next.findIndex((r) => r && u && r.id === u.id); next = at2 < 0 ? [...next, u] : next.map((r, i) => (i === at2 ? u : r)); } return next; } return __fill(name, __rows(m, at)); }
-  function query(name, live) { const sig = signal({ data: [], loading: true, error: null }); if (live) { let ws, tries = 0, dead = false, params = {}; const outbox = []; sig.__send = (x) => { const text = JSON.stringify(x); if (ws && ws.readyState === 1) ws.send(text); else if (outbox.length < 100) outbox.push(text); }; const open = () => { if (dead) return; const q = __req(__SOURCES[name], __API);
+  // ONE SOCKET PER ADDRESS. A page reads a live snapshot in pieces (\`at\`): twelve lists on one address used to open
+  // twelve sockets, and a browser opens sockets to a host one at a time, each waiting for the server's door, so the
+  // last pieces arrived seconds after the first. Live queries on the same address (and the same bearer) share one:
+  // each message goes to every query on it, a query that joins late gets the last message at once, and the socket
+  // closes when no query is left on it. A refetch with other params moves that query to the socket of its address.
+  const __sockets = new Map();
+  function __socket(url, protos, sub) { const key = url + ' ' + (protos ? protos.join(',') : ''); let s = __sockets.get(key);
+    if (!s) { s = { subs: new Set(), outbox: [], tries: 0, ws: null, timer: null, last: undefined }; __sockets.set(key, s);
+      s.connect = () => { s.timer = null; if (!s.subs.size) return; const ws = protos ? new WebSocket(url, protos) : new WebSocket(url); s.ws = ws;
+        ws.onopen = () => { s.tries = 0; while (s.outbox.length && ws.readyState === 1) ws.send(s.outbox.shift()); };
+        ws.onmessage = (e) => { let m; try { m = JSON.parse(e.data); } catch (err) { return; } s.last = m; for (const x of [...s.subs]) x.message(m); };
+        ws.onerror = () => { for (const x of [...s.subs]) x.error(); };
+        ws.onclose = (ev) => { if (s.ws !== ws) return; s.ws = null; for (const x of [...s.subs]) x.closed(ev);
+      // A 4000-4499 close is the SERVER SAYING NO — not signed in, no scope, not allowed. Retrying
+      // that is a loop that never ends: a live query connects the moment its module loads, before any
+      // screen has said what it is about, so an unscoped socket was refused and reconnected forever.
+      // Transport failures still back off and retry; a policy refusal waits for a refetch to give
+      // it what it was missing.
+          if (!s.subs.size || (ev && ev.code >= 4000 && ev.code < 4500)) { if (__sockets.get(key) === s) __sockets.delete(key); return; }
+          s.timer = setTimeout(s.connect, Math.min(1000 * 2 ** s.tries++, 15000)); }; }; }
+    s.subs.add(sub);
+    if (!s.ws && !s.timer) s.connect(); else if (s.last !== undefined) sub.message(s.last);
+    return { send: (text) => { if (s.ws && s.ws.readyState === 1) s.ws.send(text); else if (s.outbox.length < 100) s.outbox.push(text); },
+      leave: () => { s.subs.delete(sub); if (s.subs.size) return; if (__sockets.get(key) === s) __sockets.delete(key); clearTimeout(s.timer); s.timer = null; const ws = s.ws; s.ws = null; if (ws) { try { ws.close(); } catch (err) {} } } }; }
+  function query(name, live) { const sig = signal({ data: [], loading: true, error: null }); if (live) { let sub = null, dead = false, params = {}; sig.__send = (x) => { if (sub) sub.send(JSON.stringify(x)); }; const open = () => { if (dead) return; const q = __req(__SOURCES[name], __API);
     // A browser WebSocket takes NO headers, so a live query could never carry a per-user token or a
     // scope — which is every authenticated real-time list there is. The scope (\`refetch\`'s params) travels as the
     // query string; the bearer as a subprotocol (below), never in the url. http/https becomes
@@ -150,16 +174,10 @@ const LAYER = `  const __DELAY = 450;
     const __all = { ...params };
     const __qs = Object.keys(__all).map((k) => encodeURIComponent(k) + '=' + encodeURIComponent(__all[k])).join('&');
     let __u = q.url.replace(/^http/, 'ws'); if (__qs) __u += (__u.indexOf('?') >= 0 ? '&' : '?') + __qs;
-    ws = __protos ? new WebSocket(__u, __protos) : new WebSocket(__u); ws.onopen = () => { tries = 0; while (outbox.length && ws.readyState === 1) ws.send(outbox.shift()); }; ws.onmessage = (e) => { try { const m = JSON.parse(e.data); sig.set({ data: __live(name, sig.get().data, m, q.at), loading: false, error: null }); } catch {} }; ws.onerror = () => { sig.set({ ...sig.get(), error: 'socket error' }); }; ws.onclose = (ev) => { if (dead) return; sig.set({ ...sig.get(), loading: false });
-      // A 4000-4499 close is the SERVER SAYING NO — not signed in, no scope, not allowed. Retrying
-      // that is a loop that never ends: a live query connects the moment its module loads, before any
-      // screen has said what it is about, so an unscoped socket was refused and reconnected forever.
-      // Transport failures still back off and retry; a policy refusal waits for a refetch to give
-      // it what it was missing.
-      if (ev && ev.code >= 4000 && ev.code < 4500) { sig.set({ ...sig.get(), error: 'socket ' + ev.code }); return; }
-      setTimeout(open, Math.min(1000 * 2 ** tries++, 15000)); }; }; sig.__reopen = (next) => { params = { ...params, ...(next || {}) }; tries = 0; sig.set({ ...sig.get(), error: null });
-      if (ws && ws.readyState <= 1) { try { ws.close(); } catch (e) {} } else { open(); } };
-    open(); onCleanup(() => { dead = true; if (ws) ws.close(); }); } else {
+    sub = __socket(__u, __protos, { message: (m) => sig.set({ data: __live(name, sig.get().data, m, q.at), loading: false, error: null }), error: () => sig.set({ ...sig.get(), error: 'socket error' }),
+      closed: (ev) => { if (dead) return; sig.set({ ...sig.get(), loading: false, error: ev && ev.code >= 4000 && ev.code < 4500 ? 'socket ' + ev.code : sig.get().error }); } }); };
+    sig.__reopen = (next) => { params = { ...params, ...(next || {}) }; sig.set({ ...sig.get(), error: null }); if (sub) sub.leave(); sub = null; open(); };
+    open(); onCleanup(() => { dead = true; if (sub) sub.leave(); }); } else {
     // THE FIRST LOAD YIELDS TO ANY REFETCH. A page that loads and then asks again with params (a key, a slug) has two
     // requests in flight; the bare one usually fails and, on a slow network, lands LAST-but-one: it cleared \`loading\`
     // and showed «not found» until the real answer came. \`__refetch\` bumps \`sig.__tok\`; a changed token drops this.
