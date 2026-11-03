@@ -100,6 +100,25 @@ ok('a route outside the layout drops it', outlet.children.length === 1 && outlet
 await go('/a');
 ok('coming back mounts the layout again', layoutMounts === 2 && outlet.children[0].tag === 'layout' && layoutLoads === 2, `mounts=${layoutMounts} loads=${layoutLoads}`);
 
+// ── a link to the page already open with another query (a tab in `?tab=`) moves the address, not the page ──
+// (it re-mounted the whole page: every query again, a blank frame and back to the top on every tab of a service)
+const toUrl = (to) => { const at = new URL(to, 'http://app.test' + location.pathname); Object.assign(location, { pathname: at.pathname, search: at.search, hash: at.hash, href: at.href }); };
+globalThis.history = { pushState: (_s, _t, to) => toUrl(to), replaceState: (_s, _t, to) => toUrl(to), state: null };
+toUrl('/a');
+globalThis.MouseEvent = class {};
+const clickTo = async (href) => {
+  const link = { getAttribute: (name) => (name === 'href' ? href : null), hasAttribute: () => false };
+  const target = Object.assign(new El('a'), { closest: () => link });
+  listeners.click(Object.assign(new MouseEvent(), { button: 0, target, defaultPrevented: false, preventDefault() {} }));
+  await tick(); await tick();
+};
+const pageA = outlet.children[0].children[1].children[0];
+await clickTo('/a?tab=logs');
+ok('same path, another query: the address moves', location.pathname === '/a' && location.search === '?tab=logs', JSON.stringify(location));
+ok('…and the page stays mounted (no re-mount, no blank frame)', outlet.children[0].children[1].children[0] === pageA);
+await clickTo('/b');
+ok('another path still opens its page', outlet.children[0].children[1].children[0]?.tag === 'page:b');
+
 // ── the default layout: every route has it unless its own line says otherwise ──
 // (`layout site default`, `"/search" -> search without site`, `"/app" -> panel in admin`: each route's line says all)
 const site = parse(`

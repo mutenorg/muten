@@ -244,6 +244,10 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
   };
   let mounted: string | null = null;        // path currently shown, to avoid re-mounting on every auth tick
   let disposePage: (() => void) | null = null;
+  // the screen last shown: opening the same screen again with another parameter (`/account/billing` after
+  // `/account/profile`) is a change of section, not of page, and the document says so (`data-muten-same`), so an app
+  // can move only what changed instead of bringing the whole page in again
+  let shownPage: string | null = null;
   let layoutName: string | null = null;     // the layout currently mounted in the outlet (null = the page sits there directly)
   let layoutOutlet: Element | null = null;  // that layout's `slot`, where its routes' pages mount
   let disposeLayout: (() => void) | null = null;
@@ -299,16 +303,18 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
     return true;
   };
   const go = (to: string): void => {
-    const cut = to.indexOf('#');
-    const here = location.pathname + (location.search || '');
-    // Only the section moves on the page already open (same path, same query): the address keeps it and the page
-    // scrolls to it, with no re-mount. Re-mounting re-ran every query of the page and then opened it at its top.
-    if (cut >= 0 && (to.slice(0, cut) || here) === here) {
-      if (to !== here + (location.hash || '')) history.pushState({ muDepth: depth() + 1 }, '', to);
-      toSection(to.slice(cut + 1), true);
+    const at = new URL(to, location.href);
+    // The page already open (same path): only its query or its section moves. The address keeps them (the page reads
+    // its open tab from `url`, which follows pushState) and a section is scrolled to, with no re-mount, as Back and
+    // forward already do. Re-mounting re-ran every query of the page, blanked it and opened it at its top: a link to
+    // another tab of the same page (`?tab=logs`) flashed the whole page.
+    if (at.pathname === location.pathname) {
+      const next = at.pathname + at.search + at.hash;
+      if (next !== location.pathname + location.search + location.hash) history.pushState({ muDepth: depth() + 1 }, '', next);
+      if (at.hash) toSection(at.hash.slice(1), true);
       return;
     }
-    if (to !== location.pathname) { history.pushState({ muDepth: depth() + 1 }, '', to); mounted = null; render(); }
+    history.pushState({ muDepth: depth() + 1 }, '', to); mounted = null; render();
   };
   const render = (): void => {
     const path = location.pathname || keys[0];
@@ -339,6 +345,8 @@ export function route(outlet: Element, routes: { [path: string]: RouteDef }, lay
       if (disposePage) disposePage();          // stop the previous page's effects to avoid stale-DOM crashes
       disposePage = null;
       const target = pageTarget(want, layoutModule);
+      document.documentElement?.setAttribute('data-muten-same', String(!!def.page && def.page === shownPage));
+      shownPage = def.page ?? null;
       injectCss(module.css);
       if (module.meta) applyMeta(module.meta);
       disposePage = scope(() => {
