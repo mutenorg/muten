@@ -28,9 +28,11 @@ export const CALL_QUERY_JS = `function __callQuery(args, fn, live, empty) {
 
 // `query x every 30s`: asked again on that beat while the page is open and the tab is visible; coming back to the tab
 // after longer than the beat asks at once. A function query asks itself again; a source query repeats its last params.
+// A source query nothing has read yet is not asked: it loads when something reads it, and the beat keeps it fresh from
+// then on (a store's list behind a screen this person never sees, or one the server refuses them, stays unasked).
 export const EVERY_JS = `function __every(name, sig, ms) {
     let last = Date.now();
-    const again = () => { last = Date.now(); if (typeof sig.__rerun === 'function') sig.__rerun(); else __refetch(name, sig.__params || {}, sig); };
+    const again = () => { last = Date.now(); if (typeof sig.__rerun === 'function') sig.__rerun(); else if (sig.__started) __refetch(name, sig.__params || {}, sig); };
     const timer = setInterval(() => { if (!document.hidden) again(); }, ms);
     const back = () => { if (!document.hidden && Date.now() - last >= ms) again(); };
     document.addEventListener('visibilitychange', back);
