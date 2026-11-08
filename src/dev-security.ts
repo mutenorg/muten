@@ -154,6 +154,40 @@ export function withScriptOrigins(policy: string, origins: string[]): string {
   return out;
 }
 
+// the origins the default policy shuts (it allows API calls to any https origin, never plain http) that the app itself
+// names in its chosen environment: `env { local { api "http://localhost:4710" } }` bundled with --env=local, or a phone
+// build on `lan`, must reach its own API. Only those origins, by name; every other plain http stays shut.
+const PLAIN_SCHEMES: { [scheme: string]: string } = { 'http:': 'ws:' };
+
+/** The plain-http origins (and their websocket twins) the environment's values name. */
+export function envOrigins(values: { [key: string]: string | number | boolean } | null): string[] {
+  const origins = new Set<string>();
+  for (const value of Object.values(values ?? {})) {
+    if (typeof value !== 'string' || !URL.canParse(value)) continue;
+    const url = new URL(value);
+    const socket = PLAIN_SCHEMES[url.protocol];
+    if (!socket) continue;
+    origins.add(url.origin);
+    origins.add(`${socket}//${url.host}`);
+  }
+  return [...origins];
+}
+
+/** The policy with those origins allowed to be called (connect-src), and nothing else. */
+export function withConnectOrigins(policy: string, origins: string[]): string {
+  if (!policy || !origins.length) return policy;
+  return /(^|;\s*)connect-src\s/.test(policy)
+    ? policy.replace(/(connect-src[^;]*)/, (found) => `${found} ${origins.join(' ')}`)
+    : `${policy}; connect-src 'self' ${origins.join(' ')}`;
+}
+
+/** The policy a build ships: muten.config's, with the libraries the app loads by <script> and the plain-http origins its
+ *  chosen environment names; null when none is configured, '' when it is off. */
+export function buildPolicy(appRoot: string, environment: { [key: string]: string | number | boolean } | null): string | null {
+  const configured = cspFrom(readMutenConfig(appRoot).security);
+  return configured ? withConnectOrigins(withScriptOrigins(configured, scriptOrigins(appRoot)), envOrigins(environment)) : configured;
+}
+
 /** index.html with the policy as a <meta> (an existing one is left alone: the app wrote its own). */
 export function withCsp(html: string, policy: string): string {
   if (!policy || /http-equiv=["']content-security-policy["']/i.test(html)) return html;

@@ -4,7 +4,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileInside, hostAllowed, isSecretPath, openInEditor, withCsp, cspFrom, DEFAULT_CSP, hostRuleProblem, securityHeaders, headersFrameProtected } from '../dist/dev-security.js';
+import { fileInside, hostAllowed, isSecretPath, openInEditor, withCsp, cspFrom, DEFAULT_CSP, hostRuleProblem, securityHeaders, headersFrameProtected, envOrigins, withConnectOrigins } from '../dist/dev-security.js';
 import { BUILTINS_JS, dataModule } from '#engine/compile/emit.js';
 import { parse } from '#engine/lang/parse.js';
 import { toDoc } from '#engine/ir/flatten.js';
@@ -213,4 +213,15 @@ rmSync(root, { recursive: true, force: true });
 
 
 console.log(fails ? `\n${fails} security check(s) FAILED` : '\nall security checks passed');
+// ── a bundle for --env=local (or a phone on lan) reaches its own plain-http API, and only that ──
+// the default policy calls any https origin and never plain http: a local bundle could not reach http://localhost:4710
+const local = envOrigins({ api: 'http://localhost:4710', ai: 'http://localhost:4730/ai', open: true, site: '' });
+check('the environment\'s plain-http origins (and their websockets) are named', JSON.stringify(local) === JSON.stringify(['http://localhost:4710', 'ws://localhost:4710', 'http://localhost:4730', 'ws://localhost:4730']), JSON.stringify(local));
+check('https values add nothing: the policy already allows them', envOrigins({ api: 'https://api.example.com', site: 'https://example.com' }).length === 0);
+const opened = withConnectOrigins(DEFAULT_CSP, local);
+check('connect-src gains exactly those origins', /connect-src 'self' https: wss: http:\/\/localhost:4710 ws:\/\/localhost:4710 http:\/\/localhost:4730 ws:\/\/localhost:4730;/.test(opened), opened);
+check('… and nothing else changes (scripts stay shut)', opened.includes("script-src 'self';") && !/connect-src[^;]*\bhttp:(?!\/\/)/.test(opened));
+check('no environment, no change', withConnectOrigins(DEFAULT_CSP, envOrigins(null)) === DEFAULT_CSP);
+check('a policy without connect-src gets one of its own', withConnectOrigins("default-src 'self'", ['http://localhost:1']) === "default-src 'self'; connect-src 'self' http://localhost:1");
+
 process.exit(fails ? 1 : 0);

@@ -18,7 +18,7 @@ import { toDoc } from '#engine/ir/flatten.js';
 import { load, loadAllParts, findStores, loadPluginComponents } from '#engine/project/load.js';
 import { storeContext, type StoreContext } from '#engine/project/context.js';
 import { guardJs } from '#engine/compile/guard.js';
-import { apiWithEnv, envDefines } from '#engine/project/env.js';
+import { apiWithEnv, envDefines, envValues } from '#engine/project/env.js';
 import { themeLibrary, withLibraryCss, themeRoot, withThemeRoot } from '#engine/project/theme-library.js';
 import { inlineCssImports } from '#engine/project/css-imports.js';
 import { filesText, PUBLIC_CODE } from './css-prune.js';
@@ -36,7 +36,7 @@ import { dataModule } from '#engine/compile/emit.js';
 import { emitTheme } from '#engine/style/tokens.js';
 import { getIconChecker } from '#engine/project/icon-check.js';
 import { makeIconResolver } from './icons.js';
-import { cspFrom, withCsp, writeSecurityHeaders, scriptOrigins, withScriptOrigins } from './dev-security.js';
+import { buildPolicy, withCsp, writeSecurityHeaders } from './dev-security.js';
 import { writeAppMap, writeBundleRecord } from './app-map-file.js';
 import { LAYOUT_PREFIX, layoutDoc, layoutLoaders } from './layout-modules.js';
 import { TEXTS_LANG, textsModule, textsLanguageModule } from './texts-modules.js';
@@ -446,9 +446,9 @@ async function bundleInto(root: string, model: Model, outDir: string, options: B
   const pwa = pwaHead(root);   // muten.config `pwa { }` (pwa.ts)
   if (pwa) html = html.replace('</head>', () => `  ${pwa}\n</head>`);
   // the page's Content-Security-Policy (dev-security.ts): an injected script does not run. muten.config `security { csp }`
-  const policy = cspFrom(readMutenConfig(root).security);
-  const fullPolicy = policy ? withScriptOrigins(policy, scriptOrigins(root)) : null;
-  if (fullPolicy) html = withCsp(html, fullPolicy);   // with the libraries it loads by <script>
+  // with the libraries it loads by <script>, and the plain-http API its chosen environment names (dev-security.ts)
+  const policy = buildPolicy(root, envValues(root));
+  if (policy) html = withCsp(html, policy);
   else if (policy === null && !/http-equiv=["']content-security-policy["']/i.test(html)) say('  \x1b[33m!\x1b[0m no Content-Security-Policy: add `security { csp "default" }` to muten.config (or your own policy)');
   // copy public/ (favicons, images, an app's own plain modules and their CSS) to the dist root BEFORE index.html:
   // index.html is written last, so its presence means the build is whole (a server answering a window mid-build
@@ -462,7 +462,7 @@ async function bundleInto(root: string, model: Model, outDir: string, options: B
   // every page drawn once and written out as its own HTML, painted before the app runs (prerender.ts)
   const prerenderConfig = readMutenConfig(root).prerender;
   if (options.prerender ?? prerenderConfig !== undefined) {
-    await prerender({ root, outDir, routes: model.appIr?.routes || [], config: prerenderConfig || {}, files, sheets: { href: cssHref, routes: routeSheets }, policy: fullPolicy, languages: Object.keys(model.translations || {}), say });
+    await prerender({ root, outDir, routes: model.appIr?.routes || [], config: prerenderConfig || {}, files, sheets: { href: cssHref, routes: routeSheets }, policy: policy || null, languages: Object.keys(model.translations || {}), say });
   }
 
   // app.map.json: the app graph (routes/stores/parts), the root an AI reads to know the whole app. It names every route,

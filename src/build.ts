@@ -2,7 +2,7 @@
 // Throws on any error; the CLI (bin/muten.ts) catches, formats, and exits.
 
 import { writeAppMap } from './app-map-file.js';
-import { cspFrom, withCsp, writeSecurityHeaders, scriptOrigins, withScriptOrigins } from './dev-security.js';
+import { buildPolicy, withCsp, writeSecurityHeaders } from './dev-security.js';
 import { writeFileSync, mkdirSync, rmSync, existsSync, cpSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { Fmt } from '#engine/shared/vocab.js';
@@ -12,6 +12,7 @@ import { routeEntry } from '#engine/project/map.js';
 import { load, loadAllParts, findStores } from '#engine/project/load.js';
 import { storeContext } from '#engine/project/context.js';
 import { readMutenConfig, configClasses } from '#engine/project/config.js';
+import { envValues } from '#engine/project/env.js';
 import { pruneCss, filesText, PUBLIC_CODE } from './css-prune.js';
 import { guardJs } from '#engine/compile/guard.js';
 import { bundleUses, bundleCustoms } from './use-bundle.js';
@@ -52,8 +53,7 @@ function indexHeadExtras(appRoot: string): string {
 export async function buildApp(appRoot: string, outDir = join(appRoot, 'dist'), baseUrl = ''): Promise<{ routes: string[]; outDir: string }> {
   const rel = (p: string) => relative(appRoot, p);
   const appLang = indexLang(appRoot);   // what a page without `meta { lang }` speaks
-  const configured = cspFrom(readMutenConfig(appRoot).security);
-  const csp = configured ? withScriptOrigins(configured, scriptOrigins(appRoot)) : configured;   // with the libraries it loads by <script>
+  const csp = buildPolicy(appRoot, envValues(appRoot));   // with the libraries it loads by <script> and its environment's plain-http API
   const base = baseUrl.replace(/\/+$/, ''); // app's deploy origin (from --url=) for canonical / og:url / sitemap; '' → relative
   rmSync(outDir, { recursive: true, force: true }); // wipe first so deleted pages don't leave stale routes
   // public/ goes out as it is (images, icons, robots.txt, a manifest), first, so a generated page wins a name clash.
