@@ -80,6 +80,9 @@ console.log('\n✓ kit: all passed');
   ok('a labelled page still checks clean', validate(toDoc(ir), {}).diagnostics.filter((d) => d.severity === 'error').length === 0, validate(toDoc(ir), {}).diagnostics.map((d) => d.code).join(','));
 }
 
+// ── a list loaded with refetch that has only its mock (muten test): the mock answers, as a first load does ──
+ok('refetch of a list with no source answers with its mock, whatever the parameters', /function __refetch\(name, params, sig\) \{[^]*?if \(!__SOURCES\[name\]\) \{[^}]*sig\.set\(\{ data: __fill\(name, __DATA\[name\] \?\? \[\]\), loading: false, error: null \}\); return; \}/.test(dataModule()));
+
 // ── a Select that does something once chosen: its action runs after the value is written; its prompt is words ──
 {
   const src = 'state { country = "" : text  tax = "" : text  pick = "Elige" : text }\naction picked() mutates tax, pick { tax.set(country)  pick.set("Otro") }\nPage { Select bind(country) options(CO "Colombia", MX "México") "{pick}" -> picked }';
