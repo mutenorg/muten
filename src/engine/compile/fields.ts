@@ -62,10 +62,15 @@ function select(em: Emitter, id: string, n: FlatNode, parentVar: string): void {
   em.push(`const el_${id} = document.createElement('select');`);
   em.nameField(id, p.placeholder);   // a11y: the field's accessible name is its text (a placeholder alone is not one)
   em.push(`el_${id}.className = ${JSON.stringify(em.classFor('select', p))};`);
-  if (typeof p.placeholder === 'string' && p.placeholder) em.push(`{ const o = document.createElement('option'); o.value = ''; o.textContent = ${JSON.stringify(p.placeholder)}; o.disabled = true; el_${id}.appendChild(o); }`); // non-selectable prompt while empty
+  // the prompt is the empty value: it can be chosen again (an optional field must be able to go back to none), and its
+  // words may be an interpolation (`"{t("pick")}"`), kept live like any other text
+  if (typeof p.placeholder === 'string' && p.placeholder) em.push(`{ const o = document.createElement('option'); o.value = ''; o.textContent = ${JSON.stringify(p.placeholder)}; el_${id}.appendChild(o); }`);
+  else if (typeof p.placeholder !== 'string' && p.placeholder && 'kind' in p.placeholder) em.push(`{ const o = document.createElement('option'); o.value = ''; effect(() => { o.textContent = ${em.interpConcat(p.placeholder)}; }); el_${id}.appendChild(o); }`);
   for (const opt of p.options || []) em.push(`{ const o = document.createElement('option'); o.value = ${JSON.stringify(opt)}; o.textContent = ${JSON.stringify(p.optionLabels?.[opt] ?? opt)}; el_${id}.appendChild(o); }`);
   em.push(`effect(() => { const __v = ${readJS}; if (el_${id}.value !== __v) el_${id}.value = __v; });`);
-  if (writeJS) em.push(`el_${id}.addEventListener('change', (e) => ${writeJS});`); else em.push(`el_${id}.disabled = true;`);
+  // `-> action` runs after the choice is written, so the action reads the new value (a country that picks its tax id)
+  const after = p.action ? ` ${em.logic.actionRef(p.action)}(${p.arg !== undefined ? [p.arg, ...(p.argRest || [])].map((e) => em.logic.compileExpr(e, em.scope)).join(', ') : ''});` : '';
+  if (writeJS) em.push(`el_${id}.addEventListener('change', (e) => { ${writeJS};${after} });`); else em.push(`el_${id}.disabled = true;`);
   em.genDynamics(id, p);
   em.appendEl(id, parentVar);
 }

@@ -133,8 +133,8 @@ export const PRIMITIVES: { [name: string]: Primitive } = {
     snippet: 'Textarea bind(${1:message}) "${2:Write a message…}"',
   },
   Select: {
-    string: 'placeholder', props: { bind: 'state', options: 'idents', placeholder: 'text?' }, children: false,
-    doc: 'Dropdown bound to a text state with a fixed option list: `Select bind(role) options(founder, engineer, other) "Pick a role"`. The placeholder is a non-selectable prompt shown while the value is empty.',
+    string: 'placeholder', props: { bind: 'state', options: 'idents', placeholder: 'text?', action: 'action?', arg: 'expr?' }, children: false, interp: true,
+    doc: 'Dropdown bound to a text state with a fixed option list: `Select bind(role) options(founder, engineer, other) "Pick a role"`. The placeholder is the empty value: it interpolates (`"{t("pick")}"`) and can be chosen again to go back to none. `-> action` runs after the choice is written, so the action reads the new value.',
     snippet: 'Select bind(${1:role}) options(${2:a, b, c})',
   },
   Checkbox: {

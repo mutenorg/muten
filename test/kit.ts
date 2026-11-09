@@ -80,6 +80,17 @@ console.log('\n✓ kit: all passed');
   ok('a labelled page still checks clean', validate(toDoc(ir), {}).diagnostics.filter((d) => d.severity === 'error').length === 0, validate(toDoc(ir), {}).diagnostics.map((d) => d.code).join(','));
 }
 
+// ── a Select that does something once chosen: its action runs after the value is written; its prompt is words ──
+{
+  const src = 'state { country = "" : text  tax = "" : text  pick = "Elige" : text }\naction picked() mutates tax, pick { tax.set(country)  pick.set("Otro") }\nPage { Select bind(country) options(CO "Colombia", MX "México") "{pick}" -> picked }';
+  ok('Select bind(…) -> action checks clean', codes(src).length === 0, codes(src).join());
+  const out = js(src);
+  const handler = out.match(/addEventListener\('change', \(e\) => \{([^}]*)\}\)/)?.[1] ?? '';
+  ok('the choice is written, then the action runs (it reads the new value)', /country[^;]*\.set\(e\.target\.value\)/.test(handler) && handler.indexOf('picked') > handler.indexOf('e.target.value'), handler);
+  ok('the prompt interpolates, kept live', /o\.value = ''; effect\(\(\) => \{ o\.textContent = /.test(out), out.match(/o\.value = ''[^;]*;[^;]*/)?.[0]);
+  ok('the prompt can be chosen again: none is a value an optional field goes back to', !/o\.value = ''[^}]*o\.disabled = true/.test(out));
+}
+
 // ── a row's field handed through a part to a Custom inside it (StatCard → Spark in an `each`) ──
 {
   const { load, loadAllParts } = await import('#engine/project/load.js');

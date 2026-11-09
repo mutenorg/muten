@@ -41,10 +41,10 @@ whennode   ::= "when" sp expr ws block (ws "else" sp "when" sp expr ws block)* (
 eachnode   ::= "each" sp expr sp "as" sp ident ("," ws ident)? ws block
 block      ::= "{" ws (node ws)* "}"
 linknode   ::= "Link" (sp (commonpart | "->" ws string))* (ws block)?
-actionnode ::= ("RowAction" | "Button") (sp (commonpart | actionarrow))* (ws block)?
+actionnode ::= ("Select" | "RowAction" | "Button") (sp (commonpart | actionarrow))* (ws block)?
 actionarrow ::= "->" ws dotted (ws "(" ws expr? ws ")")?
 customnode ::= "Custom" sp ident (sp modifier)*
-plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Section" | "Article" | "List" | "Details" | "Table" | "Row" | "Cell" | "Text" | "Title" | "Span" | "Image" | "Icon" | "Video" | "Audio" | "Canvas" | "File" | "SearchField" | "Password" | "Textarea" | "Select" | "Checkbox" | "Number" | "Range" | "Date" | "DataTable" | "Chart" | "Svg" | "Rect" | "Line" | "Circle" | "Path" | "Group" | "Arc" | "Form" | "slot") (sp commonpart)* (ws block)?
+plainnode  ::= ("Stack" | "Header" | "Nav" | "Sidebar" | "Footer" | "Page" | "Section" | "Article" | "List" | "Details" | "Table" | "Row" | "Cell" | "Text" | "Title" | "Span" | "Image" | "Icon" | "Video" | "Audio" | "Canvas" | "File" | "SearchField" | "Password" | "Textarea" | "Checkbox" | "Number" | "Range" | "Date" | "DataTable" | "Chart" | "Svg" | "Rect" | "Line" | "Circle" | "Path" | "Group" | "Arc" | "Form" | "slot") (sp commonpart)* (ws block)?
 commonpart ::= string | ref | level | modifier
 level      ::= "h" [1-6]
 
