@@ -29,6 +29,8 @@ const JS_OP_HINT: Record<string, string> = {
 const isWord = (char: string): boolean => isWordStart(char) || isDigit(char);
 const QUOTES = '"\'`';
 const TEMPLATE = '`';
+// what may follow a `{ … }` that is still the return type (`{ a: number }[]`, `| null`, `Promise<{ … }>`), or the body's `{`
+const TYPE_GOES_ON = [Pn.BraceL, Pn.BrackL, Pn.Pipe, Pn.Gt].join('');
 /** Whether `index` begins its line (only spaces before it): `fn` declares a function only there. */
 const atLineStart = (source: string, index: number): boolean => { let at = index - 1; while (at >= 0 && (source[at] === ' ' || source[at] === '\t')) at--; return at < 0 || source[at] === '\n'; };
 
@@ -133,19 +135,34 @@ class Lexer {
     while (isSpace(source[this.index] || '')) this.index++;
     if (source[this.index] !== Pn.ParenL) return;
     const begin = this.index;
-    let parens = 0, braces = 0, opened = false;
+    // typed: a `: T` follows the parameters, so a `{ … }` there is the type until what follows it says otherwise
+    let parens = 0, braces = 0, opened = false, paramsDone = false, typed = false;
     while (this.index < source.length) {
       const char = source[this.index];
       if (char === '/' && source[this.index + 1] === '/') { this.skipLineComment(); continue; }
       if (char === '/' && source[this.index + 1] === '*') { this.skipBlockComment(); continue; }
       if (QUOTES.includes(char)) { this.skipQuoted(char); continue; }
       if (char === Pn.ParenL) parens++;
-      else if (char === Pn.ParenR) parens--;
+      else if (char === Pn.ParenR) { parens--; if (!parens && !paramsDone) { paramsDone = true; typed = this.solidAfter(this.index + 1) === Pn.Colon; } }
       else if (char === Pn.BraceL) { braces++; if (!parens) opened = true; }
-      else if (char === Pn.BraceR) { braces--; if (opened && !braces && !parens) { this.index++; break; } }
+      else if (char === Pn.BraceR) {
+        braces--;
+        if (opened && !braces && !parens) {
+          const next = this.solidAfter(this.index + 1);
+          if (!typed || !TYPE_GOES_ON.includes(next)) { this.index++; break; }
+          if (next === Pn.BraceL) typed = false;   // the type ended: the next group is the body
+        }
+      }
       this.index++;
     }
     this.push(Tk.Raw, source.slice(begin, this.index), begin, this.index);
+  }
+
+  // the first character from `from` that is not a space ('' at the end)
+  private solidAfter(from: number): string {
+    let at = from;
+    while (at < this.source.length && isSpace(this.source[at])) at++;
+    return this.source[at] ?? '';
   }
 
   // past a '…', "…" or `…` of TypeScript (a template's ${…} may hold braces and quotes of its own)

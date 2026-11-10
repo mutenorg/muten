@@ -20,6 +20,9 @@ const beat = parse('screen home\nstate { n = 0 : number }\nevery 1m {\n  n.set(n
 ok('`every 1m { … }` is a beat with its statements', beat.timers?.length === 1 && beat.timers[0].ms === 60000 && beat.timers[0].body.length === 1, JSON.stringify(beat.timers));
 const settled = parse('screen home\nstate { q = "" : text  asked = "" : text }\nsettle q 300ms {\n  asked.set(q)\n}\nPage {\n  SearchField bind(q) "Buscar"\n}\n');
 ok('`settle q 300ms { … }` watches its value, with its time and statements', settled.settles?.length === 1 && settled.settles[0].ms === 300 && settled.settles[0].watched.name === 'q' && settled.settles[0].body.length === 1, JSON.stringify(settled.settles));
+const TYPED = 'fn quote(n: number): { total: number; rows: { name: string }[] }[] | null {\n  return n ? [{ total: n, rows: [] }] : null\n}\nfn later(): Promise<{ ok: boolean }> {\n  return Promise.resolve({ ok: true })\n}\n';
+const typed = parse('screen home\n' + TYPED + 'Page {\n  Text "{quote(1)}"\n}\n');
+ok('an object return type is the type, not the body: the body is the brace after it', typed.tsFns?.quote?.source.endsWith(': null\n}') && typed.tsFns?.later?.source.endsWith('ok: true })\n}') && typed.tree?.type === 'Page', JSON.stringify(typed.tsFns));
 ok('`fn` only declares at the start of a line (a state may be called fn)', parse('screen home\nstate { fn = 1 : number }\nPage {\n  Text "{fn}"\n}\n').state.fn?.type === 'number');
 
 const root = mkdtempSync(join(tmpdir(), 'muten-fn-'));

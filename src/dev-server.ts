@@ -160,6 +160,10 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
   let lastError = '';
   let files = new Map<string, Uint8Array>(); // url -> bytes (boot.js, route chunks, source maps), all in memory
   let cssBytes: Buffer | null = null;
+  // THE PAGE NAMES THIS BUILD'S boot.js / boot.css (`?v=`): a proxy in front of the dev server (a Cloudflare tunnel) may
+  // cache them for hours whatever `no-cache` says, and an old boot.js asks for chunks this build no longer has, so the
+  // route import fails and the app stays blank with no error (QA 25-10-2026). The HTML itself is not cached.
+  let buildId = 0;
   const rebuild = async (): Promise<void> => {
     try {
       Object.assign(model, await loadModel(root));
@@ -167,6 +171,7 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
       const next = new Map<string, Uint8Array>();
       for (const f of result.outputFiles ?? []) next.set('/' + relative(outdir, f.path).replace(/\\/g, '/'), f.contents);
       files = next;
+      buildId += 1;
       const css = await buildCss(root, model);
       cssBytes = css ? Buffer.from(css) : null;
       forgetIssues();   // the devtools' Issues read check again after this build
@@ -228,8 +233,8 @@ export async function devEsbuild(root: string, options: DevOptions = { port: 517
 
   const indexHtml = (): string => {
     let html = readIndexHtml(root, model);
-    html = html.replace(/<script\s+type="module"\s+src="\/src\/app\.muten"\s*><\/script>/, '<script type="module" src="/assets/boot.js"></script>');
-    if (cssBytes) html = html.replace('</head>', '  <link rel="stylesheet" href="/assets/boot.css">\n</head>');
+    html = html.replace(/<script\s+type="module"\s+src="\/src\/app\.muten"\s*><\/script>/, `<script type="module" src="/assets/boot.js?v=${buildId}"></script>`);
+    if (cssBytes) html = html.replace('</head>', `  <link rel="stylesheet" href="/assets/boot.css?v=${buildId}">\n</head>`);
     return html.replace('</body>', () => `  ${devClient(token)}\n</body>`);
   };
   const overlay = (): string => `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#1a1a1f;color:#f5f5f5;font:14px/1.6 ui-monospace,monospace">`

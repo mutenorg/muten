@@ -35,12 +35,14 @@ export const DRIVER_JS = `(() => {
   const labelled = (el) => { const ids = (el.getAttribute('aria-labelledby') || '').split(/\\s+/).filter(Boolean); return ids.map((id) => document.getElementById(id)?.innerText || '').join(' '); };
   const fieldNames = (el) => [...(el.labels ? [...el.labels].map((label) => label.innerText) : []), el.getAttribute('aria-label'), labelled(el), el.getAttribute('placeholder'), el.getAttribute('name')];
   // the text a person sees: the page's rendered text without what is parked off screen or shrunk to a pixel for screen
-  // readers only (a skip link, an .sr-only label)
+  // readers only (a skip link, an .sr-only label). A box of no size whose content still shows (a modal's or a menu's
+  // root, its panel position: fixed) is not hidden: only one with nothing visible inside is.
+  const showsSomething = (el) => visible(el) || [...el.querySelectorAll('*')].some(visible);
   const screenText = () => {
     if (!document.body) return '';
     let text = norm(document.body.innerText);
     for (const el of document.body.querySelectorAll('*')) {
-      if (!el.getClientRects().length || visible(el) || (el.parentElement && !visible(el.parentElement) && el.parentElement.getClientRects().length)) continue;
+      if (!el.getClientRects().length || showsSomething(el) || (el.parentElement && !visible(el.parentElement) && el.parentElement.getClientRects().length)) continue;
       const hidden = norm(el.innerText);
       if (hidden) text = norm(text.replace(hidden, ''));
     }
