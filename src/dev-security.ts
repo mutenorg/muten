@@ -173,12 +173,21 @@ export function envOrigins(values: { [key: string]: string | number | boolean } 
   return [...origins];
 }
 
-/** The policy with those origins allowed to be called (connect-src), and nothing else. */
+/** What the app's own API also serves the page: pictures and media (an upload, a post's images), read by <img>/<video>,
+ *  which connect-src does not cover. Only where the policy already names the directive; never a script. */
+const SHOWN_DIRECTIVES = ['img-src', 'media-src'];
+
+/** The policy with those origins allowed to be called (connect-src) and, the plain-http ones, shown (img-src, media-src). */
 export function withConnectOrigins(policy: string, origins: string[]): string {
   if (!policy || !origins.length) return policy;
-  return /(^|;\s*)connect-src\s/.test(policy)
+  let out = /(^|;\s*)connect-src\s/.test(policy)
     ? policy.replace(/(connect-src[^;]*)/, (found) => `${found} ${origins.join(' ')}`)
     : `${policy}; connect-src 'self' ${origins.join(' ')}`;
+  const shown = origins.filter((origin) => origin.startsWith('http:'));
+  for (const directive of SHOWN_DIRECTIVES) {
+    if (shown.length && new RegExp(`(^|;\\s*)${directive}\\s`).test(out)) out = out.replace(new RegExp(`(${directive}[^;]*)`), (found) => `${found} ${shown.join(' ')}`);
+  }
+  return out;
 }
 
 /** The policy a build ships: muten.config's, with the libraries the app loads by <script> and the plain-http origins its

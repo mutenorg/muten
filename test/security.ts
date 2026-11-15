@@ -221,6 +221,7 @@ check('https values add nothing: the policy already allows them', envOrigins({ a
 const opened = withConnectOrigins(DEFAULT_CSP, local);
 check('connect-src gains exactly those origins', /connect-src 'self' https: wss: http:\/\/localhost:4710 ws:\/\/localhost:4710 http:\/\/localhost:4730 ws:\/\/localhost:4730;/.test(opened), opened);
 check('… and nothing else changes (scripts stay shut)', opened.includes("script-src 'self';") && !/connect-src[^;]*\bhttp:(?!\/\/)/.test(opened));
+check('its pictures show too: img-src gains the plain-http origins, never a websocket', /img-src [^;]*http:\/\/localhost:4710 http:\/\/localhost:4730(;|$)/.test(opened) && !/img-src[^;]*ws:\/\//.test(opened), opened);
 check('no environment, no change', withConnectOrigins(DEFAULT_CSP, envOrigins(null)) === DEFAULT_CSP);
 check('a policy without connect-src gets one of its own', withConnectOrigins("default-src 'self'", ['http://localhost:1']) === "default-src 'self'; connect-src 'self' http://localhost:1");
 
